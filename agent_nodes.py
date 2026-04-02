@@ -13,22 +13,29 @@ from agent_state import AgentState
 def create_generation_prompt(user_request: str) -> str:
     """Creates the initial instruction prompt for the LLM."""
     return f"""
-You are an expert Google Cloud Infrastructure Architect specializing in writing enterprise-grade Terraform. Your task is to generate a complete and accurate set of Terraform files based on the user's request.
+You are a world-class Google Cloud Infrastructure Architect specializing in writing production-grade Terraform. Your task is to generate a complete and accurate set of Terraform files based on the user's request.
 
 **ABSOLUTE CRITICAL RULES - YOU MUST FOLLOW THESE:**
-1.  **NO HALLUCINATED ARGUMENTS:** Your highest priority is to only use arguments that exist in the official HashiCorp Google Provider v5.0 documentation. The `google_secret_manager_secret` resource does NOT have an argument named `automatic`. The replication policy is configured inside a `replication` block.
-2.  **JSON OUTPUT ONLY:** Your entire response MUST be a single, valid JSON object.
-3.  **File Paths are Keys:** The keys of the JSON object must be the full, relative file paths.
-4.  **HCL Code is Value:** The values must be the HCL code content.
-5.  **Directory Structure:** You MUST use the 'modules/' and 'environments/' structure.
+1.  **NO HALLUCINATED ARGUMENTS:** Your highest priority is to only use arguments that exist in the official HashiCorp Google Provider v5.0 documentation. The `google_secret_manager_secret` resource does NOT have an argument named `automatic`.
+2.  **JSON OUTPUT ONLY:** Your entire response MUST be a single, valid JSON object. Do not add any commentary or markdown.
+3.  **FILE & DIRECTORY STRUCTURE:**
+    - The keys of the JSON object must be the full, relative file paths (e.g., "modules/gcs-bucket/main.tf").
+    - The values MUST BE a plain string containing the HCL code. The value must NOT be another JSON object.
+    - You MUST use the 'modules/' directory for reusable components.
 
 ---
+**SPECIAL INSTRUCTIONS FOR GKE SERVICE MESH:**
+- If the user requests GKE with Service Mesh, you MUST follow the modern, Fleet-based approach.
+- This means the `main.tf` for the GKE module MUST contain these four resources: `google_project_service`, `google_container_cluster` (with `fleet` block), `google_gke_hub_feature`, and `google_gke_hub_feature_membership`.
+---
+
 **User Request:** "{user_request}"
+
 Begin generation now.
 """
 
 def generate_code_node(state: AgentState) -> dict:
-    """Generates the initial code and resets the iteration counter."""
+    """Generates the initial code and validates its internal structure."""
     print("--- 1. GENERATING TERRAFORM CODE ---")
     user_request = state['messages'][0].content
     prompt = create_generation_prompt(user_request)
@@ -41,32 +48,34 @@ def generate_code_node(state: AgentState) -> dict:
             raise json.JSONDecodeError("Could not find JSON object in LLM response.", json_str, 0)
         cleaned_json_str = json_str[start_index : end_index + 1]
         files_dict = json.loads(cleaned_json_str)
-        # We now also initialize the iteration count
+
+        # --- NEW: Add a structural validation step ---
+        # Ensure that every value in the dictionary is a string, not another object.
+        for file_path, content in files_dict.items():
+            if not isinstance(content, str):
+                raise TypeError(f"Invalid content for file '{file_path}': The LLM generated a JSON object instead of a code string.")
+
         return {"files_to_write": files_dict, "messages": [response], "iteration_count": 0}
-    except json.JSONDecodeError as e:
-        error_message = f"LLM response was not valid JSON. Error: {e}"
+    except (json.JSONDecodeError, TypeError) as e:
+        error_message = f"LLM response failed structural validation. Error: {e}"
+        print(f"❌ FATAL: {error_message}")
+        print("Raw LLM Output:\n", response.content)
         return {"files_to_write": {}, "messages": [ToolMessage(content=error_message, tool_call_id="json_parser")], "iteration_count": 0}
-    
+
 def fix_code_node(state: AgentState) -> dict:
-    """Takes the validation error and broken code, and asks the LLM to fix it."""
+    """Takes a validation error and attempts to fix the code."""
     print("--- ATTEMPTING TO FIX CODE ---")
     error_message = state['messages'][-1].content
     current_code_dict = state['files_to_write']
     code_as_string = json.dumps(current_code_dict, indent=2)
 
-    # Building the prompt safely by joining a list of strings
     prompt_parts = [
         "You are a Terraform debugging expert. The Terraform configuration you last generated is invalid.",
         "Your task is to fix the error and provide a fully corrected version of the complete file structure as a single JSON object.",
-        "\n**THE BROKEN CODE (JSON):**\n```json\n",
-        code_as_string,
-        "\n```\n",
-        "\n**THE `terraform validate` ERROR:**\n```\n",
-        error_message,
-        "\n```\n",
-        "\n**INSTRUCTION:**\nAnalyze the error and the broken code. The error explicitly states which argument is wrong.",
-        "Remove the incorrect argument (`automatic = true`) from the resource `google_secret_manager_secret`.",
-        "Then, return the complete, corrected code for ALL files as a single JSON object. Do not add any commentary."
+        "\n**THE BROKEN CODE (JSON):**\n```json\n", code_as_string, "\n```\n",
+        "\n**THE `terraform validate` ERROR:**\n```\n", error_message, "\n```\n",
+        "\n**INSTRUCTION:**\nAnalyze the error and the broken code. Fix the code based on the error message.",
+        "Return the complete, corrected code for ALL files as a single JSON object. Ensure all file contents are plain strings. Do not add any commentary."
     ]
     prompt = "\n".join(prompt_parts)
     
@@ -81,14 +90,18 @@ def fix_code_node(state: AgentState) -> dict:
         cleaned_json_str = json_str[start_index : end_index + 1]
         files_dict = json.loads(cleaned_json_str)
 
-        # Return the newly fixed code and increment the iteration counter
-        return {
-            "files_to_write": files_dict,
-            "iteration_count": state['iteration_count'] + 1
-        }
-    except json.JSONDecodeError:
-        return {"final_report": "Agent failed to fix the code and produced invalid JSON. Halting."}
-    
+        # --- NEW: Also apply structural validation to the fix attempt ---
+        for file_path, content in files_dict.items():
+            if not isinstance(content, str):
+                raise TypeError(f"Invalid content in FIX for file '{file_path}': The LLM generated a JSON object instead of a code string.")
+
+        return {"files_to_write": files_dict, "iteration_count": state['iteration_count'] + 1}
+    except (json.JSONDecodeError, TypeError) as e:
+        error_message = f"LLM fix response failed structural validation. Error: {e}"
+        print(f"❌ FATAL: {error_message}")
+        print("Raw LLM Output:\n", response.content)
+        return {"final_report": "Agent failed to fix the code and produced invalid structure. Halting."}
+
 def validate_code_node(state: AgentState) -> dict:
     """Validates the Terraform code within each generated module directory."""
     print("--- VALIDATING TERRAFORM CODE (MODULES) ---")
@@ -106,6 +119,7 @@ def validate_code_node(state: AgentState) -> dict:
             print(f"--- Validating Module: {module_path} ---")
             for file_path, content in files_to_write.items():
                 if os.path.dirname(file_path) == module_path:
+                    # The error happens here if 'content' is not a string
                     with open(os.path.join(temp_dir, os.path.basename(file_path)), "w", encoding='utf-8') as f:
                         f.write(content)
             
@@ -132,6 +146,7 @@ def validate_code_node(state: AgentState) -> dict:
 def file_writer_node(state: AgentState) -> dict:
     """Writes the final, validated files to disk."""
     print("--- 3. WRITING FILES TO DISK ---")
+    # This node does not need changes, as it will now only receive valid data.
     files_to_write = state.get('files_to_write')
     if not files_to_write:
         report = "File writing skipped: No files to write."
