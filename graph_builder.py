@@ -2,66 +2,62 @@
 
 from langgraph.graph import StateGraph, END
 from agent_state import AgentState
-from agent_nodes import generate_code_node, validate_code_node, file_writer_node
+from agent_nodes import generate_code_node, validate_code_node, file_writer_node, fix_code_node
+from config import config
 
-def should_continue_after_validation(state: AgentState) -> str:
+def route_after_validation(state: AgentState) -> str:
     """
-    Conditional edge that decides the next step after the validation node.
-    It inspects the last message added by the validator to decide the path.
+    Conditional edge that decides the next step after validation.
+    This creates the self-correction loop.
     """
     print("--- 4. CHECKING VALIDATION RESULT ---")
+    last_message = state['messages'][-1].content
     
-    last_message = state['messages'][-1]
-    
-    # --- THIS IS THE CRITICAL FIX ---
-    # We now adopt a strict "allow-list" approach. Only proceed if the
-    # message explicitly says the code is valid.
-    if "Terraform code is valid" in last_message.content:
+    if "Terraform code is valid" in last_message:
         print("--> Validation successful. Proceeding to write files.")
-        return "continue_to_write"
+        return "write_files"
     else:
-        # Any other message (including "Failed", "Error", or "Skipped")
-        # is now treated as a failure.
-        print("--> Validation failed or was skipped. Halting workflow.")
-        return "end_with_error"
+        print("--> Validation failed. Checking iteration count...")
+        # Check if we have exceeded the max number of retries.
+        if state.get('iteration_count', 0) >= config.MAX_ITERATIONS:
+            print(f"!! Max iterations ({config.MAX_ITERATIONS}) reached. Halting.")
+            return END
+        else:
+            # If we have retries left, route to the 'fix_code' node.
+            iteration = state.get('iteration_count', 0)
+            print(f"--> Iteration {iteration + 1}. Routing to 'fix_code' node.")
+            return "fix_code"
 
 def build_agent_graph():
-    """
-    Builds and compiles the LangGraph agent with a clear, linear workflow:
-    1. Generate Code -> 2. Validate Code -> 3. Write Files
-    """
+    """Builds and compiles the LangGraph agent with a self-correction loop."""
     workflow = StateGraph(AgentState)
 
-    # --- Add the nodes to the graph ---
-    # Each node corresponds to a function in agent_nodes.py
+    # Add all the nodes to the graph
     workflow.add_node("generate", generate_code_node)
     workflow.add_node("validate", validate_code_node)
+    workflow.add_node("fix_code", fix_code_node)
     workflow.add_node("write_files", file_writer_node)
 
-    # --- Define the workflow edges (the path the agent takes) ---
-
-    # 1. The graph starts at the 'generate' node.
+    # Define the graph's edges and structure
     workflow.set_entry_point("generate")
-
-    # 2. After 'generate', it always goes to 'validate'.
     workflow.add_edge("generate", "validate")
+    workflow.add_edge("write_files", END)
 
-    # 3. After 'validate', we use our conditional edge to decide what to do next.
+    # This is the core of the loop.
+    # After the 'fix_code' node runs, it goes back to 'validate' to check the new code.
+    workflow.add_edge("fix_code", "validate")
+
+    # The conditional router after validation decides where to go next.
     workflow.add_conditional_edges(
-        "validate",  # The source node
-        should_continue_after_validation,  # The function that decides the path
+        "validate",
+        route_after_validation,
         {
-            # If the function returns "continue_to_write", move to the 'write_files' node.
-            "continue_to_write": "write_files",
-            # If the function returns "end_with_error", terminate the graph.
-            "end_with_error": END
+            "write_files": "write_files",
+            "fix_code": "fix_code",
+            END: END
         }
     )
 
-    # 4. After 'write_files' successfully completes, the graph ends.
-    workflow.add_edge("write_files", END)
-
-    # Compile the workflow into a runnable application.
     app = workflow.compile()
-    print("\n--- Agent Graph Compiled Successfully ---\n")
+    print("\n--- Self-Correcting Agent Graph Compiled Successfully ---\n")
     return app
