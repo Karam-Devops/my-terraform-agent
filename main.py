@@ -1,56 +1,68 @@
 # main.py
 
 import os
-from config import GCP_PROJECT_ID, MAX_ITERATIONS
+from langchain_core.messages import HumanMessage
+from config import config  # Import the new, unified config object
 from graph_builder import build_agent_graph
 
 def main():
-    """The main function to run the Terraform agent."""
+    """
+    The main entrypoint for running the Terraform IaC Agent.
+    """
     
-    # Check for GCP Project ID configuration
-    if not GCP_PROJECT_ID or GCP_PROJECT_ID == "your-gcp-project-id":
-        print("❌ ERROR: Please set your GCP_PROJECT_ID in config.py before running.")
+    # --- 1. Configuration and Sanity Checks ---
+    print("--- Terraform IaC Agent Initializing ---")
+    if "your-gcp-project-id" in config.GCP_PROJECT_ID:
+        print(f"❌ ERROR: Please set your GCP_PROJECT_ID in the config.py file.")
         return
-    os.environ["GCLOUD_PROJECT"] = GCP_PROJECT_ID
+    
+    # This sets an environment variable that can be useful for other Google Cloud libraries.
+    os.environ["GCLOUD_PROJECT"] = config.GCP_PROJECT_ID
+    print(f"✅ GCP Project configured: {config.GCP_PROJECT_ID}")
 
-    # Get user input
-    user_request = input("▶ Please enter the GCP infrastructure you want to build: ")
+    # --- 2. Get User Input ---
+    print("\nTell me what Google Cloud infrastructure you want to build.")
+    print("Example: 'A regional GCS bucket with versioning enabled in us-central1'")
+    user_request = input("▶ Your request: ")
     if not user_request:
         print("No input provided. Exiting.")
         return
         
-    # Build the agent graph
+    # --- 3. Build the Agent Graph ---
+    # This compiles all our nodes and edges into a runnable application.
     app = build_agent_graph()
 
-    # Define the initial state for the agent run
+    # --- 4. Define the Initial State ---
+    # This is the new, correct way to start the graph.
+    # The state is a dictionary where the 'messages' key contains a list
+    # with the first HumanMessage from the user.
     initial_state = {
-        "user_prompt": user_request,
-        "terraform_files": {},
-        "max_iterations": MAX_ITERATIONS,
+        "messages": [HumanMessage(content=user_request)]
     }
 
-    print("\n🚀 Starting Terraform Agent...")
-    print("-" * 30)
+    # --- 5. Invoke the Agent ---
+    print("\n🚀 Invoking agent... generating, validating, and writing files.")
+    print("-" * 50)
 
-    # Invoke the agent graph
+    # The `app.invoke()` method runs the agent from the entry point to an end point.
     final_state = app.invoke(initial_state)
 
-    print("-" * 30)
-    print("🏁 Agent Finished!")
-    print("-" * 30)
+    print("-" * 50)
+    print("🏁 Agent run complete!")
     
-    # Display the final results
-    if not final_state['validation_error']:
-        print("✅ Final Validated Terraform Module:")
-        for filename, content in final_state['terraform_files'].items():
-            print("=" * 30)
-            print(f"📄 {filename}")
-            print("=" * 30)
-            print(content)
+    # --- 6. Display Final Report ---
+    # We no longer print the code. Instead, we print the final report generated
+    # by the file_writer_node, which tells us if the files were created.
+    if final_state and final_state.get("final_report"):
+        print(f"\n✅ Result: {final_state['final_report']}")
+        print(f"   Please check the '{config.OUTPUT_DIR}' directory to see your generated files.")
     else:
-        print("❌ Agent failed to produce a valid module.")
-        print("=" * 30)
-        print(f"Final Error:\n{final_state['validation_error']}")
+        print("\n❌ Agent failed to complete the task.")
+        print("   Here is the final message history for debugging:")
+        if final_state and final_state.get('messages'):
+             # If something went wrong, the error will be in the last message.
+             last_message = final_state['messages'][-1]
+             print(f"  - [{last_message.type}]: {last_message.content}")
 
 if __name__ == "__main__":
     main()
