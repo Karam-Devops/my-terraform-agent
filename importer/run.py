@@ -1,5 +1,15 @@
 # importer/run.py
 import os
+# --- THIS IS THE DEFINITIVE FIX ---
+# This code block ensures that no matter where the script is run from,
+# its "Current Working Directory" is always the main project folder.
+# This solves all file creation and relative path issues.
+project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
+os.chdir(project_root)
+print(f"--- Ensuring working directory is set to: {os.getcwd()} ---")
+# --- END OF FIX ---
+
+# Now that the context is correct, we can use clean relative imports.
 from . import config, gcp_client, terraform_client, hcl_generator
 
 def _present_selection_menu(resources):
