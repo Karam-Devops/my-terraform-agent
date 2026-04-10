@@ -2,8 +2,8 @@
 
 import os
 from langchain_core.messages import HumanMessage
-from config import config  # Import the unified config object
-from graph_builder import build_agent_graph
+from .config import config  # Import the unified config object
+from .graph_builder import build_agent_graph
 
 def main():
     """

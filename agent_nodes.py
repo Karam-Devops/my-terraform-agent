@@ -7,9 +7,9 @@ import shutil
 import time
 from langchain_core.messages import HumanMessage, ToolMessage
 
-from llm_provider import llm
-from config import config
-from agent_state import AgentState
+from .llm_provider import llm
+from .config import config
+from .agent_state import AgentState
 
 def create_generation_prompt(user_request: str) -> str:
     """Creates the initial instruction prompt for the LLM."""

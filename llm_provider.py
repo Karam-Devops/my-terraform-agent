@@ -2,7 +2,7 @@
 
 import vertexai
 from langchain_google_vertexai import ChatVertexAI
-from config import config
+from .config import config
 
 # --- 1. Initialize Vertex AI SDK (Best Practice) ---
 print("--- Initializing Vertex AI SDK ---")

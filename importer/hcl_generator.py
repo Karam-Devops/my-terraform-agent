@@ -31,7 +31,7 @@ def generate_hcl_from_json(resource_json_str, tf_type, hcl_name):
     
     try:
         # Pass the detailed prompt to your existing LLM provider
-        generated_hcl = llm_provider.invoke_model(prompt)
+        generated_hcl = llm_provider.get_llm_client(prompt)
 
         if generated_hcl:
             # Clean up common LLM artifacts like markdown fences
