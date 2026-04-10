@@ -4,6 +4,7 @@ import os
 import subprocess
 import json
 import shutil
+import time
 from langchain_core.messages import HumanMessage, ToolMessage
 
 from llm_provider import llm
@@ -138,8 +139,11 @@ def validate_code_node(state: AgentState) -> dict:
                 return {"messages": [ToolMessage(content=error, tool_call_id="validator")]}
         
         finally:
+        # --- THIS IS THE CRITICAL CHANGE ---
+        # Instead of shutil.rmtree(), use the new resilient function.
             if os.path.exists(temp_dir):
-                shutil.rmtree(temp_dir)
+                print(f"   Cleaning up temporary directory...")
+                force_delete_directory(temp_dir)
 
     return {"messages": [ToolMessage(content="Terraform code is valid.", tool_call_id="validator")]}
 
@@ -166,3 +170,32 @@ def file_writer_node(state: AgentState) -> dict:
     iteration_msg = f"after {state.get('iteration_count', 0)} correction(s)" if state.get('iteration_count', 0) > 0 else "without correction"
     report = f"Success! Wrote {len(files_to_write)} files to '{base_dir}' {iteration_msg}."
     return {"final_report": report}
+
+def force_delete_directory(path: str, max_retries: int = 5):
+    """
+    Robustly deletes a directory, retrying on Windows PermissionError.
+    This is necessary to handle race conditions with Terraform file locks.
+    """
+    def on_rm_error(func, path, exc_info):
+        """Error handler for shutil.rmtree."""
+        # Check if the error is a PermissionError, typical of file locks
+        if issubclass(exc_info[0], PermissionError):
+            print(f"   [!] File lock detected on {path}. Retrying...")
+        else:
+            raise # Re-raise other errors
+
+    for i in range(max_retries):
+        try:
+            shutil.rmtree(path, onerror=on_rm_error)
+            # If we get here, the deletion was successful
+            print(f"   [✓] Successfully deleted temporary directory: {path}")
+            return
+        except PermissionError:
+            wait_time = 0.1 * (i + 1) # Wait a bit longer each time
+            print(f"   [!] Deletion failed on attempt {i+1}. Waiting {wait_time:.2f}s...")
+            time.sleep(wait_time)
+        except Exception as e:
+            print(f"❌ An unexpected error occurred during directory cleanup: {e}")
+            break # Stop on other errors like FileNotFoundError
+
+    print(f"❌ FATAL: Could not delete directory '{path}' after {max_retries} attempts.")

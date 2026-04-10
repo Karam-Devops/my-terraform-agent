@@ -46,12 +46,30 @@ def main():
         "messages": [HumanMessage(content=user_request)]
     }
 
-    # --- 5. Invoke the Agent ---
+    # --- 5. Invoke the Agent (MODIFIED FOR DEBUGGING) ---
+    # The original 'app.invoke' call is now wrapped in a try...except block
+    # to add debugging prints and catch any errors during the agent's run.
     print("\n🚀 Invoking agent... generating, validating, and writing files.")
     print("-" * 50)
+    
+    try:
+        print(">>> [DEBUG] About to call app.invoke(). The agent is now running...")
+        
+        final_state = app.invoke(initial_state)
 
-    final_state = app.invoke(initial_state)
+        print(">>> [DEBUG] app.invoke() has completed successfully.")
 
+    except Exception as e:
+        print(f"❌ [DEBUG] A CRITICAL ERROR occurred during the agent's run (app.invoke): {e}")
+        # Create a minimal final_state so the script can finish gracefully.
+        final_state = {
+            "messages": [
+                HumanMessage(content=user_request),
+                HumanMessage(content=f"AGENT CRASHED with error: {e}")
+            ],
+            "final_report": None # Ensure final_report is None on error
+        }
+        
     print("-" * 50)
     print("🏁 Agent run complete!")
     
@@ -60,11 +78,13 @@ def main():
         print(f"\n✅ Result: {final_state['final_report']}")
         print(f"   Please check the '{config.OUTPUT_DIR}' directory to see your generated files.")
     else:
-        print("\n❌ Agent failed to complete the task.")
+        print("\n❌ Agent failed to complete the task or an error occurred.")
         if final_state and final_state.get('messages'):
-             last_message = final_state['messages'][-1]
-             print("   Here is the final message history for debugging:")
-             print(f"  - [{last_message.type}]: {last_message.content}")
+             # Safely access the last message
+            if final_state['messages']:
+                last_message = final_state['messages'][-1]
+                print("   Here is the final message history for debugging:")
+                print(f"   - [{last_message.type}]: {last_message.content}")
 
 if __name__ == "__main__":
     main()
