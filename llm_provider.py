@@ -38,3 +38,21 @@ def get_llm_client():
     Returns the pre-initialized, singleton LLM client.
     """
     return llm
+
+# Add this new function at the end of llm_provider.py
+
+# --- 3. Create a Second Client for Raw Text Generation ---
+print(f"--- Creating Text LLM Client for model: {config.GEMINI_MODEL} ---")
+llm_text = ChatVertexAI(
+    model_name=config.GEMINI_MODEL,
+    temperature=0.05, # A very slight increase in temperature can help with code gen
+    # NOTE: We are NOT specifying a response_format. This allows raw text output.
+)
+print("Text LLM Client created successfully.")
+
+
+def get_llm_text_client():
+    """
+    Returns a pre-initialized LLM client configured for raw text generation.
+    """
+    return llm_text

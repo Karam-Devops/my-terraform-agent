@@ -4,6 +4,7 @@
 # Use raw strings (r"...") for Windows paths.
 TERRAFORM_PATH = r"C:\Terraform\terraform.exe"
 GCLOUD_CMD_PATH = r"C:\Program Files (x86)\Google\Cloud SDK\google-cloud-sdk\bin\gcloud.cmd"
+MAX_LLM_RETRIES = 5
 
 # --- Mappings ---
 

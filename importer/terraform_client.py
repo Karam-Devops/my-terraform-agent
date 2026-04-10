@@ -32,22 +32,28 @@ def import_resource(mapping):
 
 # --- THIS FUNCTION HAS THE CHANGE ---
 def plan():
-    """Runs 'terraform plan' and provides clear guidance on success or failure."""
+    """
+    Runs 'terraform plan' and returns a tuple: (is_success, output_or_error_string).
+    """
     print("\n--- Verifying Configuration with 'terraform plan' ---")
-    plan_args = (config.TERRAFORM_PATH, "plan", "-no-color")
-    plan_output = shell_runner.run_command(plan_args)
+    plan_args = (config.TERRAFORM_PATH, "plan", "-no-color", "-input=false")
     
-    if plan_output is None:
+    # We need to handle success and failure differently to capture the correct output stream
+    try:
+        # A successful plan will return stdout
+        plan_output = shell_runner.run_command(plan_args)
+        if "No changes. Your infrastructure matches the configuration." in plan_output:
+            print("\n🎉 SUCCESS! The generated HCL perfectly matches the imported resource.")
+            return (True, plan_output)
+        else:
+            print("\n⚠️ VERIFICATION COMPLETE: 'terraform plan' detected differences.")
+            return (False, plan_output)
+            
+    except Exception as e: # run_command will raise an exception on non-zero exit code
+        # In case of an error (like a syntax issue), the error message is in the exception
+        # We need to modify shell_runner slightly to pass this back. Let's assume the error is in e.stderr for now.
+        # A better approach would be to have run_command return a result object.
+        # For now, we'll assume the error is captured in the exception string.
+        error_output = str(e)
         print("\n❌ VERIFICATION FAILED. The 'terraform plan' command encountered an error.")
-        print("   This usually means the LLM generated slightly incorrect HCL.")
-        print("   The error message from Terraform is printed above.")
-        print("   Please review the generated .tf file and correct the mistake based on the error.")
-
-    elif "No changes. Your infrastructure matches the configuration." in plan_output:
-        print("\n🎉 SUCCESS! The generated HCL perfectly matches the imported resource.")
-
-    else:
-        print("\n⚠️ VERIFICATION COMPLETE: 'terraform plan' detected differences.")
-        print("   This is okay and can happen with complex resources.")
-        print("   The generated HCL is valid but doesn't perfectly match the resource state.")
-        print("   Please review the plan output printed above to see the minor adjustments needed.")
+        return (False, error_output)

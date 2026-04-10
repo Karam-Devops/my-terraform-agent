@@ -1,68 +1,58 @@
 # importer/hcl_generator.py
 
-import json
 from .. import llm_provider
 
-def generate_hcl_from_json(resource_json_str, tf_type, hcl_name):
+def generate_hcl_from_json(resource_json_str, tf_type, hcl_name, attempt, previous_error=None):
     """
-    Constructs a highly specific "one-shot" prompt with an example to guide the LLM,
-    then generates and cleans the HCL.
+    Generates raw HCL using a dedicated text client and a simplified, direct prompt.
     """
-    print("\n🤖 Calling LLM with an advanced one-shot example prompt...")
-    
-    # --- THIS IS THE MOST ADVANCED PROMPT WITH A CONCRETE EXAMPLE ---
-    prompt = (
-        "You are a world-class Google Cloud and Terraform engineer. Your primary skill is converting a resource's JSON representation into perfect, schema-compliant HCL. "
-        "Your task is to generate a Terraform HCL resource block.\n\n"
-        f"The Terraform resource type is '{tf_type}' and the name must be '{hcl_name}'.\n\n"
-        "--- CRITICAL RULES & EXAMPLES ---\n"
-        "1.  You MUST translate nested JSON objects into proper HCL blocks. Do not flatten them into simple arguments. This is the most common and critical error to avoid.\n\n"
-        "    **EXAMPLE:**\n"
-        "    - GIVEN the JSON snippet: `\"softDeletePolicy\": {\"retentionDuration\": \"604800s\"}`\n"
-        "    - **INCORRECT HCL:** `retention_duration = \"604800s\"`\n"
-        "    - **CORRECT HCL:** `soft_delete_policy { retention_duration_seconds = 604800 }`\n"
-        "    Follow this correct pattern for all nested objects.\n\n"
-        "2.  The final output MUST be a valid JSON object, containing a single key named 'hcl_code', where the value is the complete HCL code as a string.\n"
-        "3.  Do not include comments, markdown, provider blocks, or any other explanatory text in the final HCL code string.\n\n"
-        "--- TASK ---\n"
-        "Now, perform this conversion for the following JSON configuration:\n"
-        "```json\n"
-        f"{resource_json_str}\n"
-        "```"
-    )
+    print(f"\n🤖 Calling Text-Generation LLM (Attempt {attempt} of 5)...")
+
+    if previous_error:
+        # --- CORRECTION PROMPT (TEXT-ONLY) ---
+        prompt = (
+            "You are a Terraform expert correcting a previous error. The last attempt failed with this error:\n"
+            f"--- ERROR ---\n{previous_error}\n--- END ERROR ---\n\n"
+            "Your task is to regenerate the HCL code, fixing the error. "
+            "Your ONLY output must be the raw HCL `resource` block. Do not add any other text.\n\n"
+            "Original JSON Configuration:\n"
+            "```json\n"
+            f"{resource_json_str}\n"
+            "```"
+        )
+    else:
+        # --- INITIAL PROMPT (TEXT-ONLY) ---
+        prompt = (
+            "You are a silent Terraform code generator. Your ONLY job is to convert the provided JSON into a single, valid HCL `resource` block. "
+            f"The resource type is '{tf_type}' and the name must be '{hcl_name}'.\n\n"
+            "CRITICAL: Do not output any other text, comments, markdown, or explanations. Only the raw HCL code block.\n\n"
+            "JSON Configuration:\n"
+            "```json\n"
+            f"{resource_json_str}\n"
+            "```"
+        )
 
     try:
-        print("   - Getting shared LLM client...")
-        llm_client = llm_provider.get_llm_client()
+        # --- THIS IS THE CORRECTED LOGIC ---
+        
+        # 1. Get the NEW client that is configured for text output.
+        print("   - Getting Text LLM client...")
+        llm_client = llm_provider.get_llm_text_client() # Use the new function
 
+        # 2. Invoke the client. The result's content IS the HCL code.
         print("   - Sending prompt to LangChain client...")
         response = llm_client.invoke(prompt)
+        generated_hcl = response.content
 
-        raw_response_str = response.content
-        print("   - Received response from LLM.")
-        
-        print("   - Cleaning raw response string...")
-        cleaned_json_str = raw_response_str.strip()
-        if cleaned_json_str.startswith("```json"):
-            cleaned_json_str = cleaned_json_str[7:].strip()
-        if cleaned_json_str.endswith("```"):
-            cleaned_json_str = cleaned_json_str[:-3].strip()
-
-        print("   - Parsing cleaned JSON string...")
-        response_data = json.loads(cleaned_json_str)
-        generated_hcl = response_data.get("hcl_code")
-        
-        if generated_hcl:
-            print("   ✅ HCL generation successful.")
-            return generated_hcl.strip()
+        if generated_hcl and "resource" in generated_hcl:
+            # Clean up potential markdown fences, which can still appear
+            cleaned_hcl = generated_hcl.strip().replace("```hcl", "").replace("```", "").strip()
+            print("   ✅ Raw HCL generation successful.")
+            return cleaned_hcl
         else:
-            print("   ❌ LLM JSON response was missing the 'hcl_code' key.")
+            print("   ❌ LLM returned an empty or invalid response (did not contain 'resource').")
             return None
 
-    except json.JSONDecodeError as e:
-        print(f"   ❌ After cleaning, the response was still not valid JSON. Error: {e}")
-        print(f"   [DEBUG] The string we tried to parse was: '{cleaned_json_str}'")
-        return None
     except Exception as e:
-        print(f"   ❌ An unhandled error occurred during the LLM process: {e}")
+        print(f"   ❌ An error occurred during the LLM process: {e}")
         return None
