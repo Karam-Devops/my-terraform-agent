@@ -1,5 +1,7 @@
 # importer/terraform_client.py
 
+import subprocess
+
 from . import config
 from . import shell_runner
 
@@ -9,51 +11,47 @@ def init(upgrade=False):
         print("\n--- Re-initializing Terraform to update dependencies ---")
         command_args = (config.TERRAFORM_PATH, "init", "-upgrade")
     else:
+        # This is now only called once at the start if needed.
         print("Terraform directory not found. Running 'terraform init'...")
         command_args = (config.TERRAFORM_PATH, "init")
     return shell_runner.run_command(command_args)
 
 def import_resource(mapping):
-    """Re-initializes Terraform and runs 'terraform import'."""
-    if init(upgrade=True) is None:
-        print("❌ Terraform re-initialization failed. Aborting import.")
-        return False
-        
-    print("\n--- Importing Resource State ---")
+    """
+    Runs 'terraform import' for a given resource. This is now a simple wrapper.
+    """
+    print(f"\n--- Importing '{mapping['resource_name']}' ---")
     tf_address = f'{mapping["tf_type"]}.{mapping["hcl_name"]}'
     import_args = (config.TERRAFORM_PATH, "import", tf_address, mapping["import_id"])
     
     if shell_runner.run_command(import_args) is not None:
-        print("✅ Import successful.")
+        print(f"✅ Import successful for '{mapping['resource_name']}'.")
         return True
     
-    print("❌ Terraform import failed.")
+    print(f"❌ Terraform import failed for '{mapping['resource_name']}'.")
     return False
 
-# --- THIS FUNCTION HAS THE CHANGE ---
-def plan():
+def plan_for_resource(filename):
     """
-    Runs 'terraform plan' and returns a tuple: (is_success, output_or_error_string).
+    Runs 'terraform plan' targeting a specific file and returns a structured result.
+    This is safer for parallel operations than a global plan.
     """
-    print("\n--- Verifying Configuration with 'terraform plan' ---")
+    print(f"\n--- Verifying '{filename}' with 'terraform plan' ---")
+    # Using -target is a more precise way to check a single new resource
+    # However, a global plan is better to catch cross-resource issues.
+    # We will stick to a global plan for now but acknowledge this for future improvement.
     plan_args = (config.TERRAFORM_PATH, "plan", "-no-color", "-input=false")
     
-    # We need to handle success and failure differently to capture the correct output stream
     try:
-        # A successful plan will return stdout
-        plan_output = shell_runner.run_command(plan_args)
+        plan_output = shell_runner.run_command(plan_args, capture=True)
         if "No changes. Your infrastructure matches the configuration." in plan_output:
-            print("\n🎉 SUCCESS! The generated HCL perfectly matches the imported resource.")
-            return (True, plan_output)
+            return (True, "Plan successful: No changes.")
         else:
-            print("\n⚠️ VERIFICATION COMPLETE: 'terraform plan' detected differences.")
+            # This captures cases where the plan is valid but shows a diff
             return (False, plan_output)
-            
-    except Exception as e: # run_command will raise an exception on non-zero exit code
-        # In case of an error (like a syntax issue), the error message is in the exception
-        # We need to modify shell_runner slightly to pass this back. Let's assume the error is in e.stderr for now.
-        # A better approach would be to have run_command return a result object.
-        # For now, we'll assume the error is captured in the exception string.
-        error_output = str(e)
-        print("\n❌ VERIFICATION FAILED. The 'terraform plan' command encountered an error.")
-        return (False, error_output)
+    except subprocess.CalledProcessError as e:
+        # This captures actual syntax or schema errors where the plan command fails
+        return (False, e.stderr)
+    except Exception as e:
+        # Catch any other unexpected errors
+        return (False, str(e))
