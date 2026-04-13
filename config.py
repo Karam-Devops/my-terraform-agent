@@ -30,7 +30,7 @@ class Config:
     # --- Agent Behavior Settings ---
 
     # A hard limit on the number of loops to prevent infinite runs and unexpected costs.
-    MAX_ITERATIONS: int = 5
+    MAX_ITERATIONS: int = 10
 
     # NEW: The root directory where all generated Terraform files will be saved.
     # Why: Centralizing this path here allows us to easily reference it in any
