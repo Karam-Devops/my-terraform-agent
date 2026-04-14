@@ -37,28 +37,72 @@ ASSET_TO_TERRAFORM_MAP = {
     "sqladmin.googleapis.com/Instance": "google_sql_database_instance",
 }
 
+# This dictionary now contains the definitive information for describe commands AND import ID formats.
 TF_TYPE_TO_GCLOUD_INFO = {
     # GCE
-    "google_compute_instance": {"describe_command": "compute instances describe", "zone_flag": "--zone"},
-    "google_compute_disk": {"describe_command": "compute disks describe", "zone_flag": "--zone"},
-    "google_compute_firewall": {"describe_command": "compute firewall-rules describe"},
-    "google_compute_address": {"describe_command": "compute addresses describe", "region_flag": "--region"},
-    "google_compute_network": {"describe_command": "compute networks describe"},
-    "google_compute_subnetwork": {"describe_command": "compute networks subnets describe", "region_flag": "--region"},
-    "google_compute_instance_template": {"describe_command": "compute instance-templates describe"},
+    "google_compute_instance": {
+        "describe_command": "compute instances describe", 
+        "zone_flag": "--zone",
+        "import_id_format": "projects/{project}/zones/{zone}/instances/{name}" # NEW
+    },
+    "google_compute_disk": {
+        "describe_command": "compute disks describe", 
+        "zone_flag": "--zone",
+        "import_id_format": "projects/{project}/zones/{zone}/disks/{name}" # NEW
+    },
+    "google_compute_firewall": {
+        "describe_command": "compute firewall-rules describe",
+        "import_id_format": "{project}/{name}" # NEW
+    },
+    "google_compute_address": {
+        "describe_command": "compute addresses describe", 
+        "region_flag": "--region",
+        "import_id_format": "{project}/{region}/{name}" # NEW
+    },
+    "google_compute_network": {
+        "describe_command": "compute networks describe",
+        "import_id_format": "{project}/{name}" # NEW
+    },
+    "google_compute_subnetwork": {
+        "describe_command": "compute networks subnets describe", 
+        "region_flag": "--region",
+        "import_id_format": "{project}/{region}/{name}" # NEW
+    },
+    "google_compute_instance_template": {
+        "describe_command": "compute instance-templates describe",
+        "import_id_format": "{project}/{name}" # NEW
+    },
 
     # GKE
-    "google_container_cluster": {"describe_command": "container clusters describe", "zone_flag": "--zone"},
-    "google_container_node_pool": {"describe_command": "container node-pools describe", "cluster_flag": "--cluster", "zone_flag": "--zone"},
+    "google_container_cluster": {
+        "describe_command": "container clusters describe", 
+        "zone_flag": "--zone",
+        "import_id_format": "projects/{project}/locations/{zone}/clusters/{name}" # NEW
+    },
+    "google_container_node_pool": {
+        "describe_command": "container node-pools describe", 
+        "cluster_flag": "--cluster", "zone_flag": "--zone",
+        "import_id_format": "projects/{project}/locations/{zone}/clusters/{cluster}/nodePools/{name}" # NEW
+    },
     
     # IAM
-    "google_service_account": {"describe_command": "iam service-accounts describe"},
+    "google_service_account": {
+        "describe_command": "iam service-accounts describe",
+        "import_id_format": "{project}/{email}" # NEW - Uses email, not name
+    },
 
     # Cloud Storage
-    "google_storage_bucket": {"describe_command": "storage buckets describe", "name_format": "gs://{name}"},
+    "google_storage_bucket": {
+        "describe_command": "storage buckets describe", 
+        "name_format": "gs://{name}",
+        "import_id_format": "{project}/{name}" # NEW
+    },
 
     # Cloud SQL
-    "google_sql_database_instance": {"describe_command": "sql instances describe"}
+    "google_sql_database_instance": {
+        "describe_command": "sql instances describe",
+        "import_id_format": "{project}/{name}" # NEW
+    }
 }
 
 # --- NEW AND FINAL: GitHub Documentation Path Mapping ---
