@@ -17,27 +17,23 @@ def load_heuristics():
         return {}
 
 def generate_error_signature(error_message, resource_type):
-    """
-    Creates a simplified, searchable signature from a complex Terraform error.
-    """
+    """Creates a simplified, searchable signature from a complex Terraform error."""
     if not error_message:
         return f"{resource_type}:unknown_error"
 
-    # --- THE FIX: Simpler, more robust Regex that ignores newlines ---
-    # Look for "Blocks of type "X" are not expected here"
+    # Pattern for: "Unsupported block type... Blocks of type "X"
     block_match = re.search(r'Blocks of type "([^"]+)" are not expected here', error_message, re.IGNORECASE)
     if block_match:
         block_name = block_match.group(1)
         print(f"🧠 HEURISTICS: Identified error signature for unsupported block: '{block_name}'")
         return block_name 
 
-    # Look for "An argument named "X" is not expected here"
+    # Pattern for: 'An argument named "X" is not expected here.'
     arg_match = re.search(r'An argument named "([^"]+)" is not expected here', error_message, re.IGNORECASE)
     if arg_match:
         arg_name = arg_match.group(1)
         print(f"🧠 HEURISTICS: Identified error signature for unsupported argument: '{arg_name}'")
         return arg_name
-    # --- END OF FIX ---
 
     print("🧠 HEURISTICS: Could not identify a specific error pattern. Using generic signature.")
     return "generic_error"
@@ -52,9 +48,15 @@ def get_heuristic_for_error(resource_type, error_signature):
         return retrieved_solution
     return None
 
-def save_heuristic(resource_type, error_signature, correct_hcl_snippet):
+def save_heuristic(resource_type, error_signature, correct_snippet):
     """Saves a new, human-verified heuristic to the knowledge base."""
-    if not error_signature or error_signature == "generic_error":
+    # Ensure we only check string methods on actual strings
+    if isinstance(correct_snippet, str):
+        is_omit_rule = correct_snippet.strip().upper() == "OMIT"
+    else:
+        is_omit_rule = False
+
+    if not error_signature or (error_signature == "generic_error" and not is_omit_rule):
         print("🧠 HEURISTICS: Not saving solution for a generic or unknown error pattern.")
         return
 
@@ -64,7 +66,7 @@ def save_heuristic(resource_type, error_signature, correct_hcl_snippet):
     if resource_type not in heuristics:
         heuristics[resource_type] = {}
         
-    heuristics[resource_type][error_signature] = correct_hcl_snippet
+    heuristics[resource_type][error_signature] = correct_snippet
     
     try:
         with open(HEURISTICS_FILE, "w", encoding="utf-8") as f:
