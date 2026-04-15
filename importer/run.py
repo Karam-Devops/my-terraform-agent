@@ -69,8 +69,9 @@ def _scrub_hcl(hcl_str, keys_to_omit):
 def get_multiline_input():
     print("\nPaste your correct HCL snippet below.")
     print("OR use a Surgical Command:")
-    print("  OMIT:field_name   (For fields causing syntax errors)")
-    print("  IGNORE:field_name (For computed fields causing replacement diffs)")
+    print("  OMIT:field_name    (For fields causing syntax errors)")
+    print("  IGNORE:field_name  (For computed fields causing replacement diffs)")
+    print("  SNIPPET:field_name (To save the following snippet under a specific key)")
     print("On a new line, press Ctrl+Z and then Enter (Windows) or Ctrl+D (Unix) to submit.")
     print("---------------------------------------------------------------------------------")
     lines = sys.stdin.readlines()
@@ -228,6 +229,7 @@ def _attempt_correction(mapping, resource_json, previous_error, attempt_num, sch
     return (mapping, plan_output, is_success)
 
 def run_workflow():
+    """Main function with RAG-powered, parallel bulk import and self-correction."""
     print("🚀 Starting Google Cloud to Terraform Import Workflow...")
     if not os.path.isdir(".terraform"):
         if terraform_client.init() is None: return
@@ -293,6 +295,7 @@ def run_workflow():
             mapping = failed_item['mapping']
             current_error = failed_item['data']['error']
             resource_json = failed_item['data']['json']
+            ai_attempt_count = 0
             
             while True:
                 clean_error = _clean_terraform_output(current_error)
@@ -312,55 +315,122 @@ def run_workflow():
                     user_input = get_multiline_input().strip()
                     if not user_input: continue
                     
-                    if user_input.upper().startswith("OMIT:") or user_input.upper().startswith("IGNORE:"):
+                    correct_snippet = user_input
+                    is_surgical_command = False
+                    
+                    # --- NEW LOGIC: Handling SNIPPET:fieldname ---
+                    if correct_snippet.upper().startswith("SNIPPET:"):
                         try:
-                            cmd, field = user_input.split(":", 1)
-                            error_trigger_key = field.strip()
-                            user_input = cmd.upper()
-                        except ValueError:
-                            print("❌ Invalid syntax. Use OMIT:field or IGNORE:field"); continue
-                            
-                    heuristics.save_heuristic(mapping['tf_type'], error_trigger_key, user_input)
-                    
-                    mapping, plan_output, is_success = _attempt_correction(
-                        mapping, resource_json, clean_error, 2, schemas.get(mapping['tf_type']), 
-                        heuristics.load_heuristics(), manual_snippet=user_input, manual_trigger_key=error_trigger_key
-                    )
-                    
-                    if is_success:
-                        print(f"✅ Correction SUCCEEDED for '{mapping['resource_name']}'!")
-                        successful_imports.append(failed_item)
-                        failed_imports.remove(failed_item)
-                        break
-                    else:
-                        print("❌ Correction failed. Returning to menu.")
-                        failed_item['data']['error'] = plan_output
+                            lines = correct_snippet.split('\n', 1)
+                            command_line = lines[0]
+                            actual_hcl_code = lines[1].strip() if len(lines) > 1 else ""
+                            command, field_name = command_line.split(":", 1)
+                            field_name = field_name.strip()
 
-                if choice == '2':
-                    for i in range(config.MAX_LLM_RETRIES):
-                        print(f"--- AI Cycle {i + 1} of {config.MAX_LLM_RETRIES} ---")
-                        mapping, output, is_success = _attempt_correction(
-                            mapping, resource_json, current_error, i + 2, schemas.get(mapping['tf_type']), heuristics.load_heuristics()
-                        )
+                            if field_name and actual_hcl_code:
+                                error_trigger_key = field_name
+                                correct_snippet = actual_hcl_code
+                                is_surgical_command = True
+                                print(f"   - 🛡️  Surgical SNIPPET registered for field: '{field_name}'")
+                            else:
+                                print("   ❌ Invalid SNIPPET syntax. Must provide a field name AND code on the next lines.")
+                                continue
+                        except ValueError:
+                            print("   ❌ Invalid SNIPPET syntax. Use SNIPPET:fieldname")
+                            continue
+                    
+                    # --- EXISTING LOGIC: Handling OMIT/IGNORE ---
+                    elif correct_snippet.upper().startswith("OMIT:") or correct_snippet.upper().startswith("IGNORE:"):
+                        try:
+                            command, field_name = correct_snippet.split(":", 1)
+                            field_name = field_name.strip()
+                            if field_name:
+                                error_trigger_key = field_name 
+                                if command.upper().startswith("IGNORE"):
+                                    correct_snippet = f"IGNORE:{field_name}"
+                                else:
+                                    correct_snippet = "OMIT"
+                                print(f"   - 🛡️  Surgical {command.upper().split(':')[0]} registered for field: '{field_name}'")
+                        except ValueError:
+                            print("   ❌ Invalid syntax. Use OMIT:fieldname or IGNORE:fieldname")
+                            continue
+
+                    heuristics.save_heuristic(mapping['tf_type'], error_trigger_key, correct_snippet)
+                    
+                    print("--- Retrying immediately with newly learned heuristic... ---")
+                    
+                    keys_to_omit = [error_trigger_key] if correct_snippet == "OMIT" else []
+                    if keys_to_omit:
+                        print(f"   - 🛡️  Proactively scrubbing key: {keys_to_omit}")
+                        resource_json = scrub_json(resource_json, keys_to_omit)
+
+                    corrected_hcl = hcl_generator.generate_hcl_from_json(
+                        resource_json, mapping['tf_type'], mapping['hcl_name'], 
+                        attempt=2, schema=schemas.get(mapping['tf_type']), 
+                        expert_snippet=correct_snippet,
+                        keys_to_omit=keys_to_omit
+                    )
+
+                    if corrected_hcl:
+                        from .run import _scrub_hcl 
+                        corrected_hcl = _scrub_hcl(corrected_hcl, keys_to_omit)
+                        
+                        with open(mapping["filename"], "w", encoding='utf-8-sig') as f: f.write(corrected_hcl)
+                        time.sleep(1)
+                        
+                        print("   - Re-attempting import with corrected HCL...")
+                        terraform_client.import_resource(mapping, force_refresh=True)
+                        is_success, plan_output = terraform_client.plan_for_resource(mapping['filename'])
+                        
                         if is_success:
-                            print(f"✅ AI SUCCEEDED on attempt {i + 1}!")
+                            print(f"✅ Human-in-the-Loop Correction SUCCEEDED for '{mapping['resource_name']}'!")
                             successful_imports.append(failed_item)
                             failed_imports.remove(failed_item)
                             break 
                         else:
-                            current_error = output 
+                            print("❌ Correction failed. Returning to menu.")
+                            current_error = plan_output 
+                    else:
+                         print("❌ LLM failed to generate correction. Returning to menu.")
+                    continue
 
-                    if not is_success: print(f"❌ AI FAILED after {config.MAX_LLM_RETRIES} retries.")
+                if choice == '2':
+                    if ai_attempt_count >= config.MAX_LLM_RETRIES:
+                        print(f"❌ Maximum AI retries ({config.MAX_LLM_RETRIES}) reached.")
+                        continue
+                        
+                    print(f"--- AI Cycle {ai_attempt_count + 1} of {config.MAX_LLM_RETRIES} ---")
+                    mapping, output, is_success = _attempt_correction(
+                        mapping, resource_json, current_error, ai_attempt_count + 2, schemas.get(mapping['tf_type']), heuristics.load_heuristics()
+                    )
+                    ai_attempt_count += 1
+                    
+                    if is_success:
+                        print(f"✅ AI SUCCEEDED on attempt {ai_attempt_count}!")
+                        successful_imports.append(failed_item)
+                        failed_imports.remove(failed_item)
+                        break 
+                    else:
+                        current_error = output 
 
-    print("\n\n--- Bulk Import Complete ---")
-    successful_imports.sort(key=lambda x: x['mapping']['resource_name'])
-    failed_imports.sort(key=lambda x: x['mapping']['resource_name'])
-    for result in successful_imports: print(f"✅ SUCCESS: {result['mapping']['resource_name']}")
-    for result in failed_imports:
-        clean_err = _clean_terraform_output(result['data']['error'])
-        first_line = clean_err.splitlines()[0] if clean_err else "Unknown error."
-        print(f"❌ FAILED:  {result['mapping']['resource_name']} - {first_line}")
-    print(f"\nSummary: {len(successful_imports)} / {len(mappings)} resources imported successfully.")
+        print("\n\n--- Bulk Import Complete ---")
+        successful_imports.sort(key=lambda x: x['mapping']['resource_name'])
+        failed_imports.sort(key=lambda x: x['mapping']['resource_name'])
+        for result in successful_imports: print(f"✅ SUCCESS: {result['mapping']['resource_name']}")
+        for result in failed_imports:
+            clean_err = _clean_terraform_output(result['data']['error'])
+            first_line = clean_err.splitlines()[0] if clean_err else "Unknown error."
+            print(f"❌ FAILED:  {result['mapping']['resource_name']} - {first_line}")
+        print(f"\nSummary: {len(successful_imports)} / {len(mappings)} resources imported successfully.")
+
+    else:
+        # Handles the case where everything succeeded on the very first generation attempt
+        print("\n\n--- Bulk Import Complete ---")
+        successful_imports.sort(key=lambda x: x['mapping']['resource_name'])
+        for result in successful_imports: print(f"✅ SUCCESS: {result['mapping']['resource_name']}")
+        print(f"\nSummary: {len(successful_imports)} / {len(mappings)} resources imported successfully.")
+
+    print("Workflow finished.")
 
 if __name__ == "__main__":
     run_workflow()
