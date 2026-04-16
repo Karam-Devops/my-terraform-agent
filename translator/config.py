@@ -21,3 +21,24 @@ CRITICAL AWS ARCHITECTURAL RULES:
 6.  **Storage:** Map standard disks to `gp3` volume types.
 7.  **Advanced VM Features (vTPM/Shielded):** Do NOT attempt to map GCP Shielded VM features (like `enable_vtpm` or `enable_secure_boot`) directly to top-level arguments like `tpm_support` on standard `aws_instance` resources. These require complex Nitro Enclave setups or specific AMI configurations in AWS. OMIT these advanced security features from the generated HCL and instead add a `# TODO:` comment explaining that advanced enclave/TPM support requires manual architecture.
 """
+
+AZURE_ARCHITECTURAL_RULES = """
+CRITICAL AZURE ARCHITECTURAL RULES:
+1.  **Strict Resource Naming:** You MUST use the exact, official HashiCorp AzureRM provider resource names.
+    *   Virtual Machines: Use `azurerm_linux_virtual_machine` or `azurerm_windows_virtual_machine`. Do NOT use the deprecated `azurerm_virtual_machine`.
+    *   Networks: `azurerm_virtual_network` and `azurerm_subnet`.
+    *   Public IPs: `azurerm_public_ip`.
+    *   Resource Groups: Every Azure resource requires a `resource_group_name`. You MUST generate an `azurerm_resource_group` block or use a variable for it.
+2.  **Identity:** Translate service accounts into an Azure Managed Identity by adding an `identity { type = "SystemAssigned" }` block inside the virtual machine resource.
+3.  **Networking:** Azure VMs require a Network Interface. You MUST generate an `azurerm_network_interface` resource and attach it to the VM using `network_interface_ids`.
+4.  **Public IP Mapping (CRITICAL):** If translating a GCP instance with an external IP, create an `azurerm_public_ip`.
+    *   **SKU Mapping:** Azure Public IP `sku` ONLY accepts "Basic" or "Standard". Map "Premium" to "Standard".
+5.  **Storage:** Azure VMs require an `os_disk` block (e.g., caching = "ReadWrite", storage_account_type = "Standard_LRS").
+6.  **Sizing:** E.g., 'small' -> 'Standard_B1s', 'medium' -> 'Standard_D2s_v3'.
+7.  **Authentication:** Linux VMs require `admin_username` and an `admin_ssh_key` block. Do NOT hardcode fake SSH keys. You MUST use a variable reference (e.g., `var.admin_ssh_key`). 
+    *   **CRITICAL REQUIREMENT:** If you use a variable, you MUST also generate the corresponding `variable "admin_ssh_key" { type = string }` declaration block in your output.
+8.  **Advanced VM Features:** If the blueprint specifies vTPM or Secure Boot, use the top-level boolean arguments `secure_boot_enabled = true` and/or `vtpm_enabled = true` inside the `azurerm_linux_virtual_machine` block. Do NOT use `security_type`.
+9.  **Availability Zones (CRITICAL INCONSISTENCY):** You must pay close attention to the resource type when assigning zones:
+    *   For `azurerm_linux_virtual_machine` or `azurerm_windows_virtual_machine`: You MUST use the singular `zone` argument with a string value (e.g., `zone = "1"`).
+    *   For `azurerm_public_ip`: You MUST use the plural `zones` argument with a list of strings (e.g., `zones = ["1"]`).
+"""
