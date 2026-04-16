@@ -1,19 +1,26 @@
 # my-terraform-agent/translator/aws_engine.py
 
+import re
+import logging
+from typing import Optional
+from langchain_core.messages import SystemMessage, HumanMessage
 from .. import llm_provider
 from . import config
-import re
 
-def generate_aws_hcl(yaml_blueprint, source_filename):
+# Initialize standard logger for enterprise observability
+logger = logging.getLogger(__name__)
+
+def generate_aws_hcl(yaml_blueprint: str, source_filename: str) -> Optional[str]:
     """
     Phase 2: Converts the generic YAML blueprint into valid AWS HCL code,
     incorporating specific architectural rules and a Traceability Matrix.
     """
-    print(f"\n🏗️  [Phase 2] Generating AWS HCL and Traceability Matrix...")
+    logger.info(f"🏗️ [Phase 2] Generating AWS HCL and Traceability Matrix for {source_filename}...")
 
-    prompt = (
+    # System prompt: Defines the persona, rules, and expected format.
+    system_instruction = (
         "You are an Expert AWS Cloud Architect. Your task is to write production-ready Terraform HCL "
-        "for the AWS provider based on the following generic infrastructure blueprint.\n\n"
+        "for the AWS provider based on the provided generic infrastructure blueprint.\n\n"
         
         f"{config.AWS_ARCHITECTURAL_RULES}\n\n"
         
@@ -35,37 +42,45 @@ def generate_aws_hcl(yaml_blueprint, source_filename):
         "PART 2: THE TERRAFORM HCL CODE\n"
         "Below the Traceability Matrix, write all required `resource` or `data` blocks.\n"
         "Do NOT include a `provider` or `terraform` block. Output only the resource definitions.\n"
-        "Do NOT wrap your entire output in markdown fences (like ```hcl).\n\n"
-        
+        "Do NOT wrap your entire output in markdown fences (like ```hcl).\n"
+    )
+
+    # Human prompt: Provides the actual data payload.
+    human_instruction = (
         "--- GENERIC INFRASTRUCTURE BLUEPRINT (YAML) ---\n"
         f"{yaml_blueprint}\n"
         "-----------------------------------------------\n"
     )
 
     try:
-        print("   - Sending blueprint to AWS Generation Engine (LLM)...")
+        logger.info("   - Sending blueprint to AWS Generation Engine (Gemini)...")
         llm_client = llm_provider.get_llm_text_client()
-        response = llm_client.invoke(prompt)
         
+        # Using structured messages (System + Human) for optimal Gemini 2.5 Pro performance
+        messages = [
+            SystemMessage(content=system_instruction),
+            HumanMessage(content=human_instruction)
+        ]
+        
+        response = llm_client.invoke(messages)
         aws_hcl_output = response.content.strip()
-        
-        # Clean up markdown fences if the LLM ignores the instruction
-        aws_hcl_output = re.sub(r"^```hcl\s*", "", aws_hcl_output, flags=re.IGNORECASE)
-        aws_hcl_output = re.sub(r"^```terraform\s*", "", aws_hcl_output, flags=re.IGNORECASE)
-        aws_hcl_output = re.sub(r"^```\s*", "", aws_hcl_output, flags=re.IGNORECASE)
-        aws_hcl_output = re.sub(r"```\s*$", "", aws_hcl_output).strip()
 
         if not aws_hcl_output:
-            print("   ❌ Generation failed: LLM returned an empty response.")
+            logger.error("   ❌ Generation failed: LLM returned an empty response.")
             return None
+
+        # Robust cleanup: Remove markdown fences even if they appear in the middle of the text
+        # (e.g., if the LLM puts the Matrix outside the fence, but the code inside it)
+        aws_hcl_output = re.sub(r"```(?:hcl|terraform)?", "", aws_hcl_output, flags=re.IGNORECASE)
+        aws_hcl_output = aws_hcl_output.strip()
 
         # Basic check to ensure the Traceability Matrix is present
         if "TRACEABILITY MATRIX" not in aws_hcl_output.upper():
-            print("   ⚠️  Warning: The LLM failed to include the required Traceability Matrix.")
+            logger.warning("   ⚠️ Warning: The LLM failed to include the required Traceability Matrix.")
 
-        print("   ✅ Successfully generated AWS HCL code.")
+        logger.info("   ✅ Successfully generated AWS HCL code.")
         return aws_hcl_output
 
     except Exception as e:
-        print(f"   ❌ An error occurred during AWS HCL generation: {e}")
+        logger.exception(f"   ❌ An error occurred during AWS HCL generation: {e}")
         return None

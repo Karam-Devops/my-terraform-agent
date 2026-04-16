@@ -20,6 +20,13 @@ CRITICAL AWS ARCHITECTURAL RULES:
 5.  **Sizing (Instances):** Translate generic sizes intelligently. E.g., 'small' -> 't3.micro', 'medium' -> 't3.medium' or 'm5.large', 'large' -> 'm5.xlarge'.
 6.  **Storage:** Map standard disks to `gp3` volume types.
 7.  **Advanced VM Features (vTPM/Shielded):** Do NOT attempt to map GCP Shielded VM features (like `enable_vtpm` or `enable_secure_boot`) directly to top-level arguments like `tpm_support` on standard `aws_instance` resources. These require complex Nitro Enclave setups or specific AMI configurations in AWS. OMIT these advanced security features from the generated HCL and instead add a `# TODO:` comment explaining that advanced enclave/TPM support requires manual architecture.
+8. **Spot/Preemptible Instances (CRITICAL):** Do NOT use `instance_interruption_behavior` or similar spot/preemptible settings as top-level arguments on `aws_instance`. If translating a preemptible or spot instance, you MUST nest these settings inside an `instance_market_options` block. 
+   Example:
+   instance_market_options {
+     market_type = "spot"
+     spot_options {
+       instance_interruption_behavior = "terminate"
+     }
 """
 
 AZURE_ARCHITECTURAL_RULES = """

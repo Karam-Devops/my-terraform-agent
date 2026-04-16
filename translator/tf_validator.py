@@ -3,16 +3,25 @@
 import os
 import tempfile
 import subprocess
+import logging
+from typing import Tuple
 from . import config
-from . import shell_runner
 
-def validate_hcl(hcl_content, target_cloud):
+# Initialize standard logger for enterprise observability
+logger = logging.getLogger(__name__)
+
+def validate_hcl(hcl_content: str, target_cloud: str) -> Tuple[bool, str]:
     """
-    Validates HCL syntax for the specified target cloud provider.
-    """
-    print(f"\n🔍 [Pillar 1 Proof] Validating {target_cloud.upper()} HCL Syntax and Schema...")
+    Validates HCL syntax for the specified target cloud provider by running 
+    an isolated 'terraform init' and 'terraform validate'.
     
-    if target_cloud == "aws":
+    Returns:
+        Tuple[bool, str]: (is_valid, error_message_or_success)
+    """
+    logger.info(f"🔍 [Pillar 1 Proof] Validating {target_cloud.upper()} HCL Syntax and Schema...")
+    
+    target = target_cloud.lower()
+    if target == "aws":
         provider_block = """
 terraform {
   required_providers {
@@ -21,7 +30,7 @@ terraform {
 }
 provider "aws" { region = "us-east-1" }
 """
-    elif target_cloud == "azure":
+    elif target == "azure":
         provider_block = """
 terraform {
   required_providers {
@@ -34,10 +43,12 @@ provider "azurerm" {
 }
 """
     else:
-        return False, "Unknown target cloud."
+        return False, f"Unknown target cloud: {target_cloud}"
 
+    # Combine the mock provider with the generated code
     full_content = provider_block + "\n" + hcl_content
 
+    # Run in an ephemeral directory to prevent state pollution
     with tempfile.TemporaryDirectory() as temp_dir:
         file_path = os.path.join(temp_dir, "main.tf")
         
@@ -45,23 +56,32 @@ provider "azurerm" {
             with open(file_path, "w", encoding="utf-8") as f:
                 f.write(full_content)
                 
-            print(f"   - Initializing {target_cloud.upper()} provider schema...")
+            logger.info(f"   - Initializing {target_cloud.upper()} provider schema...")
             init_cmd = [config.TERRAFORM_PATH, "init", "-backend=false"]
-            subprocess.run(init_cmd, cwd=temp_dir, check=True, capture_output=True)
             
-            print("   - Running strict syntax and schema validation...")
+            # Run init (throws CalledProcessError if it fails)
+            subprocess.run(init_cmd, cwd=temp_dir, check=True, capture_output=True, text=True)
+            
+            logger.info("   - Running strict syntax and schema validation...")
             val_cmd = [config.TERRAFORM_PATH, "validate", "-no-color"]
+            
+            # Run validate (does not throw on failure, we check returncode manually)
             val_process = subprocess.run(val_cmd, cwd=temp_dir, capture_output=True, text=True)
             
             if val_process.returncode == 0:
-                print("   ✅ Validation Successful: The generated code is syntactically perfect.")
+                logger.info("   ✅ Validation Successful: The generated code is syntactically perfect.")
                 return True, "Success"
             else:
-                print("   ❌ Validation Failed: The LLM generated invalid schema/syntax.")
-                return False, val_process.stderr
+                logger.warning("   ❌ Validation Failed: The LLM generated invalid schema/syntax.")
+                # Return the stderr/stdout so it can be fed back to LangGraph/LLM for self-correction
+                error_output = val_process.stderr.strip() or val_process.stdout.strip()
+                return False, error_output
 
         except subprocess.CalledProcessError as e:
-            print(f"   ❌ Critical error running Terraform: {e}")
-            return False, str(e)
+            # Captures failures during `terraform init` (e.g., network issues, bad provider block)
+            logger.error(f"   ❌ Critical error running Terraform Init: {e.stderr}")
+            return False, f"Terraform Init Failed: {e.stderr}"
         except Exception as e:
-             return False, str(e)
+            # Captures unexpected OS/Python errors
+            logger.exception(f"   ❌ Unexpected System Error during validation: {e}")
+            return False, str(e)
