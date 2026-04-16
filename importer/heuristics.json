@@ -1,0 +1,10 @@
+{
+  "google_compute_instance": {
+    "guest_os_features": "OMIT",
+    "scopes": "service_account {\n  email = \"1034146747277-compute@developer.gserviceaccount.com\"\n  scopes = [\n    \"https://www.googleapis.com/auth/devstorage.read_only\",\n    \"https://www.googleapis.com/auth/logging.write\",\n    \"https://www.googleapis.com/auth/monitoring.write\",\n    \"https://www.googleapis.com/auth/service.management.readonly\",\n    \"https://www.googleapis.com/auth/servicecontrol\",\n    \"https://www.googleapis.com/auth/trace.append\"\n  ]\n}",
+    "key_revocation_action_type": "IGNORE",
+    "labels": "IGNORE",
+    "terraform_labels": "IGNORE",
+    "resource_policies": "OMIT"
+  }
+}
