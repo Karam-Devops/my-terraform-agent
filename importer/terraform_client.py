@@ -5,35 +5,44 @@ import os
 import tempfile
 from . import config
 
+def _ensure_initialized():
+    """Internal helper: Checks if Terraform is initialized; runs init if not."""
+    if not os.path.isdir(".terraform") or not os.path.isfile(".terraform.lock.hcl"):
+        print("   - ⚠️ Terraform plugins missing or lock file inconsistent. Auto-initializing...")
+        # Force an upgrade to ensure the lock file is written correctly for the current .tf files
+        return init(upgrade=True)
+    return True
+
 def init(upgrade=False):
+    """Runs 'terraform init'."""
     print(f"\n--- {'Re-initializing' if upgrade else 'Initializing'} Terraform ---")
     command_args = [config.TERRAFORM_PATH, "init"]
-    if upgrade: command_args.append("-upgrade")
+    if upgrade:
+        command_args.append("-upgrade")
     try:
-        subprocess.run(command_args, check=True, capture_output=True)
+        # Use subprocess.run directly as we don't need the complex file-redirection here
+        subprocess.run(command_args, check=True, capture_output=True, text=True)
         return True
     except (subprocess.CalledProcessError, FileNotFoundError) as e:
-        print(f"Terraform init failed: {e}")
+        error_output = e.stderr if hasattr(e, 'stderr') and e.stderr else str(e)
+        print(f"❌ Terraform init failed. Error: {error_output}")
         return False
 
 def import_resource(mapping, force_refresh=False):
-    """
-    Runs 'terraform import'.
-    If force_refresh is True, it explicitly removes the resource from the state
-    first to ensure a clean mapping with the newly generated HCL.
-    """
+    """Runs 'terraform import', ensuring initialization first."""
+    if not _ensure_initialized():
+        print(f"❌ Aborting import for '{mapping['resource_name']}' due to initialization failure.")
+        return False
+
     tf_address = f'{mapping["tf_type"]}.{mapping["hcl_name"]}'
     
-    # --- NEW LOGIC: Forcefully clean the state if requested ---
     if force_refresh:
         print(f"\n   - 🧹 Forcing state refresh for '{mapping['resource_name']}'...")
         remove_args = [config.TERRAFORM_PATH, "state", "rm", tf_address]
         try:
-            # We don't care if this fails (e.g., if it wasn't in the state to begin with)
             subprocess.run(remove_args, capture_output=True, text=True)
         except Exception:
             pass
-    # --- END OF NEW LOGIC ---
 
     print(f"\n--- Importing '{mapping['resource_name']}' ---")
     import_args = [config.TERRAFORM_PATH, "import", tf_address, mapping["import_id"]]
@@ -42,17 +51,22 @@ def import_resource(mapping, force_refresh=False):
         print(f"✅ Import successful for '{mapping['resource_name']}'.")
         return True
     except subprocess.CalledProcessError as e:
-        error_output = e.stderr or e.stdout
+        error_output = e.stderr if e.stderr else e.stdout
         
-        # We still want to handle the "already managed" case gracefully for the initial run
         if "Resource already managed by Terraform" in error_output and not force_refresh:
             print(f"✅ Resource '{mapping['resource_name']}' is already managed in state. Skipping import.")
             return True
             
-        print(f"❌ Terraform import failed for '{mapping['resource_name']}'. Error: {error_output.splitlines()[0]}")
+        # Extract just the first line for cleaner logging
+        first_line = error_output.splitlines()[0] if error_output else "Unknown Error"
+        print(f"❌ Terraform import failed for '{mapping['resource_name']}'. Error: {first_line}")
         return False
 
 def plan_for_resource(filename):
+    """Runs 'terraform plan', ensuring initialization and robustly capturing output."""
+    if not _ensure_initialized():
+        return (False, "CRITICAL: Terraform failed to initialize. Cannot run plan.")
+
     print(f"\n--- Verifying '{filename}' with 'terraform plan' ---")
     plan_args = [config.TERRAFORM_PATH, "plan", "-no-color", "-input=false"]
 
@@ -62,7 +76,11 @@ def plan_for_resource(filename):
             temp_filename = temp_f.name
         
         with open(temp_filename, 'w', encoding='utf-8') as f_out:
-            process = subprocess.run(plan_args, stdout=f_out, stderr=f_out)
+            process = subprocess.run(
+                plan_args,
+                stdout=f_out,
+                stderr=f_out
+            )
         
         with open(temp_filename, 'r', encoding='utf-8') as f_in:
             output = f_in.read()
@@ -71,8 +89,9 @@ def plan_for_resource(filename):
             print("   - Plan successful: No changes.")
             return (True, "Plan successful: No changes.")
         else:
-            print("   - Plan command indicated changes or failed.")
+            print("   - Plan command indicated changes or failed. Capturing full output from file.")
             return (False, output)
+
     finally:
         if os.path.exists(temp_filename):
             os.remove(temp_filename)

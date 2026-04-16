@@ -7,50 +7,40 @@ import re
 HEURISTICS_FILE = os.path.join(os.path.dirname(__file__), 'heuristics.json')
 
 def load_heuristics():
-    """Loads the entire heuristics knowledge base from the JSON file."""
+    """Loads the heuristics. Fails loudly if the JSON is manually corrupted."""
     if not os.path.exists(HEURISTICS_FILE):
         return {}
     try:
         with open(HEURISTICS_FILE, "r", encoding="utf-8") as f:
             return json.load(f)
-    except (IOError, json.JSONDecodeError):
+    except json.JSONDecodeError as e:
+        # --- THE FIX: Never silently overwrite a corrupted file ---
+        print(f"\n❌ CRITICAL ERROR: Your heuristics.json file is corrupted or formatted incorrectly.")
+        print(f"   Details: {e}")
+        print("   Please fix the JSON syntax before running the agent to prevent data loss.")
+        # We return None to signal a hard failure, preventing save_heuristic from overwriting it
+        return None 
+    except IOError:
         return {}
 
 def generate_error_signature(error_message, resource_type):
-    """Creates a simplified, searchable signature from a complex Terraform error."""
-    if not error_message:
-        return f"{resource_type}:unknown_error"
+    if not error_message: return f"{resource_type}:unknown_error"
 
-    # Pattern for: "Unsupported block type... Blocks of type "X"
     block_match = re.search(r'Blocks of type "([^"]+)" are not expected here', error_message, re.IGNORECASE)
-    if block_match:
-        block_name = block_match.group(1)
-        print(f"🧠 HEURISTICS: Identified error signature for unsupported block: '{block_name}'")
-        return block_name 
+    if block_match: return block_match.group(1) 
 
-    # Pattern for: 'An argument named "X" is not expected here.'
     arg_match = re.search(r'An argument named "([^"]+)" is not expected here', error_message, re.IGNORECASE)
-    if arg_match:
-        arg_name = arg_match.group(1)
-        print(f"🧠 HEURISTICS: Identified error signature for unsupported argument: '{arg_name}'")
-        return arg_name
+    if arg_match: return arg_match.group(1)
 
-    print("🧠 HEURISTICS: Could not identify a specific error pattern. Using generic signature.")
     return "generic_error"
 
 def get_heuristic_for_error(resource_type, error_signature):
-    """Finds a relevant heuristic for a given error signature."""
     heuristics = load_heuristics()
-    retrieved_solution = heuristics.get(resource_type, {}).get(error_signature)
-    
-    if retrieved_solution:
-        print(f"🧠 HEURISTICS: Found a past solution for '{error_signature}'.")
-        return retrieved_solution
-    return None
+    if heuristics is None: return None # Safety check
+    return heuristics.get(resource_type, {}).get(error_signature)
 
 def save_heuristic(resource_type, error_signature, correct_snippet):
-    """Saves a new, human-verified heuristic to the knowledge base."""
-    # Ensure we only check string methods on actual strings
+    """Saves a rule safely, refusing to run if the file is corrupted."""
     if isinstance(correct_snippet, str):
         is_omit_rule = correct_snippet.strip().upper() == "OMIT"
     else:
@@ -60,8 +50,15 @@ def save_heuristic(resource_type, error_signature, correct_snippet):
         print("🧠 HEURISTICS: Not saving solution for a generic or unknown error pattern.")
         return
 
-    print(f"🧠 HEURISTICS: Learning a new rule for '{resource_type}' triggered by '{error_signature}'...")
     heuristics = load_heuristics()
+    
+    # --- THE FIX: Abort save if the file is corrupted ---
+    if heuristics is None:
+        print("   - ❌ Cannot save new heuristic because heuristics.json is currently corrupted.")
+        return
+    # ----------------------------------------------------
+
+    print(f"🧠 HEURISTICS: Learning a new rule for '{resource_type}' triggered by '{error_signature}'...")
     
     if resource_type not in heuristics:
         heuristics[resource_type] = {}

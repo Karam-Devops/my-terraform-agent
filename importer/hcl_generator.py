@@ -34,14 +34,52 @@ def generate_hcl_from_json(resource_json_str, tf_type, hcl_name, attempt, schema
     # 2. Expert HCL Snippets (Raw code injection)
     if expert_snippet:
         is_surgical_mode = True
-        print("   - RAG mode: Using a verified expert HCL snippet.")
-        system_prompt += (
-            "\n\n========================================================================\n"
-            "CRITICAL OVERRIDE - PREVIOUS ATTEMPT FAILED\n"
-            "A human expert has provided the EXACT correct HCL syntax to fix a previous error. You MUST use this pattern:\n"
-            f"```hcl\n{expert_snippet}\n```\n"
-            "========================================================================\n"
-        )
+        
+        # Process IGNORE commands
+        ignore_lines = [line for line in expert_snippet.splitlines() if line.startswith("IGNORE_LIST:")]
+        if ignore_lines:
+            fields_to_ignore = ignore_lines[0].replace("IGNORE_LIST:", "").split(",")
+            fields_to_ignore = [f.strip() for f in fields_to_ignore if f.strip()]
+            
+            if fields_to_ignore:
+                print(f"   - RAG mode activated: Instructing LLM to add lifecycle ignore_changes for: {fields_to_ignore}")
+                ignore_list_str = ", ".join(f"{f}" for f in fields_to_ignore)
+                system_prompt += (
+                    "\n\n========================================================================\n"
+                    "CRITICAL OVERRIDE - COMPUTED FIELD DIFFS DETECTED\n"
+                    "Human experts have determined the following fields cause 'forces replacement' diffs.\n"
+                    "You MUST NOT define these fields in the main resource arguments.\n"
+                    "Instead, you MUST add a `lifecycle` block at the end of the resource and add these field names to the `ignore_changes` list.\n"
+                    "Example:\n"
+                    "lifecycle {\n"
+                    f"  ignore_changes = [{ignore_list_str}]\n"
+                    "}\n"
+                    "========================================================================\n"
+                )
+
+        # Process standard OMIT/Expert Snippets
+        if "OMIT" in expert_snippet:
+            print("   - RAG mode activated: Enforcing negative constraints for read-only fields.")
+        
+        # --- THE DEFINITIVE FIX: Stronger Snippet Instructions ---
+        # If the string contains anything other than OMIT or IGNORE_LIST commands, it's raw code.
+        raw_snippets = [line for line in expert_snippet.splitlines() if not line.startswith("IGNORE_LIST:") and "OMIT" not in line]
+        if raw_snippets:
+             snippet_to_inject = "\n".join(raw_snippets).strip()
+             if snippet_to_inject: # Only inject if there's actual code left
+                 print("   - RAG mode activated: Using verified expert HCL snippet(s).")
+                 system_prompt += (
+                    "\n\n========================================================================\n"
+                    "CRITICAL OVERRIDE - USE THIS EXACT CODE BLOCK\n"
+                    "A human expert has provided the EXACT correct HCL syntax to fix a previous error.\n"
+                    "You MUST include the following code block EXACTLY as written in your final output:\n"
+                    f"```hcl\n{snippet_to_inject}\n```\n"
+                    "*** CRITICAL RULE REGARDING DUPLICATION ***\n"
+                    "If the JSON configuration contains data that corresponds to the block provided above, "
+                    "you MUST use the provided expert block INSTEAD of generating your own.\n"
+                    "DO NOT duplicate blocks. There must be ONLY ONE instance of this block type in your output.\n"
+                    "========================================================================\n"
+                 )
 
     # 3. Diff/Error Resolution (Only if not using surgical overrides)
     if previous_error and not is_surgical_mode:
