@@ -71,6 +71,12 @@ def generate_azure_hcl(yaml_blueprint: str, source_filename: str) -> Optional[st
         # Robust cleanup: Remove markdown fences even if they appear in the middle of the text
         hcl_output = re.sub(r"```(?:hcl|terraform)?", "", hcl_output, flags=re.IGNORECASE)
         hcl_output = hcl_output.strip()
+        # Robust extraction: Look for code within markdown blocks if present.
+        fence_match = re.search(r"```(?:hcl|terraform)?\s*(.*?)\s*```", hcl_output, re.DOTALL | re.IGNORECASE)
+        if fence_match:
+            hcl_output = fence_match.group(1)
+
+        hcl_output = re.sub(r"```(?:hcl|terraform)?", "", hcl_output, flags=re.IGNORECASE).strip()
 
         # Basic check to ensure the Traceability Matrix is present
         if "TRACEABILITY MATRIX" not in hcl_output.upper():
