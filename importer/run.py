@@ -7,7 +7,10 @@ import concurrent.futures
 import threading
 import time
 import re
-from . import config, gcp_client, terraform_client, hcl_generator, knowledge_base, heuristics
+from . import (
+    config, gcp_client, terraform_client, hcl_generator, knowledge_base,
+    heuristics, snapshot_scrubber, lifecycle_planner, resource_mode,
+)
 
 project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
 os.chdir(project_root)
@@ -125,6 +128,84 @@ def _generate_and_save_hcl(mapping, schema, heuristics_kb):
     resource_json = gcp_client.get_resource_details_json(mapping)
     if not resource_json: return (mapping, False, {"error": "Failed to get resource details."})
 
+    # --- 0. PR-3: schema-driven auto-scrub of pure-computed fields ---
+    # Removes provider-set, read-only attributes (terraform_labels, self_link,
+    # creationTimestamp, etc.) before any LLM sees the JSON. Path-aware so a
+    # nested `name` is not confused with a top-level instance `name`. This is
+    # what `heuristics.json` was patching by hand for the computed class of
+    # bugs.
+    resource_json, auto_stripped = snapshot_scrubber.auto_scrub_cloud_snapshot(
+        resource_json, mapping['tf_type']
+    )
+    if auto_stripped:
+        print(f"   - 🛡️  Auto-scrubbed {len(auto_stripped)} computed-only field(s) "
+              f"from cloud snapshot:")
+        for p in auto_stripped:
+            print(f"       - {p}")
+
+    # --- 0b. PR-6: drop GCP-managed labels (goog-*, gke-*, k8s-io-*) ---
+    # These leak into `labels` from `gcloud describe` and create perpetual
+    # plan diffs because the provider also reports them as service-managed.
+    # Stripping at snapshot stage means the LLM never writes them.
+    resource_json, dropped_labels = snapshot_scrubber.filter_auto_labels(resource_json)
+    if dropped_labels:
+        print(f"   - 🏷️  Stripped {len(dropped_labels)} provider-managed label(s):")
+        for p in dropped_labels:
+            print(f"       - {p}")
+
+    # --- 0b-2. PR-11: strip provider-dropped paths (API still returns, schema doesn't) ---
+    # GCP APIs keep echoing fields that the current google TF provider has
+    # removed support for (e.g. the retired GKE `kubernetes_dashboard` addon).
+    # Writing them to HCL produces `Unsupported block type` / `Unsupported
+    # argument` at plan time. Strip at snapshot stage before the LLM sees it.
+    resource_json, dropped_provider_paths = snapshot_scrubber.filter_provider_dropped_paths(
+        resource_json
+    )
+    if dropped_provider_paths:
+        print(f"   - 🧽 Stripped {len(dropped_provider_paths)} provider-dropped path(s):")
+        for p in dropped_provider_paths:
+            print(f"       - {p}")
+
+    # --- 0c. PR-10: resource-mode detection + pruning ---
+    # Some resources have runtime modes (GKE Autopilot, etc.) that forbid
+    # large schema sub-trees the per-attribute oracle still lists as
+    # OPTIONAL. Detect the mode from the snapshot, prune the forbidden
+    # cloud-side blocks, and remember the mode so we can inject a
+    # high-priority instruction into the LLM prompt below.
+    active_modes: list = []
+    mode_addendum: str = ""
+    try:
+        _data_for_modes = json.loads(resource_json)
+        active_modes = resource_mode.detect_modes(_data_for_modes, mapping['tf_type'])
+        if active_modes:
+            print(f"   - 🧭 Detected resource mode(s): {active_modes}")
+            _data_for_modes, dropped_mode_keys = resource_mode.apply_modes(
+                _data_for_modes, active_modes
+            )
+            if dropped_mode_keys:
+                print(f"   - 🧹 Mode-pruned {len(dropped_mode_keys)} top-level key(s) "
+                      f"from snapshot:")
+                for k in dropped_mode_keys:
+                    print(f"       - {k}")
+                resource_json = json.dumps(_data_for_modes, indent=2)
+            mode_addendum = resource_mode.mode_prompt_addendum(active_modes)
+    except (json.JSONDecodeError, TypeError) as _e:
+        print(f"   - WARN: mode detection skipped (snapshot parse error: {_e})")
+
+    # --- 0d. PR-12: drop top-level keys that collapsed to {} / [] after prunes ---
+    # The LLM emits `block {}` for any key it sees in the JSON; the provider
+    # rejects empty blocks whose inner fields are required (classic case:
+    # `maintenance_policy {}` requires one of `daily_maintenance_window` /
+    # `recurring_window`). Has to run after every prune pass above.
+    resource_json, dropped_empty = snapshot_scrubber.drop_empty_top_level_keys(
+        resource_json
+    )
+    if dropped_empty:
+        print(f"   - 🫥 Dropped {len(dropped_empty)} empty top-level key(s) "
+              f"after prune passes:")
+        for k in dropped_empty:
+            print(f"       - {k}")
+
     keys_to_omit = []
     fields_to_ignore = []
     expert_snippets = [] 
@@ -132,13 +213,51 @@ def _generate_and_save_hcl(mapping, schema, heuristics_kb):
     # --- 1. LOAD ALL MEMORY ---
     if mapping['tf_type'] in heuristics_kb:
         for error_key, snippet in heuristics_kb[mapping['tf_type']].items():
+            heuristics.warn_legacy_rule_used(mapping['tf_type'], error_key, snippet)
             cmd = snippet.strip().upper()
-            if cmd == "OMIT": 
+            if cmd == "OMIT":
                 keys_to_omit.append(error_key)
             elif cmd.startswith("IGNORE"):
                 fields_to_ignore.append(cmd.split(":", 1)[1].strip() if ":" in cmd else error_key)
             else:
                 expert_snippets.append(snippet) # It's a code block
+
+    # --- 1b. PR-4: schema-derived lifecycle.ignore_changes ---
+    # Top-level optional+computed attributes that the cloud actually returned
+    # a value for. Adding them to ignore_changes makes future provider-side
+    # recomputes silent — captures import-time value, suppresses drift.
+    try:
+        cloud_for_planner = json.loads(resource_json)
+    except (json.JSONDecodeError, TypeError):
+        cloud_for_planner = {}
+    auto_ignore = lifecycle_planner.derive_lifecycle_ignores(
+        cloud_for_planner, mapping['tf_type']
+    )
+    if auto_ignore:
+        new_ignore = [f for f in auto_ignore if f not in fields_to_ignore]
+        if new_ignore:
+            print(f"   - 🔒 Auto-derived lifecycle.ignore_changes for "
+                  f"{len(new_ignore)} optional+computed field(s):")
+            for f in new_ignore:
+                print(f"       - {f}")
+            fields_to_ignore.extend(new_ignore)
+
+    # --- 1c. PR-7 sanity gate: never let pure-computed paths into ignore_changes ---
+    # Terraform errors on `ignore_changes = [terraform_labels]` because there's
+    # no configured value to ignore. Legacy heuristics.json rules sometimes
+    # IGNORE'd such fields; drop them here regardless of source.
+    try:
+        from . import schema_oracle as _so
+        _oracle = _so.get_oracle()
+        if _oracle.has(mapping['tf_type']):
+            _pure = set(_oracle.computed_only_paths(mapping['tf_type']))
+            _bad = [f for f in fields_to_ignore if f in _pure]
+            if _bad:
+                print(f"   - ⚠️  Dropping {len(_bad)} pure-computed name(s) from "
+                      f"ignore_changes (Terraform rejects these): {_bad}")
+                fields_to_ignore = [f for f in fields_to_ignore if f not in _pure]
+    except Exception as _e:  # noqa: BLE001 - fail open
+        print(f"   - WARN: pure-computed sanity gate skipped ({_e})")
 
     # --- 2. PROACTIVE JSON SCRUBBING ---
     if keys_to_omit:
@@ -156,8 +275,9 @@ def _generate_and_save_hcl(mapping, schema, heuristics_kb):
 
     # --- 4. CALL LLM WITH ALL CONTEXT ---
     generated_hcl = hcl_generator.generate_hcl_from_json(
-        resource_json, mapping['tf_type'], mapping['hcl_name'], 
-        attempt=1, schema=schema, expert_snippet=expert_snippet_str, keys_to_omit=keys_to_omit
+        resource_json, mapping['tf_type'], mapping['hcl_name'],
+        attempt=1, schema=schema, expert_snippet=expert_snippet_str,
+        keys_to_omit=keys_to_omit, mode_addendum=mode_addendum,
     )
     
     if not generated_hcl: return (mapping, False, {"error": "LLM failed to generate HCL."})
@@ -183,13 +303,14 @@ def _attempt_correction(mapping, resource_json, previous_error, attempt_num, sch
     # 1. Load global memory from heuristics.json
     if mapping['tf_type'] in heuristics_kb:
         for error_key, snippet in heuristics_kb[mapping['tf_type']].items():
+            heuristics.warn_legacy_rule_used(mapping['tf_type'], error_key, snippet)
             cmd = snippet.strip().upper()
-            if cmd == "OMIT": 
+            if cmd == "OMIT":
                 keys_to_omit.append(error_key)
             elif cmd.startswith("IGNORE"):
                 # Handles both raw "IGNORE" and legacy "IGNORE:fieldname"
                 field = cmd.split(":", 1)[1].strip() if ":" in cmd else error_key
-                if field not in fields_to_ignore: 
+                if field not in fields_to_ignore:
                     fields_to_ignore.append(field)
             else:
                 expert_snippets.append(snippet) # It's raw HCL code
@@ -224,6 +345,22 @@ def _attempt_correction(mapping, resource_json, previous_error, attempt_num, sch
              if manual_snippet not in expert_snippets:
                  expert_snippets.append(manual_snippet)
 
+    # 3b. PR-7 sanity gate: filter pure-computed names out of ignore_changes.
+    # Same gate as in `_generate_and_save_hcl` — applies to the correction
+    # path so re-runs with manual snippets can't reintroduce the bug either.
+    try:
+        from . import schema_oracle as _so
+        _oracle = _so.get_oracle()
+        if _oracle.has(mapping['tf_type']):
+            _pure = set(_oracle.computed_only_paths(mapping['tf_type']))
+            _bad = [f for f in fields_to_ignore if f in _pure]
+            if _bad:
+                print(f"   - ⚠️  Dropping {len(_bad)} pure-computed name(s) from "
+                      f"ignore_changes (Terraform rejects these): {_bad}")
+                fields_to_ignore = [f for f in fields_to_ignore if f not in _pure]
+    except Exception as _e:  # noqa: BLE001 - fail open
+        print(f"   - WARN: pure-computed sanity gate skipped ({_e})")
+
     # 4. JSON Scrubbing
     if keys_to_omit:
         print(f"   - 🛡️  Scrubbing JSON keys for correction: {keys_to_omit}")
@@ -244,12 +381,23 @@ def _attempt_correction(mapping, resource_json, previous_error, attempt_num, sch
     expert_snippet_str = "\n".join(expert_instructions) if expert_instructions else None
     # -------------------------------------------------------------------
 
+    # PR-10: re-detect resource mode (the snapshot was already pruned upstream,
+    # so detection still works — we just need the addendum back for the prompt).
+    _correction_mode_addendum = ""
+    try:
+        _data = json.loads(resource_json)
+        _modes = resource_mode.detect_modes(_data, mapping['tf_type'])
+        _correction_mode_addendum = resource_mode.mode_prompt_addendum(_modes)
+    except (json.JSONDecodeError, TypeError):
+        pass
+
     # 5. Generate HCL
     corrected_hcl = hcl_generator.generate_hcl_from_json(
-        resource_json, mapping['tf_type'], mapping['hcl_name'], attempt=attempt_num, 
-        previous_error=previous_error, schema=schema, 
+        resource_json, mapping['tf_type'], mapping['hcl_name'], attempt=attempt_num,
+        previous_error=previous_error, schema=schema,
         expert_snippet=expert_snippet_str, # Pass the carefully formatted string
-        keys_to_omit=keys_to_omit
+        keys_to_omit=keys_to_omit,
+        mode_addendum=_correction_mode_addendum,
     )
     
     if not corrected_hcl: return (mapping, "LLM failed to provide a correction.", False)
@@ -414,11 +562,21 @@ def run_workflow():
                         print(f"   - 🛡️  Proactively scrubbing key: {keys_to_omit_immediate}")
                         resource_json = scrub_json(resource_json, keys_to_omit_immediate)
 
+                    # PR-10: re-detect mode for the manual-snippet retry path too.
+                    _manual_mode_addendum = ""
+                    try:
+                        _data = json.loads(resource_json)
+                        _modes = resource_mode.detect_modes(_data, mapping['tf_type'])
+                        _manual_mode_addendum = resource_mode.mode_prompt_addendum(_modes)
+                    except (json.JSONDecodeError, TypeError):
+                        pass
+
                     corrected_hcl = hcl_generator.generate_hcl_from_json(
-                        resource_json, mapping['tf_type'], mapping['hcl_name'], 
-                        attempt=2, schema=schemas.get(mapping['tf_type']), 
+                        resource_json, mapping['tf_type'], mapping['hcl_name'],
+                        attempt=2, schema=schemas.get(mapping['tf_type']),
                         expert_snippet=snippet_to_pass, # Pass the formatted instruction
-                        keys_to_omit=keys_to_omit_immediate
+                        keys_to_omit=keys_to_omit_immediate,
+                        mode_addendum=_manual_mode_addendum,
                     )
 
                     if corrected_hcl:

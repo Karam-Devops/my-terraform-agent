@@ -6,6 +6,55 @@ import re
 
 HEURISTICS_FILE = os.path.join(os.path.dirname(__file__), 'heuristics.json')
 
+
+# ---------------------------------------------------------------------------
+# Deprecation tracking (PR-6)
+# ---------------------------------------------------------------------------
+#
+# heuristics.json is the legacy "remember what the LLM got wrong" memory.
+# Most of the rules it has accumulated address one of two failure classes:
+#
+#   1. Pure-computed fields the LLM emitted    -> now handled by PR-3
+#                                                  (snapshot_scrubber)
+#   2. Optional+computed perpetual diffs       -> now handled by PR-4
+#                                                  (lifecycle_planner)
+#   3. Unknown-block / schema-shape errors     -> now handled by PR-5
+#                                                  (schema_prompt summary)
+#   4. Service-managed labels                  -> now handled by PR-6
+#                                                  (filter_auto_labels)
+#
+# We're not deleting the file yet — there's no telemetry on which rules
+# still earn their keep. Instead, every time a rule fires we print a
+# loud one-line marker so operators (and us, in logs) can see how often
+# the legacy path is engaged. When that count hits zero across a release,
+# the whole subsystem can be retired.
+#
+# The set is per-process; no cross-run state.
+
+_warned_rules: set = set()
+
+
+def warn_legacy_rule_used(tf_type: str, error_key: str, snippet) -> None:
+    """Emit a one-line deprecation marker the first time a given
+    (tf_type, error_key) heuristic is consulted in this process."""
+    fp = f"{tf_type}::{error_key}"
+    if fp in _warned_rules:
+        return
+    _warned_rules.add(fp)
+    if isinstance(snippet, str):
+        kind = snippet.strip().upper().split(":", 1)[0] or "SNIPPET"
+        if kind not in ("OMIT", "IGNORE"):
+            kind = "SNIPPET"
+    else:
+        kind = "SNIPPET"
+    print(
+        f"   - ⚠️  [DEPRECATED] heuristics.json rule fired: "
+        f"{tf_type} / {error_key} ({kind}). "
+        f"Schema-oracle pipeline (PR-3..PR-6) should cover this; "
+        f"if it does not, file an issue so we can fix the oracle path "
+        f"instead of patching heuristics."
+    )
+
 def load_heuristics():
     """Loads the heuristics. Fails loudly if the JSON is manually corrupted."""
     if not os.path.exists(HEURISTICS_FILE):
@@ -37,7 +86,10 @@ def generate_error_signature(error_message, resource_type):
 def get_heuristic_for_error(resource_type, error_signature):
     heuristics = load_heuristics()
     if heuristics is None: return None # Safety check
-    return heuristics.get(resource_type, {}).get(error_signature)
+    snippet = heuristics.get(resource_type, {}).get(error_signature)
+    if snippet is not None:
+        warn_legacy_rule_used(resource_type, error_signature, snippet)
+    return snippet
 
 def save_heuristic(resource_type, error_signature, correct_snippet):
     """Saves a rule safely, refusing to run if the file is corrupted."""

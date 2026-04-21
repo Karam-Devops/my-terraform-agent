@@ -1,42 +1,58 @@
 # config.py
+"""
+Centralised configuration for the Terraform IaC Agent.
+
+Every setting is env-overridable so the same code runs across dev, prod, and CI
+without touching the source. New entries should follow the same pattern:
+sensible default in code, override via environment variable.
+"""
 
 import os
 
+
 class Config:
-    """
-    Configuration class for the Terraform IaC Agent.
+    # ---------------------------------------------------------------------
+    # GCP / Vertex AI
+    # ---------------------------------------------------------------------
 
-    This class centralizes all settings and makes them configurable via
-    environment variables. This is a best practice that makes the application
-    portable and secure, preparing it for deployment on Google Cloud (Phase 2).
-    """
-
-    # --- GCP and Vertex AI Settings ---
-
-    # The Google Cloud Project ID to use for API calls.
-    # Why: Using os.getenv allows you to override this value without changing the code,
-    # which is essential for running the same code in different environments (dev vs. prod).
     GCP_PROJECT_ID: str = os.getenv("GCP_PROJECT_ID", "prod-470211")
-
-    # The GCP region for the Vertex AI API endpoint.
     GCP_LOCATION: str = os.getenv("GCP_LOCATION", "us-central1")
 
-    # The specific Gemini model to use.
-    # CRITICAL FIX: The identifier "gemini-2.5-pro" is not yet available in the Vertex AI API.
-    # Using "gemini-1.5-pro-preview-0409" (or "gemini-1.5-pro") which is the current, powerful
-    # model capable of handling the complex JSON output this agent requires.
+    # The Gemini model identifier sent to Vertex AI.
+    #
+    # Default `gemini-2.5-pro` is an *alias* that resolves to the current GA
+    # build. For reproducible enterprise runs, override with a dated build,
+    # e.g.
+    #     GEMINI_MODEL=gemini-2.5-pro-002
+    # Run `gcloud ai models list --region=$GCP_LOCATION` to see available IDs
+    # in your region.
     GEMINI_MODEL: str = os.getenv("GEMINI_MODEL", "gemini-2.5-pro")
 
-    # --- Agent Behavior Settings ---
+    # Fallback model used when the primary fails (auth blip, throttle,
+    # malformed JSON). Cheaper / faster — a degraded but working agent beats a
+    # dead one. Wired in by the upcoming router (Mini-PR 0b); declared here so
+    # callers can already read it.
+    GEMINI_MODEL_FALLBACK: str = os.getenv(
+        "GEMINI_MODEL_FALLBACK", "gemini-2.5-flash"
+    )
 
-    # A hard limit on the number of loops to prevent infinite runs and unexpected costs.
-    MAX_ITERATIONS: int = 5
+    # Number of retries the LLM client performs on transient errors.
+    LLM_MAX_RETRIES: int = int(os.getenv("LLM_MAX_RETRIES", "3"))
 
-    # NEW: The root directory where all generated Terraform files will be saved.
-    # Why: Centralizing this path here allows us to easily reference it in any
-    # node that needs to read from or write to the file system.
+    # Per-request timeout in seconds. Read by the router PR; left here so the
+    # knob is documented in one place.
+    LLM_TIMEOUT_SECONDS: int = int(os.getenv("LLM_TIMEOUT_SECONDS", "120"))
+
+    # ---------------------------------------------------------------------
+    # Agent behaviour
+    # ---------------------------------------------------------------------
+
+    # Hard cap on agent loops to bound cost on runaway runs.
+    MAX_ITERATIONS: int = int(os.getenv("MAX_ITERATIONS", "5"))
+
+    # Root directory for generated Terraform files.
     OUTPUT_DIR: str = os.getenv("OUTPUT_DIR", "generated_iac")
 
-# We create a single, importable instance of the Config class.
-# In other files, you will simply do `from config import config`
+
+# Single importable instance: `from config import config`
 config = Config()

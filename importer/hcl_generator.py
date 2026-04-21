@@ -2,8 +2,10 @@
 
 from .. import llm_provider
 from . import config
+from .schema_prompt import build_schema_summary
 
-def generate_hcl_from_json(resource_json_str, tf_type, hcl_name, attempt, schema=None, previous_error=None, expert_snippet=None, keys_to_omit=None, fields_to_ignore=None):
+
+def generate_hcl_from_json(resource_json_str, tf_type, hcl_name, attempt, schema=None, previous_error=None, expert_snippet=None, keys_to_omit=None, fields_to_ignore=None, mode_addendum=None):
     """Generates HCL using a strictly separated, additive prompt architecture."""
     print(f"\n🤖 Calling Text-Generation LLM (Attempt {attempt} of {config.MAX_LLM_RETRIES})...")
 
@@ -21,13 +23,24 @@ def generate_hcl_from_json(resource_json_str, tf_type, hcl_name, attempt, schema
         ignore_list_str = ", ".join(f"{f}" for f in fields_to_ignore)
         system_prompt += (
             "\n\n========================================================================\n"
-            "CRITICAL OVERRIDE - COMPUTED FIELD DIFFS DETECTED\n"
-            "You MUST NOT define the following fields in the main resource arguments.\n"
-            "Instead, you MUST add a `lifecycle` block at the end of the resource and add these field names to the `ignore_changes` list.\n"
-            "Example:\n"
-            "lifecycle {\n"
-            f"  ignore_changes = [{ignore_list_str}]\n"
-            "}\n"
+            "CRITICAL OVERRIDE - LIFECYCLE IGNORE_CHANGES REQUIRED\n"
+            "The following fields are optional+computed: the cloud has a value, but the\n"
+            "provider may recompute it later. Handle them as follows:\n"
+            "  1. WRITE each field in the resource body using the value from the input JSON\n"
+            "     (Terraform needs the configured value at plan time - omitting it can break\n"
+            "      `Read` for fields like `zone`, `region`, `location`, `project`).\n"
+            "  2. ALSO add the field name to a `lifecycle.ignore_changes` block so future\n"
+            "     drift on that field is suppressed.\n"
+            "  3. `ignore_changes` entries are UNQUOTED identifier references, never\n"
+            "     strings. Correct: `ignore_changes = [zone, labels]`. WRONG:\n"
+            "     `ignore_changes = [\"zone\", \"labels\"]` (emits a deprecation warning).\n"
+            f"FIELDS: {', '.join(fields_to_ignore)}\n"
+            "Example shape:\n"
+            "  zone = \"us-central1-a\"\n"
+            "  ...\n"
+            "  lifecycle {\n"
+            f"    ignore_changes = [{ignore_list_str}]\n"
+            "  }\n"
             "========================================================================\n"
         )
 
@@ -46,14 +59,21 @@ def generate_hcl_from_json(resource_json_str, tf_type, hcl_name, attempt, schema
                 ignore_list_str = ", ".join(f"{f}" for f in fields_to_ignore)
                 system_prompt += (
                     "\n\n========================================================================\n"
-                    "CRITICAL OVERRIDE - COMPUTED FIELD DIFFS DETECTED\n"
-                    "Human experts have determined the following fields cause 'forces replacement' diffs.\n"
-                    "You MUST NOT define these fields in the main resource arguments.\n"
-                    "Instead, you MUST add a `lifecycle` block at the end of the resource and add these field names to the `ignore_changes` list.\n"
-                    "Example:\n"
-                    "lifecycle {\n"
-                    f"  ignore_changes = [{ignore_list_str}]\n"
-                    "}\n"
+                    "CRITICAL OVERRIDE - LIFECYCLE IGNORE_CHANGES REQUIRED (heuristic)\n"
+                    "Human experts flagged these fields as causing perpetual / replacement diffs.\n"
+                    "  1. WRITE each field with its value from the input JSON.\n"
+                    "  2. ALSO add the field name to a `lifecycle.ignore_changes` block so\n"
+                    "     future provider-side recomputes are suppressed.\n"
+                    "  3. `ignore_changes` entries are UNQUOTED identifier references, never\n"
+                    "     strings. Correct: `ignore_changes = [zone, labels]`. WRONG:\n"
+                    "     `ignore_changes = [\"zone\", \"labels\"]` (emits a deprecation warning).\n"
+                    "Do NOT omit the field entirely - that breaks Read for things like\n"
+                    "`zone` / `region` / `location` / `project`.\n"
+                    f"FIELDS: {', '.join(fields_to_ignore)}\n"
+                    "Example shape:\n"
+                    "  lifecycle {\n"
+                    f"    ignore_changes = [{ignore_list_str}]\n"
+                    "  }\n"
                     "========================================================================\n"
                 )
 
@@ -92,11 +112,15 @@ def generate_hcl_from_json(resource_json_str, tf_type, hcl_name, attempt, schema
                 "Here is the `terraform plan` diff:\n"
                 f"```diff\n{previous_error}\n```\n\n"
                 "CRITICAL RULES FOR RESOLVING DIFFS:\n"
-                "1. `+ field = \"value\"`: Field is MISSING from your HCL. ADD it.\n"
-                "2. `- field = \"value\" -> null`: Your HCL omitted it. ADD it back.\n"
-                "3. `~ field = \"old\" -> \"new\"`: Your HCL value is wrong. UPDATE it to match the 'old' value on the left.\n"
-                "4. `- list_field = [] -> null`: Remove the empty `[]` assignment completely.\n"
-                "5. IGNORE computed attributes (`id`, `self_link`, `creation_timestamp`, etc.).\n"
+                "1. `+ field = \"value\"`: Field is MISSING from your HCL. ADD it with that value.\n"
+                "2. `- field = \"value\" -> null`: Your HCL omitted it. ADD it back with that value.\n"
+                "3. `~ field = \"X\" -> null`: Your HCL omitted it; the cloud has \"X\". ADD `field = \"X\"` (the LEFT side is the cloud value, the RIGHT is what your HCL implies).\n"
+                "4. `~ field = \"old\" -> \"new\"`: Your HCL value is wrong. UPDATE it to match the 'old' (left) value, which is what the cloud has.\n"
+                "5. Diffs inside a nested block (e.g. `~ scheduling { ... }` with a `~ instance_termination_action` line inside) mean you MUST add that field INSIDE the same nested block in your HCL, not at the top level.\n"
+                "6. `- list_field = [] -> null`: Remove the empty `[]` assignment completely.\n"
+                "7. IGNORE computed attributes (`id`, `self_link`, `creation_timestamp`, etc.) - they are framework / read-only fields that should never appear in HCL.\n"
+                "8. Do NOT remove fields from the existing HCL unless the diff explicitly says to. Preserve every line that is not contradicted by the diff.\n"
+                "9. `lifecycle.ignore_changes` entries must be UNQUOTED identifiers: `[zone, labels]` not `[\"zone\", \"labels\"]`.\n"
                 "========================================================================\n"
             )
         else:
@@ -114,10 +138,17 @@ def generate_hcl_from_json(resource_json_str, tf_type, hcl_name, attempt, schema
             "-----------------------------------\n"
         )
 
-    # 5. Schema Validation
-    if schema and schema.get('arguments'):
-        valid_args = [arg['name'] for arg in schema['arguments']]
-        system_prompt += f"\n\nValid arguments for `{tf_type}` are: {', '.join(valid_args)}."
+    # 5. Schema injection (PR-5: full structure, not just arg names)
+    if schema:
+        schema_block = build_schema_summary(tf_type, schema)
+        if schema_block:
+            system_prompt += schema_block
+
+    # 6. Resource-mode addendum (PR-10: e.g. GKE Autopilot constraints)
+    # Goes AFTER the schema summary so it overrides the OPTIONAL BLOCKS
+    # listing — the LLM should treat mode constraints as authoritative.
+    if mode_addendum:
+        system_prompt += mode_addendum
 
     final_prompt = system_prompt + (
         f"\n\n--- TASK ---\n"

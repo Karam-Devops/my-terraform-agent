@@ -6,5 +6,8 @@
     "labels": "IGNORE",
     "terraform_labels": "IGNORE",
     "resource_policies": "OMIT"
+  },
+  "google_storage_bucket": {
+    "soft_delete_policy": "soft_delete_policy {\n  retention_duration_seconds = 604800\n}"
   }
 }

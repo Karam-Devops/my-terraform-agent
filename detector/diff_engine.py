@@ -4,16 +4,17 @@ Pure-stdlib semantic diff between Terraform-state attributes (snake_case)
 and live cloud JSON (camelCase).
 
 Strategy:
-  1. Normalize the cloud JSON: camelCase -> snake_case, strip URL prefixes,
-     drop ignored fields.
+  1. Normalize the cloud JSON: camelCase -> snake_case, apply provider-style
+     field aliases, strip URL prefixes (full and `projects/.../<leaf>`),
+     flatten the metadata.items shape, drop ignored fields.
   2. Normalize the state attributes: drop ignored fields, treat [] / "" / null
      as equivalent to "absent".
-  3. Recursively walk both sides keyed by snake_case path.
+  3. Recursively walk both sides keyed by snake_case path. Inline-unwrap
+     Terraform's [{...}] single-block encoding when the cloud side is a {...}.
   4. Emit a list of DriftItem records.
 
-We do NOT try to be a perfect terraform-plan replacement — just to surface
-real differences in human-meaningful fields. The truth-of-last-resort remains
-`terraform plan`, which the executor will run after any remediation.
+Truth-of-last-resort remains `terraform plan`, run by the executor after
+any remediation. This engine is for fast detection, not formal proof.
 """
 
 import re
@@ -23,17 +24,23 @@ from typing import Any, List, Optional
 from . import config
 
 
-# --- Normalization helpers ---
+# --- Normalization helpers ------------------------------------------------
 
-_CAMEL_RE = re.compile(r"(?<!^)(?=[A-Z])")
+# Two-pass regex handles acronyms correctly:
+#   networkIP        -> network_ip
+#   networkInterfaces -> network_interfaces
+#   IPAddress        -> ip_address
+_CAMEL_ACRONYM_RE = re.compile(r"(.)([A-Z][a-z]+)")
+_CAMEL_TAIL_RE = re.compile(r"([a-z0-9])([A-Z])")
 
 
 def camel_to_snake(name: str) -> str:
-    return _CAMEL_RE.sub("_", name).lower()
+    s1 = _CAMEL_ACRONYM_RE.sub(r"\1_\2", name)
+    return _CAMEL_TAIL_RE.sub(r"\1_\2", s1).lower()
 
 
 def _strip_url(value: Any) -> Any:
-    """Strips known GCP self-link prefixes so URL-vs-shortname diffs vanish."""
+    """Strips known full-URL GCP self-link prefixes."""
     if not isinstance(value, str):
         return value
     for prefix in config.URL_PREFIXES_TO_STRIP:
@@ -42,33 +49,73 @@ def _strip_url(value: Any) -> Any:
     return value
 
 
+def _strip_to_leaf(value: Any) -> Any:
+    """`projects/{p}/zones/{z}/machineTypes/X` -> `X`. Only safe for fields
+    where the state side stores the bare leaf."""
+    if isinstance(value, str) and value.startswith("projects/") and "/" in value:
+        return value.rsplit("/", 1)[-1]
+    return value
+
+
 def _is_empty(value: Any) -> bool:
     """Treat [], {}, '', None as the same 'unset' value."""
     return value is None or value == [] or value == {} or value == ""
 
 
-def _normalize_cloud(node: Any, ignored: set) -> Any:
-    """Recursively normalize cloud JSON to look like Terraform state shape."""
+def _flatten_metadata_items(metadata_dict: Any) -> Any:
+    """
+    Cloud:  metadata = {items: [{key, value}, ...], ...}
+    State:  metadata = {key1: val1, key2: val2, ...}
+    Convert cloud form to state form. No-op if input doesn't match the shape.
+    """
+    if not isinstance(metadata_dict, dict):
+        return metadata_dict
+    items = metadata_dict.get("items")
+    if not isinstance(items, list):
+        return metadata_dict
+    flattened: dict = {}
+    for kv in items:
+        if isinstance(kv, dict) and "key" in kv:
+            flattened[kv["key"]] = kv.get("value")
+    # Preserve any other (non-items) keys that survived the ignore pass.
+    for k, v in metadata_dict.items():
+        if k != "items" and k not in flattened:
+            flattened[k] = v
+    return flattened
+
+
+# --- Normalizers ---------------------------------------------------------
+
+def _normalize_cloud(node: Any, ignored: set, aliases: dict, leaf_only: set) -> Any:
+    """Recursively reshape cloud JSON to look like Terraform state."""
     if isinstance(node, dict):
-        out = {}
+        out: dict = {}
         for k, v in node.items():
             snake = camel_to_snake(k)
-            if snake in ignored or k in ignored:
+            renamed = aliases.get(snake, snake)
+            # Honour ignore in any of: original key, snake_case, renamed alias.
+            if k in ignored or snake in ignored or renamed in ignored:
                 continue
-            normalized = _normalize_cloud(v, ignored)
+            normalized = _normalize_cloud(v, ignored, aliases, leaf_only)
+            # Special-case: flatten metadata.items into a key-value map.
+            if renamed == "metadata":
+                normalized = _flatten_metadata_items(normalized)
+            # Leaf-only stripping for known projects/.../<leaf> fields.
+            if renamed in leaf_only:
+                normalized = _strip_to_leaf(normalized)
             if _is_empty(normalized):
                 continue
-            out[snake] = normalized
+            out[renamed] = normalized
         return out
     if isinstance(node, list):
-        return [_normalize_cloud(x, ignored) for x in node]
+        return [_normalize_cloud(x, ignored, aliases, leaf_only) for x in node]
     return _strip_url(node)
 
 
 def _normalize_state(node: Any, ignored: set) -> Any:
     """Strip ignored keys and empty values from the state attribute tree."""
     if isinstance(node, dict):
-        out = {}
+        out: dict = {}
         for k, v in node.items():
             if k in ignored:
                 continue
@@ -82,11 +129,11 @@ def _normalize_state(node: Any, ignored: set) -> Any:
     return _strip_url(node)
 
 
-# --- Diff data model ---
+# --- Diff data model -----------------------------------------------------
 
 @dataclass
 class DriftItem:
-    path: str            # dotted path, e.g. "boot_disk[0].auto_delete"
+    path: str            # dotted path, e.g. "scheduling.preemptible"
     op: str              # "added" | "removed" | "changed"
     state_value: Any = None
     cloud_value: Any = None
@@ -104,11 +151,36 @@ class ResourceDrift:
         return bool(self.items) or self.error is not None
 
 
-# --- Recursive diff walker ---
+# --- Recursive diff walker -----------------------------------------------
 
-def _walk(state: Any, cloud: Any, path: str, out: List[DriftItem]) -> None:
+_LIST_INDEX_RE = re.compile(r"\[\d+\]")
+
+
+def _canonical_path(path: str) -> str:
+    """Strip list indices so 'a[0].b[3].c' matches the rule 'a.b.c'."""
+    return _LIST_INDEX_RE.sub("", path)
+
+
+def _walk(state: Any, cloud: Any, path: str, out: List[DriftItem],
+          path_ignore: set) -> None:
+    # Block-shape impedance match: TF wraps single nested blocks as [{...}];
+    # GCP returns them as {...}. Unwrap so we compare like-for-like.
+    if (isinstance(state, list) and len(state) == 1
+            and isinstance(state[0], dict) and isinstance(cloud, dict)):
+        state = state[0]
+    if (isinstance(cloud, list) and len(cloud) == 1
+            and isinstance(cloud[0], dict) and isinstance(state, dict)):
+        cloud = cloud[0]
+
     # Both empty -> nothing to do
     if _is_empty(state) and _is_empty(cloud):
+        return
+
+    # State default-zero rule: TF writes `0` to state for many unset numeric
+    # fields; GCP simply omits them. Treat as in-sync. Asymmetric: we do NOT
+    # silence cloud-side `0` against missing state — that could be real drift.
+    if (isinstance(state, (int, float)) and state == 0
+            and not isinstance(state, bool) and _is_empty(cloud)):
         return
 
     # One side empty -> added or removed
@@ -130,11 +202,12 @@ def _walk(state: Any, cloud: Any, path: str, out: List[DriftItem]) -> None:
     if isinstance(state, dict):
         for key in sorted(set(state.keys()) | set(cloud.keys())):
             child_path = f"{path}.{key}" if path else key
-            _walk(state.get(key), cloud.get(key), child_path, out)
+            if _canonical_path(child_path) in path_ignore:
+                continue
+            _walk(state.get(key), cloud.get(key), child_path, out, path_ignore)
         return
 
     if isinstance(state, list):
-        # Length mismatch is a real diff
         if len(state) != len(cloud):
             out.append(DriftItem(
                 path=path, op="changed",
@@ -142,7 +215,7 @@ def _walk(state: Any, cloud: Any, path: str, out: List[DriftItem]) -> None:
             ))
             return
         for i, (s, c) in enumerate(zip(state, cloud)):
-            _walk(s, c, f"{path}[{i}]", out)
+            _walk(s, c, f"{path}[{i}]", out, path_ignore)
         return
 
     # Scalar comparison
@@ -163,14 +236,18 @@ def diff_resource(tf_address: str, tf_type: str,
         return drift
 
     ignored = config.fields_to_ignore_for(tf_type)
-    norm_state = _normalize_state(state_attrs, ignored)
-    norm_cloud = _normalize_cloud(cloud_json, ignored)
+    aliases = config.aliases_for(tf_type)
+    leaf_only = config.leaf_only_fields_for(tf_type)
+    path_ignore = config.path_ignore_for(tf_type)
 
-    _walk(norm_state, norm_cloud, path="", out=drift.items)
+    norm_state = _normalize_state(state_attrs, ignored)
+    norm_cloud = _normalize_cloud(cloud_json, ignored, aliases, leaf_only)
+
+    _walk(norm_state, norm_cloud, path="", out=drift.items, path_ignore=path_ignore)
     return drift
 
 
-# --- Reporting ---
+# --- Reporting -----------------------------------------------------------
 
 def print_report(drifts: List[ResourceDrift]) -> int:
     """Pretty-prints the drift report. Returns the count of drifted resources."""
