@@ -23,3 +23,8 @@ detector/__pycache__/__init__.cpython-314.pyc
 .terraform_schema_cache.json
 *.backup
 *.tf
+
+# Translator diagnostic artifacts. Written by translator/yaml_engine.py to make
+# stage-1 (YAML extraction) vs stage-2 (HCL generation) bug attribution possible.
+# Regenerated on every translation run; never source-controlled.
+_intermediate_blueprint_*.yaml

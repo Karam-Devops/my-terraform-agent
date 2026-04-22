@@ -20,13 +20,18 @@ CRITICAL AWS ARCHITECTURAL RULES:
 5.  **Sizing (Instances):** Translate generic sizes intelligently. E.g., 'small' -> 't3.micro', 'medium' -> 't3.medium' or 'm5.large', 'large' -> 'm5.xlarge'.
 6.  **Storage:** Map standard disks to `gp3` volume types.
 7.  **Advanced VM Features (vTPM/Shielded):** Do NOT attempt to map GCP Shielded VM features (like `enable_vtpm` or `enable_secure_boot`) directly to top-level arguments like `tpm_support` on standard `aws_instance` resources. These require complex Nitro Enclave setups or specific AMI configurations in AWS. OMIT these advanced security features from the generated HCL and instead add a `# TODO:` comment explaining that advanced enclave/TPM support requires manual architecture.
-8. **Spot/Preemptible Instances (CRITICAL):** Do NOT use `instance_interruption_behavior` or similar spot/preemptible settings as top-level arguments on `aws_instance`. If translating a preemptible or spot instance, you MUST nest these settings inside an `instance_market_options` block. 
-   Example:
+8. **Spot/Preemptible Instances (CRITICAL):** Do NOT use `instance_interruption_behavior` or similar spot/preemptible settings as top-level arguments on `aws_instance`. If translating a preemptible or spot instance, you MUST nest these settings inside an `instance_market_options` block. Map the GCP termination action to the SEMANTICALLY EQUIVALENT AWS interruption behavior (NOT a default):
+   *   GCP `instance_termination_action = "STOP"` → AWS `instance_interruption_behavior = "stop"` (preserves the root volume; instance can resume)
+   *   GCP `instance_termination_action = "DELETE"` → AWS `instance_interruption_behavior = "terminate"` (destroys the instance and its root volume)
+   *   GCP scheduling with hibernation → AWS `instance_interruption_behavior = "hibernate"`
+   These are NOT interchangeable. Substituting "terminate" for a source "STOP" silently destroys data the operator expected to preserve.
+   Example (for a source STOP):
    instance_market_options {
      market_type = "spot"
      spot_options {
-       instance_interruption_behavior = "terminate"
+       instance_interruption_behavior = "stop"
      }
+   }
 """
 
 AZURE_ARCHITECTURAL_RULES = """
@@ -48,4 +53,5 @@ CRITICAL AZURE ARCHITECTURAL RULES:
 9.  **Availability Zones (CRITICAL INCONSISTENCY):** You must pay close attention to the resource type when assigning zones:
     *   For `azurerm_linux_virtual_machine` or `azurerm_windows_virtual_machine`: You MUST use the singular `zone` argument with a string value (e.g., `zone = "1"`).
     *   For `azurerm_public_ip`: You MUST use the plural `zones` argument with a list of strings (e.g., `zones = ["1"]`).
+10. **Variable declaration completeness (STRICT):** For EVERY `var.<NAME>` reference you emit anywhere in the HCL output, you MUST also emit a corresponding `variable "<NAME>" { ... }` declaration block in the same output. The output is a self-contained Terraform module — undeclared variables cause `terraform validate` to fail with `Reference to undeclared input variable`. This rule subsumes Rule 7's `admin_ssh_key` requirement and applies to every other variable reference (e.g., `var.resource_group_name`, `var.location`, `var.subnet_id`). Before finalizing your output, scan it: every `var.X` you wrote needs a `variable "X" {}` block somewhere in the same file. References inside `#` comments or `/* ... */` blocks do not need declarations.
 """

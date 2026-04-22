@@ -2,20 +2,36 @@
 
 import re
 import logging
-from typing import Optional
-from langchain_core.messages import SystemMessage, HumanMessage
+from typing import Optional, Dict
+from langchain_core.messages import SystemMessage, HumanMessage, AIMessage
 from .. import llm_provider
 from . import config
 
 # Initialize standard logger for enterprise observability
 logger = logging.getLogger(__name__)
 
-def generate_azure_hcl(yaml_blueprint: str, source_filename: str) -> Optional[str]:
+def generate_azure_hcl(
+    yaml_blueprint: str,
+    source_filename: str,
+    correction_context: Optional[Dict[str, str]] = None,
+) -> Optional[str]:
     """
     Phase 2: Converts the generic YAML blueprint into valid AzureRM HCL code,
     incorporating specific architectural rules and a Traceability Matrix.
+
+    Phase I (validate-feedback loop): if `correction_context` is provided,
+    this is a retry call after a prior validation failure. The previous HCL
+    output and the validation error are appended to the conversation as
+    AIMessage + HumanMessage, prompting the LLM to self-correct without
+    losing the original system instruction or blueprint context.
+
+    correction_context shape (when present):
+        {"prev_hcl": <previous attempt's HCL>, "error": <validation error string>}
     """
-    logger.info(f"🏗️ [Phase 2] Generating Azure HCL and Traceability Matrix for {source_filename}...")
+    if correction_context is None:
+        logger.info(f"🏗️ [Phase 2] Generating Azure HCL and Traceability Matrix for {source_filename}...")
+    else:
+        logger.info(f"🔁 [Phase 2 retry] Re-generating Azure HCL with validation-error feedback for {source_filename}...")
 
     # System prompt: Defines the persona, rules, and expected format.
     system_instruction = (
@@ -52,15 +68,43 @@ def generate_azure_hcl(yaml_blueprint: str, source_filename: str) -> Optional[st
     )
 
     try:
-        logger.info("   - Sending blueprint to Azure Generation Engine (Gemini)...")
+        if correction_context is None:
+            logger.info("   - Sending blueprint to Azure Generation Engine (Gemini)...")
+        else:
+            logger.info("   - Sending blueprint + previous attempt + validation error to Azure Generation Engine (Gemini)...")
         llm_client = llm_provider.get_llm_text_client()
-        
+
         # Using structured messages (System + Human) for optimal Gemini 2.5 Pro performance
         messages = [
             SystemMessage(content=system_instruction),
             HumanMessage(content=human_instruction)
         ]
-        
+
+        # Phase I: append the prior failed attempt + the validator error so the LLM
+        # can self-correct with full context. The LLM is dramatically better at
+        # FIXING its own output when shown the error than at AVOIDING the mistake
+        # in the first place. This catches long-tail bug classes (cycles, schema
+        # drift, novel hallucinations) without requiring new prompt rules.
+        if correction_context is not None:
+            prev_hcl = correction_context.get("prev_hcl", "")
+            error_text = correction_context.get("error", "")
+            correction_human = (
+                "The HCL you generated above failed `terraform validate` (or one of the\n"
+                "fast pre-checks: variable-declaration completeness) with this error:\n\n"
+                "----- VALIDATION ERROR -----\n"
+                f"{error_text}\n"
+                "----------------------------\n\n"
+                "Fix the SPECIFIC error reported above. Regenerate the COMPLETE output\n"
+                "(Traceability Matrix + HCL), preserving every other resource, comment,\n"
+                "variable declaration, and matrix row exactly as before. Do not introduce\n"
+                "unrelated changes. Output format is unchanged: matrix block first, then\n"
+                "HCL, no markdown fences."
+            )
+            messages.extend([
+                AIMessage(content=prev_hcl),
+                HumanMessage(content=correction_human),
+            ])
+
         response = llm_client.invoke(messages)
         hcl_output = response.content.strip()
 

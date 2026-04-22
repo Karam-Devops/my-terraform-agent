@@ -49,27 +49,61 @@ def run_translation_pipeline(target_cloud: str, source_file_path: str) -> Tuple[
         logger.debug(f"   {line}")
     logger.debug("   ...")
 
-    # 4. Phase 2: Generate Target HCL (Routed logic)
+    # 4. Phase 2: Generate Target HCL (Routed logic) with Phase I validate-feedback
+    # retry loop. The LLM is dramatically better at FIXING its own output when shown
+    # the validator error than at AVOIDING the mistake from prompt rules alone. This
+    # bounded loop catches long-tail bug classes (resource cycles, novel argument
+    # hallucinations, schema drift) without requiring a new prompt rule per bug.
     if target == "aws":
-        raw_target_hcl = aws_engine.generate_aws_hcl(yaml_blueprint, source_file_path)
+        engine_fn = aws_engine.generate_aws_hcl
         prefix = "aws"
     else:
-        raw_target_hcl = azure_engine.generate_azure_hcl(yaml_blueprint, source_file_path)
+        engine_fn = azure_engine.generate_azure_hcl
         prefix = "azure"
-    
-    if not raw_target_hcl: 
-        return False, None
-        
-    final_target_hcl = _clean_and_format_hcl(raw_target_hcl)
+
+    final_target_hcl: Optional[str] = None
+    is_valid: bool = False
+    validation_msg: str = ""
+    prev_hcl: str = ""
+
+    max_attempts = max(1, int(getattr(config, "MAX_RETRIES", 3)))
+    for attempt in range(1, max_attempts + 1):
+        if attempt == 1:
+            logger.info(f"   - Phase 2 attempt {attempt}/{max_attempts} (initial generation)")
+            raw_target_hcl = engine_fn(yaml_blueprint, source_file_path)
+        else:
+            logger.info(f"   - Phase 2 attempt {attempt}/{max_attempts} (retry with validation-error feedback)")
+            raw_target_hcl = engine_fn(
+                yaml_blueprint,
+                source_file_path,
+                correction_context={"prev_hcl": prev_hcl, "error": validation_msg},
+            )
+
+        if not raw_target_hcl:
+            logger.error(f"   ❌ Engine returned empty output on attempt {attempt}.")
+            return False, None
+
+        final_target_hcl = _clean_and_format_hcl(raw_target_hcl)
+
+        # Pillar 1 Proof: Syntactic Validation
+        is_valid, validation_msg = tf_validator.validate_hcl(final_target_hcl, target)
+        if is_valid:
+            if attempt > 1:
+                logger.info(f"   ✅ Self-correction succeeded on attempt {attempt}/{max_attempts}.")
+            break
+
+        # Validation failed — prepare context for the next retry.
+        prev_hcl = final_target_hcl
+        if attempt < max_attempts:
+            logger.warning(f"   🔁 Validation failed on attempt {attempt}/{max_attempts}; feeding error back to LLM and retrying.")
+        else:
+            logger.warning(f"   ⚠️  Validation still failing after {max_attempts} attempts; saving best-effort output for manual review.")
 
     # 5. Define Output Filename
     base_name = os.path.basename(source_file_path)
     clean_name = base_name.replace("google_", "")
     new_filename = f"{prefix}_translated_{clean_name}"
     output_path = os.path.join(os.path.dirname(source_file_path), new_filename)
-
-    # 6. Pillar 1 Proof: Syntactic Validation
-    is_valid, validation_msg = tf_validator.validate_hcl(final_target_hcl, target)
 
     # 7. Save the Output
     try:
