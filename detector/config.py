@@ -68,6 +68,23 @@ RESOURCE_IGNORE_FIELDS = {
         "project_number", "projectNumber",
         "rpo",
         "project",
+        # Cloud-only computed outputs (no HCL equivalent)
+        "creation_time", "creationTime",
+        "update_time", "updateTime",
+        "generation",
+        "location_type", "locationType",
+        # `storage_url` is the cloud's gs://name/ output; state has its own
+        # `url` field (gs://name without trailing slash). Both are computed
+        # outputs — drop both to keep the diff focused on configuration.
+        "storage_url", "storageUrl",
+        "url",
+        # Terraform-only behavioral flag — never sent to cloud, never returned.
+        "force_destroy",
+        # State emits this as `[{enabled: false}]` (TF default block); cloud
+        # omits when not enabled. The walker emits the whole block as drift
+        # because list-vs-None doesn't recurse into the all-default content.
+        # Hard-ignore until a user actually opts in (then cloud will return data).
+        "hierarchical_namespace", "hierarchicalNamespace",
     },
 }
 
@@ -106,7 +123,11 @@ FIELD_ALIASES = {
         # `consume_reservation_type` is a unique GCP API field name).
         "consume_reservation_type": "type",
     },
-    "google_storage_bucket": {},
+    "google_storage_bucket": {
+        # Cloud returns the long-form key the GCS API uses; TF state stores
+        # it under the shorter `storage_class`. Same value either way.
+        "default_storage_class": "storage_class",
+    },
 }
 
 # --- Per-resource: path-scoped ignores (canonical paths, no list indices) ---
@@ -119,7 +140,12 @@ PATH_IGNORE_FIELDS = {
         "network_interface.access_config.name",
         "network_interface.access_config.type",
     },
-    "google_storage_bucket": set(),
+    "google_storage_bucket": {
+        # Cloud-computed timestamp inside the soft_delete_policy block. Same
+        # UTC moment, but the format differs (`...Z` vs `...+00:00`, microsecond
+        # precision). Not user-configurable, so ignore.
+        "soft_delete_policy.effective_time",
+    },
 }
 
 # --- Per-resource: fields whose value is a `projects/.../<leaf>` URL on the
@@ -145,6 +171,27 @@ URL_PREFIXES_TO_STRIP = (
 # Anything marked OMIT or IGNORE in importer/heuristics.json should also be
 # silently ignored for drift purposes — those are fields we already decided
 # we cannot or will not manage.
+#
+# EXCEPT: importer heuristics and detector heuristics are not always the same
+# question. The importer asks "should I render this in generated HCL?" — and
+# may say IGNORE for fields like `labels` because GCP auto-injects values
+# (e.g., `goog-ops-agent-policy`) that would cause perpetual diff against the
+# generated config. The detector asks a different question: "did the cloud
+# diverge from what state recorded?" — and a human running `gcloud add-labels`
+# is exactly the high-signal drift we want to catch. So the detector keeps
+# a per-resource override list of importer ignores it refuses to inherit.
+HEURISTIC_IGNORE_OVERRIDES = {
+    "google_compute_instance": {
+        # Manual label additions (e.g., `gcloud compute instances add-labels`)
+        # are real drift, even though the importer suppresses the field.
+        "labels",
+    },
+    "google_storage_bucket": {
+        "labels",
+    },
+}
+
+
 def _load_heuristics_ignores() -> dict:
     """Returns {tf_type: {field, ...}} derived from importer rules."""
     heuristics_path = os.path.join(
@@ -189,13 +236,19 @@ def fields_to_ignore_for(tf_type: str) -> set:
       - global ignores (apply to every resource)
       - per-resource ignores (curated)
       - complex blocks the POC cannot diff yet
-      - heuristics-derived ignores (live merge from importer/heuristics.json)
+      - heuristics-derived ignores (live merge from importer/heuristics.json),
+        minus any fields the detector explicitly opts out of inheriting
+        (HEURISTIC_IGNORE_OVERRIDES) because they're high-signal drift.
     """
+    heuristic_ignores = (
+        _HEURISTICS_IGNORES.get(tf_type, set())
+        - HEURISTIC_IGNORE_OVERRIDES.get(tf_type, set())
+    )
     return (
         GLOBAL_IGNORE_FIELDS
         | RESOURCE_IGNORE_FIELDS.get(tf_type, set())
         | COMPLEX_BLOCKS_TO_SKIP.get(tf_type, set())
-        | _HEURISTICS_IGNORES.get(tf_type, set())
+        | heuristic_ignores
     )
 
 

@@ -62,6 +62,30 @@ def _is_empty(value: Any) -> bool:
     return value is None or value == [] or value == {} or value == ""
 
 
+def _numeric_string_equals_int(a: Any, b: Any) -> bool:
+    """
+    True if one side is an int and the other is a string-encoded int with the
+    same value. Used to absorb GCP's int64-as-JSON-string quirk
+    (e.g., retention_duration_seconds = "604800" vs 604800 in state).
+    Booleans are excluded — Python's `bool` is a subclass of `int`, and we
+    don't want True/False being silently equated to "1"/"0".
+    """
+    def _coerce(v: Any) -> Optional[int]:
+        if isinstance(v, bool):
+            return None
+        if isinstance(v, int):
+            return v
+        if isinstance(v, str):
+            try:
+                return int(v)
+            except ValueError:
+                return None
+        return None
+
+    ca, cb = _coerce(a), _coerce(b)
+    return ca is not None and cb is not None and ca == cb
+
+
 def _flatten_metadata_items(metadata_dict: Any) -> Any:
     """
     Cloud:  metadata = {items: [{key, value}, ...], ...}
@@ -183,6 +207,14 @@ def _walk(state: Any, cloud: Any, path: str, out: List[DriftItem],
             and not isinstance(state, bool) and _is_empty(cloud)):
         return
 
+    # State default-false rule: TF writes `false` to state for many unset
+    # boolean fields (e.g., requester_pays, enable_object_retention,
+    # default_event_based_hold); GCP simply omits them. Same asymmetry as
+    # the 0-rule: state=true vs cloud-omitted is still real drift, only
+    # state=false vs cloud-omitted is suppressed.
+    if (isinstance(state, bool) and state is False and _is_empty(cloud)):
+        return
+
     # One side empty -> added or removed
     if _is_empty(state) and not _is_empty(cloud):
         out.append(DriftItem(path=path, op="added", cloud_value=cloud))
@@ -191,8 +223,15 @@ def _walk(state: Any, cloud: Any, path: str, out: List[DriftItem],
         out.append(DriftItem(path=path, op="removed", state_value=state))
         return
 
-    # Type mismatch -> treat as changed
+    # Type mismatch -> treat as changed (with one tolerated exception below).
     if type(state) != type(cloud):
+        # API-quirk tolerance: GCP returns int64 fields as JSON strings
+        # (e.g., soft_delete_policy.retention_duration_seconds = "604800"),
+        # while the TF state stores them as native ints. Treat ("604800", 604800)
+        # as equal. Booleans are excluded because Python's bool is a subclass
+        # of int and we don't want True == "1" or "true" coercions.
+        if _numeric_string_equals_int(state, cloud):
+            return
         out.append(DriftItem(
             path=path, op="changed",
             state_value=state, cloud_value=cloud,

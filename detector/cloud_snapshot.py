@@ -6,6 +6,7 @@ Reuses importer.gcp_client so we don't fork describe-command knowledge.
 
 import concurrent.futures
 import json
+import subprocess
 from typing import Dict, List, Optional
 
 from importer import gcp_client
@@ -39,12 +40,34 @@ def _build_mapping(resource: ManagedResource) -> Optional[dict]:
 
 
 def _fetch_one(resource: ManagedResource) -> tuple:
-    """Worker: fetch live JSON for one resource. Returns (address, dict|None)."""
+    """
+    Worker: fetch live JSON for one resource. Returns (address, dict|None).
+
+    Returning None for the data half is the documented contract that
+    diff_engine.diff_resource interprets as "cloud snapshot unavailable
+    (resource may have been deleted)" — i.e., the missing-cloud-resource
+    drift category. We MUST NOT let exceptions escape this function: a
+    single failed describe (resource deleted, network blip, auth quirk)
+    would take down every other resource's diff in the same parallel run
+    via as_completed.fut.result() re-raising.
+    """
     mapping = _build_mapping(resource)
     if mapping is None:
         return (resource.tf_address, None)
 
-    raw = gcp_client.get_resource_details_json(mapping)
+    try:
+        raw = gcp_client.get_resource_details_json(mapping)
+    except subprocess.CalledProcessError as e:
+        # Expected path when the cloud resource has been deleted out-of-band.
+        # The gcloud describe call returns non-zero — surface as missing.
+        print(f"❌ {resource.tf_address}: gcloud describe failed (resource may have been deleted). Exit code: {e.returncode}")
+        return (resource.tf_address, None)
+    except Exception as e:
+        # Defense-in-depth: any other gcloud / shell / network failure should
+        # be reported as missing-snapshot rather than crashing the whole run.
+        print(f"❌ {resource.tf_address}: unexpected error fetching cloud snapshot ({type(e).__name__}: {e}).")
+        return (resource.tf_address, None)
+
     if not raw:
         return (resource.tf_address, None)
     try:
