@@ -208,6 +208,16 @@ _PROVIDER_DROPPED_PATHS: List[str] = [
     # leaves `maintenance_policy` empty for clusters with no real config,
     # which PR-12's empty-top-level-key cleanup then drops entirely.
     "maintenance_policy.resource_version",
+    # `master_authorized_networks_config.enabled`: GCP API uses an explicit
+    # `enabled: true` boolean to signal the feature is active. The TF schema
+    # encodes the same signal as block-presence (the block exists ⇒ enabled),
+    # so writing `enabled = true` inside the HCL block produces
+    # `Unsupported argument`. The bug only surfaces on RE-imports after a
+    # `terraform apply` materialized the block server-side with all default
+    # fields populated — the first import after cluster creation often
+    # doesn't return `enabled` at all. Strip unconditionally so neither path
+    # ever produces broken HCL.
+    "master_authorized_networks_config.enabled",
 ]
 
 

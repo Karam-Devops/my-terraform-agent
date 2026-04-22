@@ -9,5 +9,9 @@
   },
   "google_storage_bucket": {
     "soft_delete_policy": "soft_delete_policy {\n  retention_duration_seconds = 604800\n}"
+  },
+  "google_container_cluster": {
+    "enterprise_config": "enterprise_config {\n  desired_tier = \"STANDARD\"\n}",
+    "ray_operator_config": "ray_operator_config {\n  enabled = false\n}"
   }
 }

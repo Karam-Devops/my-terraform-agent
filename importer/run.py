@@ -65,6 +65,94 @@ def _scrub_hcl(hcl_str, keys_to_omit):
         if not should_omit: clean_lines.append(line)
     return "\n".join(clean_lines)
 
+def _classify_blockage(failed_item):
+    """Classify a failed item as SELF_BROKEN or BLOCKED_BY_SIBLING.
+
+    Path 1: when one resource's .tf file has a config-load error
+    (`Unsupported argument`, `Unsupported block type`), every other
+    resource's `-target` plan fails with the SAME error pointing at the
+    broken sibling. We don't want the menu to show 3 copies of the same
+    cluster error against bucket / GCE / GKE names — the operator skips
+    all three and we report "0 / 3 succeeded" when the imports actually
+    worked.
+
+    Returns ('self_broken', None) or ('blocked', blocker_filename).
+
+    Heuristic:
+      * If the error mentions THIS resource's own .tf file at all, it's
+        SELF_BROKEN — the file is at least partially the problem and the
+        operator needs to look at it.
+      * If the error only mentions OTHER .tf files, it's BLOCKED — fix
+        the sibling first; this resource may auto-resolve on re-verify.
+      * If no file is mentioned (no `on X.tf line N` marker), default to
+        SELF_BROKEN — safe fallback so we don't suppress real errors.
+    """
+    own_file = failed_item['mapping']['filename']
+    error_text = failed_item['data'].get('error', '')
+    files_in_error = terraform_client.extract_error_files(error_text)
+    if not files_in_error:
+        return ('self_broken', None)
+    if own_file in files_in_error:
+        return ('self_broken', None)
+    # Filter to siblings that are actually different from our own file
+    siblings = [f for f in files_in_error if f != own_file]
+    if not siblings:
+        return ('self_broken', None)
+    return ('blocked', siblings[0])
+
+
+def _annotate_blockage(failed_imports):
+    """Tag every failed_item with `_blockage` and `_blocker` in place."""
+    for item in failed_imports:
+        kind, blocker = _classify_blockage(item)
+        item['_blockage'] = kind
+        item['_blocker'] = blocker
+
+
+def _refresh_blocked_after_fix(failed_imports, successful_imports, just_fixed_filename):
+    """Re-verify blocked items after a sibling has been fixed.
+
+    Path 1: when SELF_BROKEN item X's .tf file gets fixed, any BLOCKED
+    item whose `_blocker == X.filename` may now plan cleanly. Re-run
+    `plan_for_resource` for each, promote PASSes to successful_imports,
+    and reclassify items still failing.
+
+    We only refresh items whose blocker filename matches what was just
+    fixed — refreshing every blocked item after every fix is wasteful
+    when typical demos have 3-10 blocked siblings.
+    """
+    promoted = []
+    for item in list(failed_imports):
+        if item.get('_blockage') != 'blocked':
+            continue
+        if item.get('_blocker') != just_fixed_filename:
+            continue
+        mapping = item['mapping']
+        print(f"\n   - 🔄 Re-verifying '{mapping['resource_name']}' "
+              f"(was blocked by {just_fixed_filename}, now fixed)...")
+        is_success, plan_output = terraform_client.plan_for_resource(mapping)
+        if is_success:
+            print(f"   - 🟢 UNBLOCKED & PASSED: '{mapping['resource_name']}' "
+                  f"auto-promoted to successful imports.")
+            item['is_success'] = True
+            item['data']['error'] = ''
+            successful_imports.append(item)
+            failed_imports.remove(item)
+            promoted.append(item)
+        else:
+            # Still failing — update error text and reclassify so the
+            # menu shows the current state (might now be self-broken if
+            # the original blocker hid an own-file issue).
+            item['data']['error'] = plan_output
+            kind, new_blocker = _classify_blockage(item)
+            item['_blockage'] = kind
+            item['_blocker'] = new_blocker
+            tag = f"{kind}" + (f" (now blocked by {new_blocker})" if new_blocker else "")
+            print(f"   - ⚠️  '{mapping['resource_name']}' still failing — "
+                  f"reclassified as {tag}")
+    return promoted
+
+
 def get_multiline_input():
     print("\nPaste your correct HCL snippet below.")
     print("OR use a Surgical Command:")
@@ -413,7 +501,7 @@ def _attempt_correction(mapping, resource_json, previous_error, attempt_num, sch
     print(f"   - Re-attempting import for '{mapping['resource_name']}'...")
     terraform_client.import_resource(mapping, force_refresh=True)
 
-    is_success, plan_output = terraform_client.plan_for_resource(mapping['filename'])
+    is_success, plan_output = terraform_client.plan_for_resource(mapping)
 
     return (mapping, plan_output, is_success)
 
@@ -461,13 +549,21 @@ def run_workflow():
     successful_generations = [r for r in initial_results if r['is_success']]
     if not successful_generations: return
 
-    terraform_client.init(upgrade=True)
+    # Plain `terraform init` (no -upgrade): respects the committed
+    # .terraform.lock.hcl so providers resolve to the exact pinned versions.
+    # Using -upgrade here would re-resolve to latest-within-constraints on
+    # every workflow run and silently mutate the lock file, defeating the
+    # reproducibility guarantee that committing the lock provides.
+    # `_ensure_initialized()` still uses upgrade=True for the missing-lock
+    # case (legitimate first-time setup); only this unconditional pre-import
+    # init was problematic.
+    terraform_client.init()
     for result in successful_generations: terraform_client.import_resource(result['mapping'])
 
-    print("\n--- Initial Verification of All Generated Files ---")
+    print("\n--- Initial Verification of All Generated Files (per-resource scoped plans) ---")
     all_results = []
     for result in successful_generations:
-        is_success, output = terraform_client.plan_for_resource(result['mapping']['filename'])
+        is_success, output = terraform_client.plan_for_resource(result['mapping'])
         result['is_success'] = is_success
         if not is_success: result['data']['error'] = output
         all_results.append(result)
@@ -476,19 +572,51 @@ def run_workflow():
     failed_imports = [r for r in all_results if not r['is_success']]
 
     if failed_imports:
+        # Path 1: classify failures into self_broken vs blocked-by-sibling
+        # so we work on causes first. Blocked items often auto-resolve when
+        # the sibling that caused the directory-wide config-load error is
+        # fixed — _refresh_blocked_after_fix() handles the promotion.
+        _annotate_blockage(failed_imports)
+        failed_imports.sort(key=lambda i: 0 if i.get('_blockage') == 'self_broken' else 1)
+        n_self = sum(1 for i in failed_imports if i.get('_blockage') == 'self_broken')
+        n_blocked = sum(1 for i in failed_imports if i.get('_blockage') == 'blocked')
+
         print("\n" + "="*70)
         print(f"--- Starting Interactive Correction for {len(failed_imports)} Failed Resources ---")
+        if n_blocked:
+            print(f"    {n_self} self-broken · {n_blocked} blocked by sibling files")
+            print(f"    Blocked items will auto-reverify after their blocker is fixed.")
         print("="*70)
-        
+
         for failed_item in list(failed_imports):
+            # Path 1: skip items that were auto-promoted by a sibling fix
+            # since the previous iteration of this loop.
+            if failed_item not in failed_imports:
+                continue
+
             mapping = failed_item['mapping']
             current_error = failed_item['data']['error']
             resource_json = failed_item['data']['json']
             ai_attempt_count = 0
-            
+
             while True:
                 clean_error = _clean_terraform_output(current_error)
-                print(f"\n🛑 RESOURCE: '{mapping['resource_name']}'\n--- TERRAFORM DIFF / ERROR ---")
+                # Path 1: surface the BLOCKED indicator so the operator
+                # understands they're seeing a sibling's error, not this
+                # resource's own error.
+                blockage = failed_item.get('_blockage', 'self_broken')
+                blocker = failed_item.get('_blocker')
+                if blockage == 'blocked' and blocker:
+                    print(f"\n⏸️  RESOURCE: '{mapping['resource_name']}' "
+                          f"BLOCKED by sibling file: {blocker}")
+                    print(f"    The error below originates in {blocker}, NOT in "
+                          f"this resource's .tf file.")
+                    print(f"    Recommended: Skip ([3]) — this resource will "
+                          f"auto-reverify once {blocker} is fixed.")
+                    print(f"--- TERRAFORM ERROR (from sibling) ---")
+                else:
+                    print(f"\n🛑 RESOURCE: '{mapping['resource_name']}'\n"
+                          f"--- TERRAFORM DIFF / ERROR ---")
                 error_lines = clean_error.splitlines()
                 for line in error_lines[:25]: print(f"  {line}")
                 if len(error_lines) > 25: print("  ... (output truncated) ...")
@@ -588,16 +716,25 @@ def run_workflow():
                         
                         print("   - Re-attempting import with corrected HCL...")
                         terraform_client.import_resource(mapping, force_refresh=True)
-                        is_success, plan_output = terraform_client.plan_for_resource(mapping['filename'])
+                        is_success, plan_output = terraform_client.plan_for_resource(mapping)
                         
                         if is_success:
                             print(f"✅ Human-in-the-Loop Correction SUCCEEDED for '{mapping['resource_name']}'!")
                             successful_imports.append(failed_item)
                             failed_imports.remove(failed_item)
-                            break 
+                            # Path 1: this fix may have unblocked siblings.
+                            _refresh_blocked_after_fix(
+                                failed_imports, successful_imports, mapping['filename']
+                            )
+                            break
                         else:
                             print("❌ Correction failed. Returning to menu.")
-                            current_error = plan_output 
+                            current_error = plan_output
+                            # Path 1: re-classify in case error file changed.
+                            failed_item['data']['error'] = plan_output
+                            kind, blocker = _classify_blockage(failed_item)
+                            failed_item['_blockage'] = kind
+                            failed_item['_blocker'] = blocker
                     else:
                          print("❌ LLM failed to generate correction. Returning to menu.")
                     continue 
@@ -612,9 +749,19 @@ def run_workflow():
                             print(f"✅ AI SUCCEEDED on attempt {i + 1}!")
                             successful_imports.append(failed_item)
                             failed_imports.remove(failed_item)
-                            break 
+                            # Path 1: this fix may have unblocked siblings.
+                            _refresh_blocked_after_fix(
+                                failed_imports, successful_imports, mapping['filename']
+                            )
+                            break
                         else:
-                            current_error = output 
+                            current_error = output
+                            # Path 1: re-classify in case the error file
+                            # changed (own-file fixed but sibling now blocks).
+                            failed_item['data']['error'] = output
+                            kind, blocker = _classify_blockage(failed_item)
+                            failed_item['_blockage'] = kind
+                            failed_item['_blocker'] = blocker
 
                     if not is_success: print(f"❌ AI FAILED after {config.MAX_LLM_RETRIES} retries.")
 
