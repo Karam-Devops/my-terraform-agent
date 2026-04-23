@@ -1,0 +1,57 @@
+prod-470211
+
+python -m detector.run
+python -m policy.run
+
+
+my-terraform-agent/google_compute_instance_poc_gce.tf
+my-terraform-agent/google_storage_bucket_poc_bucket_karam.tf
+my-terraform-agent/google_container_cluster_poc_autocluster_1.tf
+
+
+
+
+
+Demo: gcloud storage buckets update gs://poc_bucket_karam --default-storage-class=NEARLINE --project=prod-470211
+
+
+
+
+
+
+
+
+gcloud storage buckets update gs://poc_bucket_karam --update-labels=team=marketing --project=prod-470211
+gcloud compute instances update poc-gce --deletion-protection --zone=us-central1-b --project=prod-470211
+gcloud compute instances add-labels poc-gce --labels=team=ops --zone=us-central1-b --project=prod-470211
+
+
+*******REVERTS*******
+
+gcloud storage buckets update gs://poc_bucket_karam --remove-labels=team --project=prod-470211
+gcloud compute instances update poc-gce --no-deletion-protection --zone=us-central1-b --project=prod-470211
+gcloud compute instances remove-labels poc-gce --labels=team --zone=us-central1-b --project=prod-470211
+*********************
+
+
+
+$ver = "0.56.0"
+$url = "https://github.com/open-policy-agent/conftest/releases/download/v$ver/conftest_${ver}_Windows_x86_64.zip"
+$zip = "$env:TEMP\conftest.zip"
+$extractDir = "$env:TEMP\conftest_extract"
+
+Invoke-WebRequest -Uri $url -OutFile $zip
+Expand-Archive -Path $zip -DestinationPath $extractDir -Force
+Copy-Item "$extractDir\conftest.exe" -Destination ".venv\Scripts\conftest.exe" -Force
+
+conftest --version
+
+
+
+$env:PYTHONIOENCODING = "utf-8"
+python -m policy.run
+
+
+Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass
+.\.venv\Scripts\Activate.ps1
+conftest --version
