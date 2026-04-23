@@ -14,6 +14,16 @@ import sys
 
 from . import config, state_reader, cloud_snapshot, diff_engine, remediator
 
+# Policy enforcer decoration. Imported lazily-by-try so the detector still
+# runs cleanly when the policy module isn't present (e.g. early-checkout
+# branches) or when conftest isn't installed. Both paths are handled by
+# integration.classify_drift returning an empty PolicyImpact.
+try:
+    from policy import integration as policy_integration
+    _POLICY_AVAILABLE = True
+except ImportError:
+    _POLICY_AVAILABLE = False
+
 
 def main() -> int:
     # Always operate from the project root so paths line up with the importer.
@@ -35,12 +45,25 @@ def main() -> int:
     for r in resources:
         if not r.in_scope:
             continue
-        drifts.append(diff_engine.diff_resource(
+        drift = diff_engine.diff_resource(
             tf_address=r.tf_address,
             tf_type=r.tf_type,
             state_attrs=r.attributes,
             cloud_json=snapshots.get(r.tf_address),
-        ))
+        )
+        # Decorate drifted resources with policy impact. Skip when nothing
+        # drifted (clean resources don't need the noise) or when the
+        # policy module isn't loadable (fail-open). classify_drift itself
+        # is fail-open too — missing conftest, missing snapshot, or
+        # out-of-scope tf_type all return an empty impact.
+        if _POLICY_AVAILABLE and drift.has_drift and not drift.error:
+            impact = policy_integration.classify_drift(
+                tf_address=drift.tf_address,
+                tf_type=drift.tf_type,
+                cloud_snapshot=snapshots.get(r.tf_address),
+            )
+            drift.policy_tag = impact.summary_tag
+        drifts.append(drift)
 
     drift_count = diff_engine.print_report(drifts)
 

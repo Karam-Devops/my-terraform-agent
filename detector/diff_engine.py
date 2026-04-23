@@ -201,6 +201,11 @@ class ResourceDrift:
     tf_type: str
     items: List[DriftItem] = field(default_factory=list)
     error: Optional[str] = None  # populated if cloud snapshot was missing
+    # Policy-enforcer decoration. None when policy module isn't installed,
+    # conftest is missing, or the resource is out-of-scope. Set by
+    # detector.run after diff_resource() returns. Rendered as a bracketed
+    # suffix on the resource header line by print_report.
+    policy_tag: Optional[str] = None
 
     @property
     def has_drift(self) -> bool:
@@ -334,7 +339,10 @@ def print_report(drifts: List[ResourceDrift]) -> int:
         print(f"✅ {d.tf_address}  — in sync")
 
     for d in drifted:
-        print(f"\n🛑 {d.tf_address}")
+        # Policy decoration: surface non-compliance impact inline so the
+        # operator sees policy regression in the same line as the drift.
+        suffix = f"  [{d.policy_tag}]" if d.policy_tag else ""
+        print(f"\n🛑 {d.tf_address}{suffix}")
         if d.error:
             print(f"   ERROR: {d.error}")
             continue
