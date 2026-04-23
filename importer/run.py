@@ -16,6 +16,125 @@ project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
 os.chdir(project_root)
 print(f"--- Ensuring working directory is set to: {os.getcwd()} ---")
 
+# IGNORE_LIST cumulative state (TODO #8) ----------------------------------
+# Per-run cumulative ignore set keyed by .tf filename. Once a field is added
+# to a resource's `lifecycle.ignore_changes` from ANY source (heuristic,
+# schema-derived auto-ignore, manual operator teach, error-DB lookup), it
+# stays in the set for every subsequent regen cycle of that file within
+# the same workflow run.
+#
+# Why this exists: before this layer, fields_to_ignore was rebuilt from
+# scratch in three different call sites and each one consulted a different
+# subset of sources. Most importantly, lifecycle_planner.derive_* was only
+# called in the initial generation path — correction cycles silently
+# dropped its contributions and previously-suppressed perpetual diffs
+# re-surfaced mid-run. A monotonically-growing per-file set fixes that
+# class of bug without each call site having to remember every source.
+#
+# Cleared at the top of run_workflow() so consecutive workflow invocations
+# in the same Python process (relevant once the importer is driven from
+# Streamlit) don't carry stale state across user sessions.
+_CUMULATIVE_IGNORES_PER_FILE: dict = {}
+
+
+def _compute_ignore_set(
+    mapping,
+    resource_json,
+    heuristics_kb,
+    *,
+    current_error=None,
+    manual_snippet=None,
+    manual_trigger_key=None,
+):
+    """Build the UNION lifecycle.ignore_changes field set for `mapping`.
+
+    Single source of truth for assembling fields_to_ignore. Replaces three
+    separate, drift-prone implementations that each consulted a different
+    subset of sources.
+
+    Sources unioned (order is irrelevant — output is sorted):
+      1. Cumulative state for this filename from all prior cycles.
+      2. Persistent heuristics.json IGNORE entries for this tf_type.
+      3. lifecycle_planner.derive_lifecycle_ignores from cloud snapshot.
+      4. DB lookup against the current Terraform error signature
+         (correction path only).
+      5. Manual operator snippet, if it's an IGNORE command.
+
+    A final PR-7 sanity gate strips pure-computed names — Terraform errors
+    on `ignore_changes = [terraform_labels]` because there's no configured
+    value to compare with.
+
+    Side effect: mutates _CUMULATIVE_IGNORES_PER_FILE[mapping['filename']]
+    so the next cycle starts from the union, not from scratch.
+    """
+    file_key = mapping['filename']
+    cumulative = _CUMULATIVE_IGNORES_PER_FILE.setdefault(file_key, set())
+    before = set(cumulative)
+
+    # 1. Persistent heuristics IGNORE entries for this tf_type.
+    for error_key, snippet in heuristics_kb.get(mapping['tf_type'], {}).items():
+        cmd = snippet.strip().upper()
+        if cmd.startswith("IGNORE"):
+            field = cmd.split(":", 1)[1].strip() if ":" in cmd else error_key
+            if field:
+                cumulative.add(field)
+
+    # 2. Schema-derived auto-ignores from the (possibly scrubbed) cloud snapshot.
+    try:
+        cloud_data = json.loads(resource_json) if isinstance(resource_json, str) else (resource_json or {})
+    except (json.JSONDecodeError, TypeError):
+        cloud_data = {}
+    for f in lifecycle_planner.derive_lifecycle_ignores(cloud_data, mapping['tf_type']):
+        cumulative.add(f)
+
+    # 3. DB lookup keyed by the current Terraform error.
+    if current_error:
+        sig = manual_trigger_key or heuristics.generate_error_signature(
+            current_error, mapping['tf_type']
+        )
+        db_snippet = heuristics.get_heuristic_for_error(mapping['tf_type'], sig)
+        if db_snippet:
+            cmd = db_snippet.strip().upper()
+            if cmd.startswith("IGNORE"):
+                field = cmd.split(":", 1)[1].strip() if ":" in cmd else sig
+                if field:
+                    cumulative.add(field)
+
+    # 4. Manual operator snippet from interactive teach.
+    if manual_snippet:
+        cmd = manual_snippet.strip().upper()
+        if cmd.startswith("IGNORE"):
+            field = cmd.split(":", 1)[1].strip() if ":" in cmd else manual_trigger_key
+            if field:
+                cumulative.add(field)
+
+    # 5. PR-7 sanity gate (must run last so it sees the full union).
+    try:
+        from . import schema_oracle as _so
+        oracle = _so.get_oracle()
+        if oracle.has(mapping['tf_type']):
+            pure = set(oracle.computed_only_paths(mapping['tf_type']))
+            bad = cumulative & pure
+            if bad:
+                print(f"   - [IGNORE-UNION] Dropping {len(bad)} pure-computed "
+                      f"name(s) from ignore_changes (Terraform rejects "
+                      f"these): {sorted(bad)}")
+                cumulative -= pure
+    except Exception as e:  # noqa: BLE001 - fail open
+        print(f"   - [IGNORE-UNION] WARN: pure-computed sanity gate "
+              f"skipped ({e})")
+
+    # Surface only NEW entries so cycle-N logs aren't swamped by the
+    # full list every regen. ASCII tag (no emoji) — Windows cp1252 console
+    # crashes on emoji output and importer is run on operator machines.
+    new_fields = cumulative - before
+    if new_fields:
+        print(f"   - [IGNORE-UNION] '{mapping['resource_name']}': "
+              f"+{sorted(new_fields)} (total={len(cumulative)})")
+
+    return sorted(cumulative)
+
+
 def _clean_terraform_output(raw_output):
     lines = raw_output.splitlines()
     clean_lines = [line.strip(' \t│╷╵') for line in lines if "Refreshing state..." not in line and "Reading..." not in line and "Read complete" not in line and line.strip(' \t│╷╵')]
@@ -295,10 +414,13 @@ def _generate_and_save_hcl(mapping, schema, heuristics_kb):
             print(f"       - {k}")
 
     keys_to_omit = []
-    fields_to_ignore = []
-    expert_snippets = [] 
+    expert_snippets = []
 
     # --- 1. LOAD ALL MEMORY ---
+    # IGNORE entries are deferred to _compute_ignore_set() below so they
+    # join the cumulative UNION; here we only handle OMIT keys (pre-LLM
+    # JSON scrubbing) and raw HCL snippet entries (verbatim injection),
+    # which have semantics independent of the ignore_changes set.
     if mapping['tf_type'] in heuristics_kb:
         for error_key, snippet in heuristics_kb[mapping['tf_type']].items():
             heuristics.warn_legacy_rule_used(mapping['tf_type'], error_key, snippet)
@@ -306,46 +428,15 @@ def _generate_and_save_hcl(mapping, schema, heuristics_kb):
             if cmd == "OMIT":
                 keys_to_omit.append(error_key)
             elif cmd.startswith("IGNORE"):
-                fields_to_ignore.append(cmd.split(":", 1)[1].strip() if ":" in cmd else error_key)
+                continue  # routed through _compute_ignore_set
             else:
                 expert_snippets.append(snippet) # It's a code block
 
-    # --- 1b. PR-4: schema-derived lifecycle.ignore_changes ---
-    # Top-level optional+computed attributes that the cloud actually returned
-    # a value for. Adding them to ignore_changes makes future provider-side
-    # recomputes silent — captures import-time value, suppresses drift.
-    try:
-        cloud_for_planner = json.loads(resource_json)
-    except (json.JSONDecodeError, TypeError):
-        cloud_for_planner = {}
-    auto_ignore = lifecycle_planner.derive_lifecycle_ignores(
-        cloud_for_planner, mapping['tf_type']
-    )
-    if auto_ignore:
-        new_ignore = [f for f in auto_ignore if f not in fields_to_ignore]
-        if new_ignore:
-            print(f"   - 🔒 Auto-derived lifecycle.ignore_changes for "
-                  f"{len(new_ignore)} optional+computed field(s):")
-            for f in new_ignore:
-                print(f"       - {f}")
-            fields_to_ignore.extend(new_ignore)
-
-    # --- 1c. PR-7 sanity gate: never let pure-computed paths into ignore_changes ---
-    # Terraform errors on `ignore_changes = [terraform_labels]` because there's
-    # no configured value to ignore. Legacy heuristics.json rules sometimes
-    # IGNORE'd such fields; drop them here regardless of source.
-    try:
-        from . import schema_oracle as _so
-        _oracle = _so.get_oracle()
-        if _oracle.has(mapping['tf_type']):
-            _pure = set(_oracle.computed_only_paths(mapping['tf_type']))
-            _bad = [f for f in fields_to_ignore if f in _pure]
-            if _bad:
-                print(f"   - ⚠️  Dropping {len(_bad)} pure-computed name(s) from "
-                      f"ignore_changes (Terraform rejects these): {_bad}")
-                fields_to_ignore = [f for f in fields_to_ignore if f not in _pure]
-    except Exception as _e:  # noqa: BLE001 - fail open
-        print(f"   - WARN: pure-computed sanity gate skipped ({_e})")
+    # --- 1b. Cumulative IGNORE_LIST (TODO #8) ---
+    # One call assembles the union of heuristics + schema-derived
+    # auto-ignores + sanity-gated pure-computed denylist, persists the
+    # cumulative state for this filename, and returns the sorted list.
+    fields_to_ignore = _compute_ignore_set(mapping, resource_json, heuristics_kb)
 
     # --- 2. PROACTIVE JSON SCRUBBING ---
     if keys_to_omit:
@@ -385,10 +476,11 @@ def _generate_and_save_hcl(mapping, schema, heuristics_kb):
 def _attempt_correction(mapping, resource_json, previous_error, attempt_num, schema, heuristics_kb, manual_snippet=None, manual_trigger_key=None):
     """A unit of work for correction attempts (Automated or Interactive)."""
     keys_to_omit = []
-    fields_to_ignore = []
     expert_snippets = []
-    
-    # 1. Load global memory from heuristics.json
+
+    # 1. Load global memory from heuristics.json — OMIT keys and raw HCL
+    # snippets only. IGNORE entries are routed through _compute_ignore_set
+    # below so they join the cumulative UNION (TODO #8).
     if mapping['tf_type'] in heuristics_kb:
         for error_key, snippet in heuristics_kb[mapping['tf_type']].items():
             heuristics.warn_legacy_rule_used(mapping['tf_type'], error_key, snippet)
@@ -396,17 +488,15 @@ def _attempt_correction(mapping, resource_json, previous_error, attempt_num, sch
             if cmd == "OMIT":
                 keys_to_omit.append(error_key)
             elif cmd.startswith("IGNORE"):
-                # Handles both raw "IGNORE" and legacy "IGNORE:fieldname"
-                field = cmd.split(":", 1)[1].strip() if ":" in cmd else error_key
-                if field not in fields_to_ignore:
-                    fields_to_ignore.append(field)
+                continue  # routed through _compute_ignore_set
             else:
                 expert_snippets.append(snippet) # It's raw HCL code
 
     # 2. Handle Automated DB Snippet lookup for the CURRENT error
-    # (Only used if no manual snippet is provided)
+    # (Only used if no manual snippet is provided). IGNORE entries here
+    # are also routed through _compute_ignore_set.
     error_signature = manual_trigger_key or heuristics.generate_error_signature(previous_error, mapping['tf_type'])
-    
+
     if not manual_snippet:
         db_snippet = heuristics.get_heuristic_for_error(mapping['tf_type'], error_signature)
         if db_snippet:
@@ -414,40 +504,37 @@ def _attempt_correction(mapping, resource_json, previous_error, attempt_num, sch
             if cmd == "OMIT":
                 if error_signature not in keys_to_omit: keys_to_omit.append(error_signature)
             elif cmd.startswith("IGNORE"):
-                field = cmd.split(":", 1)[1].strip() if ":" in cmd else error_signature
-                if field not in fields_to_ignore: fields_to_ignore.append(field)
+                pass  # routed through _compute_ignore_set
             else:
                 # Add it to snippets ONLY if it isn't already there from step 1
                 if db_snippet not in expert_snippets:
                     expert_snippets.append(db_snippet)
 
-    # 3. Handle Manual Input (Overrides DB)
+    # 3. Handle Manual Input (Overrides DB). IGNORE entries here also
+    # routed through _compute_ignore_set so they join the union.
     if manual_snippet:
         cmd = manual_snippet.strip().upper()
         if cmd == "OMIT":
             if manual_trigger_key not in keys_to_omit: keys_to_omit.append(manual_trigger_key)
         elif cmd.startswith("IGNORE"):
-            field = cmd.split(":", 1)[1].strip() if ":" in cmd else manual_trigger_key
-            if field not in fields_to_ignore: fields_to_ignore.append(field)
+            pass  # routed through _compute_ignore_set
         else:
              if manual_snippet not in expert_snippets:
                  expert_snippets.append(manual_snippet)
 
-    # 3b. PR-7 sanity gate: filter pure-computed names out of ignore_changes.
-    # Same gate as in `_generate_and_save_hcl` — applies to the correction
-    # path so re-runs with manual snippets can't reintroduce the bug either.
-    try:
-        from . import schema_oracle as _so
-        _oracle = _so.get_oracle()
-        if _oracle.has(mapping['tf_type']):
-            _pure = set(_oracle.computed_only_paths(mapping['tf_type']))
-            _bad = [f for f in fields_to_ignore if f in _pure]
-            if _bad:
-                print(f"   - ⚠️  Dropping {len(_bad)} pure-computed name(s) from "
-                      f"ignore_changes (Terraform rejects these): {_bad}")
-                fields_to_ignore = [f for f in fields_to_ignore if f not in _pure]
-    except Exception as _e:  # noqa: BLE001 - fail open
-        print(f"   - WARN: pure-computed sanity gate skipped ({_e})")
+    # 3b. Cumulative IGNORE_LIST (TODO #8) — single call assembles the
+    # union of every IGNORE source (heuristics + lifecycle planner +
+    # current-error DB lookup + manual snippet) and applies the PR-7
+    # pure-computed sanity gate. Sticky across regen cycles for this
+    # filename, which is the whole point: previously-suppressed perpetual
+    # diffs no longer re-surface mid-run when correction cycles consult
+    # a different subset of sources.
+    fields_to_ignore = _compute_ignore_set(
+        mapping, resource_json, heuristics_kb,
+        current_error=previous_error,
+        manual_snippet=manual_snippet,
+        manual_trigger_key=manual_trigger_key,
+    )
 
     # 4. JSON Scrubbing
     if keys_to_omit:
@@ -508,6 +595,12 @@ def _attempt_correction(mapping, resource_json, previous_error, attempt_num, sch
 def run_workflow():
     """Main function with RAG-powered, parallel bulk import and self-correction."""
     print("🚀 Starting Google Cloud to Terraform Import Workflow...")
+
+    # TODO #8: clear cumulative IGNORE state from any previous workflow
+    # invocation in the same Python process. Matters for the Streamlit
+    # path where one process serves many user sessions back-to-back.
+    _CUMULATIVE_IGNORES_PER_FILE.clear()
+
     if not os.path.isdir(".terraform"):
         if terraform_client.init() is None: return
 
@@ -677,14 +770,24 @@ def run_workflow():
                     
                     # 3. Prepare the arguments for the generator
                     keys_to_omit_immediate = [error_trigger_key] if snippet_to_save == "OMIT" else []
-                    
-                    # --- THE FIX: Format specifically for the generator here ---
+
+                    # Format expert_snippet for the generator. For IGNORE we
+                    # must pass the FULL cumulative union (TODO #8) — passing
+                    # only `error_trigger_key` would silently drop every other
+                    # field that earlier cycles or the schema planner already
+                    # added to ignore_changes, re-surfacing perpetual diffs
+                    # the operator thought were resolved.
                     snippet_to_pass = None
                     if snippet_to_save == "IGNORE":
-                        snippet_to_pass = f"IGNORE_LIST:{error_trigger_key}"
+                        union_fields = _compute_ignore_set(
+                            mapping, resource_json, heuristics.load_heuristics(),
+                            manual_snippet="IGNORE",
+                            manual_trigger_key=error_trigger_key,
+                        )
+                        if union_fields:
+                            snippet_to_pass = f"IGNORE_LIST:{','.join(union_fields)}"
                     elif snippet_to_save != "OMIT":
                         snippet_to_pass = snippet_to_save
-                    # -----------------------------------------------------------
 
                     if keys_to_omit_immediate:
                         print(f"   - 🛡️  Proactively scrubbing key: {keys_to_omit_immediate}")
