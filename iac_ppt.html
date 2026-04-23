@@ -1,0 +1,481 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="UTF-8"/>
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+body{font-family:'Google Sans',Roboto,sans-serif;background:#0d1117;color:#fff;overflow:hidden;height:100vh}
+.deck{width:100%;height:100vh;position:relative}
+.slide{display:none;width:100%;height:100%;position:absolute;top:0;left:0}
+.slide.active{display:flex;flex-direction:column}
+.nav{position:fixed;bottom:20px;left:50%;transform:translateX(-50%);display:flex;align-items:center;gap:10px;background:rgba(255,255,255,.1);backdrop-filter:blur(8px);border-radius:40px;padding:8px 18px;z-index:100}
+.nav button{background:none;border:none;color:#fff;cursor:pointer;font-size:12px;padding:4px 12px;border-radius:20px;transition:.2s}
+.nav button:hover{background:rgba(255,255,255,.15)}
+.nav .counter{font-size:11px;color:rgba(255,255,255,.5);min-width:52px;text-align:center}
+.nav .dl{background:#4285F4;color:#fff;border:none;cursor:pointer;font-size:12px;padding:5px 14px;border-radius:20px}
+.progress{position:fixed;top:0;left:0;height:3px;background:linear-gradient(90deg,#4285F4,#34A853,#FBBC04);transition:.3s;z-index:200}
+.s1{background:linear-gradient(135deg,#070d1a 0%,#0d1f3c 55%,#0a2744 100%);justify-content:center;align-items:center;text-align:center}
+.s1 h1{font-size:38px;font-weight:700;line-height:1.2;max-width:760px;margin:0 auto}
+.s1 h1 em{font-style:normal;color:#4285F4}
+.s1 .sub{margin-top:12px;font-size:17px;color:rgba(255,255,255,.5)}
+.s1 .pills{display:flex;gap:10px;justify-content:center;margin-top:36px;flex-wrap:wrap}
+.s1 .pill{background:rgba(255,255,255,.06);border:1px solid rgba(255,255,255,.1);border-radius:30px;padding:7px 18px;font-size:12px;color:rgba(255,255,255,.7)}
+.s1 .pill span{color:rgba(255,255,255,.3);font-size:9px;text-transform:uppercase;letter-spacing:1px;display:block;margin-bottom:1px}
+.s1 .badge{position:absolute;top:24px;right:24px;background:rgba(52,168,83,.15);border:1px solid rgba(52,168,83,.3);color:#81C784;font-size:11px;padding:5px 14px;border-radius:20px}
+.phases{display:flex;gap:12px;justify-content:center;margin-top:20px}
+.phase-badge{padding:6px 16px;border-radius:20px;font-size:12px;font-weight:600}
+.shell{display:flex;flex-direction:column;height:100%;padding:28px 46px 68px}
+.hdr{display:flex;align-items:center;gap:12px;margin-bottom:22px;padding-bottom:12px;border-bottom:1px solid rgba(255,255,255,.07)}
+.hdr .ico{width:34px;height:34px;border-radius:9px;display:flex;align-items:center;justify-content:center;flex-shrink:0}
+.hdr h2{font-size:20px;font-weight:600}
+.hdr .hl{font-size:11px;color:rgba(255,255,255,.35);margin-top:2px}
+.hdr .tag{margin-left:auto;font-size:10px;padding:4px 12px;border-radius:20px;white-space:nowrap}
+.bg1{background:#0d1117}.bg2{background:#080e1a}.bg3{background:#090f1c}.bg4{background:#070c18}.bg5{background:#0b1018}.bg6{background:#060b14}.bg7{background:#080d15}.bg8{background:#070c16}
+.egrid{display:grid;grid-template-columns:1fr 1fr;gap:12px;flex:1}
+.ecard{border-radius:12px;padding:16px 18px;border:1px solid rgba(255,255,255,.07);display:flex;flex-direction:column;gap:6px}
+.ecard .ei{width:28px;height:28px;border-radius:7px;display:flex;align-items:center;justify-content:center;margin-bottom:2px}
+.ecard h3{font-size:12.5px;font-weight:600}
+.ecard p{font-size:11.5px;color:rgba(255,255,255,.55);line-height:1.6}
+.flist{display:flex;flex-direction:column;gap:10px;flex:1}
+.fitem{display:flex;gap:12px;align-items:flex-start;background:rgba(255,255,255,.025);border:1px solid rgba(255,255,255,.055);border-radius:10px;padding:12px 14px}
+.fnum{width:24px;height:24px;border-radius:6px;display:flex;align-items:center;justify-content:center;font-size:10px;font-weight:700;flex-shrink:0;margin-top:1px}
+.fitem h4{font-size:12.5px;font-weight:600;margin-bottom:2px}
+.fitem p{font-size:11px;color:rgba(255,255,255,.55);line-height:1.5}
+.pgrid{display:grid;grid-template-columns:1fr 1fr 1fr;gap:12px;flex:1}
+.pcard{border-radius:12px;padding:16px;border:1px solid rgba(255,255,255,.07);display:flex;flex-direction:column;gap:7px;position:relative;overflow:hidden}
+.pcard h3{font-size:12.5px;font-weight:600;margin-top:6px}
+.pcard p{font-size:11px;color:rgba(255,255,255,.55);line-height:1.6}
+.pcard .pn{font-size:26px;font-weight:700;opacity:.1;position:absolute;bottom:8px;right:12px}
+.dtests{display:flex;flex-direction:column;gap:10px;flex:1}
+.dtest{border-radius:11px;padding:14px 16px;border:1px solid rgba(255,255,255,.07);display:flex;gap:14px;align-items:flex-start}
+.dtest-num{width:28px;height:28px;border-radius:7px;display:flex;align-items:center;justify-content:center;font-size:11px;font-weight:700;flex-shrink:0}
+.dtest h4{font-size:12.5px;font-weight:600;margin-bottom:3px}
+.dtest .narr{font-size:11px;font-style:italic;color:rgba(255,255,255,.45);margin-top:4px;padding-left:10px;border-left:2px solid rgba(255,255,255,.1)}
+.dtest p{font-size:11px;color:rgba(255,255,255,.6);line-height:1.5}
+.demo-grid{display:grid;grid-template-columns:1fr 1fr;gap:12px;flex:1}
+.demo-card{border-radius:11px;padding:16px 18px;border:1px solid rgba(255,255,255,.07);display:flex;flex-direction:column;gap:8px}
+.demo-card .dc-icon{font-size:22px;margin-bottom:2px}
+.demo-card h4{font-size:12.5px;font-weight:600}
+.demo-card p{font-size:11px;color:rgba(255,255,255,.55);line-height:1.55}
+.tbl-wrap{flex:1;overflow:auto}
+table.etbl{width:100%;border-collapse:collapse;font-size:12px}
+.etbl th{background:rgba(66,133,244,.1);color:#90CAF9;font-weight:600;padding:10px 14px;text-align:left;font-size:11px;text-transform:uppercase;letter-spacing:.6px;border-bottom:1px solid rgba(66,133,244,.2)}
+.etbl td{padding:12px 14px;border-bottom:1px solid rgba(255,255,255,.05);color:rgba(255,255,255,.75);vertical-align:top;line-height:1.55}
+.etbl tr:hover td{background:rgba(255,255,255,.025)}
+.sens{display:inline-block;padding:2px 8px;border-radius:8px;font-size:10px;font-weight:600}
+.split{display:flex;gap:22px;flex:1}
+.sleft{flex:1.05}
+.sright{flex:.95;display:flex;align-items:center;justify-content:center}
+.dw{flex:1;display:flex;align-items:center;justify-content:center}
+.dw svg{width:100%;max-height:430px}
+code{font-size:10px;background:rgba(255,255,255,.08);padding:1px 5px;border-radius:4px;font-family:monospace}
+</style>
+</head>
+<body>
+<div class="progress" id="prog"></div>
+<div class="deck">
+
+<!-- SLIDE 1: TITLE -->
+<div class="slide active" data-slide="0">
+  <div class="s1" style="display:flex;flex-direction:column;justify-content:center;align-items:center;text-align:center;width:100%;height:100%;position:relative">
+    <div class="badge">🟢 Phase 1 &amp; 2 Complete · Live Demo Ready</div>
+    <div style="font-size:11px;letter-spacing:3px;text-transform:uppercase;color:rgba(255,255,255,.35);margin-bottom:18px">Platform Engineering · Generative AI</div>
+    <h1>AI-Powered <em>Infrastructure as Code</em><br>Phase 1 &amp; 2 — Complete &amp; Demo Ready</h1>
+    <div class="sub">Automating Cloud Asset Management with Generative AI</div>
+    <div class="phases">
+      <div class="phase-badge" style="background:rgba(52,168,83,.15);border:1px solid rgba(52,168,83,.3);color:#81C784">✓ Phase 1 — Importer &amp; Translator</div>
+      <div class="phase-badge" style="background:rgba(66,133,244,.15);border:1px solid rgba(66,133,244,.3);color:#90CAF9">✓ Phase 2 — Drift Detection &amp; Policy</div>
+    </div>
+    <div class="pills">
+      <div class="pill"><span>Presented by</span>[Your Name / Title]</div>
+      <div class="pill"><span>Date</span>[Date]</div>
+      <div class="pill"><span>Classification</span>Internal</div>
+    </div>
+  </div>
+</div>
+
+<!-- SLIDE 2: EXEC SUMMARY -->
+<div class="slide bg1" data-slide="1">
+  <div class="shell">
+    <div class="hdr">
+      <div class="ico" style="background:rgba(66,133,244,.14)"><svg width="17" height="17" viewBox="0 0 24 24" fill="none"><path d="M9 12h6m-6 4h6M5 20h14a2 2 0 002-2V6a2 2 0 00-2-2H5a2 2 0 00-2 2v12a2 2 0 002 2z" stroke="#4285F4" stroke-width="1.8" stroke-linecap="round"/></svg></div>
+      <div><h2>Executive Summary</h2><div class="hl">Two Phases Delivered — Demo Ready Today</div></div>
+      <div class="tag" style="background:rgba(52,168,83,.12);border:1px solid rgba(52,168,83,.25);color:#81C784">✓ Both Phases Complete</div>
+    </div>
+    <div class="egrid">
+      <div class="ecard" style="background:rgba(234,67,53,.06);border-color:rgba(234,67,53,.18)">
+        <div class="ei" style="background:rgba(234,67,53,.14)"><svg width="15" height="15" viewBox="0 0 24 24" fill="none"><path d="M12 9v4m0 4h.01M10.29 3.86L1.82 18a2 2 0 001.71 3h16.94a2 2 0 001.71-3L13.71 3.86a2 2 0 00-3.42 0z" stroke="#EA4335" stroke-width="1.8" stroke-linecap="round"/></svg></div>
+        <h3>The Challenge</h3>
+        <p>Managing click-ops cloud infrastructure is manual, error-prone, and scales poorly. Translating between clouds requires deep specialised expertise.</p>
+      </div>
+      <div class="ecard" style="background:rgba(66,133,244,.06);border-color:rgba(66,133,244,.18)">
+        <div class="ei" style="background:rgba(66,133,244,.14)"><svg width="15" height="15" viewBox="0 0 24 24" fill="none"><path d="M9.75 17L9 20l-1 1h8l-1-1-.75-3M3 13h18M5 17h14a2 2 0 002-2V5a2 2 0 00-2-2H5a2 2 0 00-2 2v10a2 2 0 002 2z" stroke="#4285F4" stroke-width="1.8" stroke-linecap="round"/></svg></div>
+        <h3>The Solution</h3>
+        <p>An intelligent AI agent that autonomously reverse-engineers live cloud assets into production-ready Terraform — with continuous drift detection and policy enforcement.</p>
+      </div>
+      <div class="ecard" style="background:rgba(52,168,83,.06);border-color:rgba(52,168,83,.18)">
+        <div class="ei" style="background:rgba(52,168,83,.14)"><svg width="15" height="15" viewBox="0 0 24 24" fill="none"><path d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z" stroke="#34A853" stroke-width="1.8" stroke-linecap="round"/></svg></div>
+        <h3>Phase 1 ✓ — Importer &amp; Translator</h3>
+        <p>Automated GCP asset importing + GCP→AWS/Azure translation. RAG self-healing delivers zero-drift, validated Terraform on first attempt.</p>
+      </div>
+      <div class="ecard" style="background:rgba(251,188,4,.06);border-color:rgba(251,188,4,.18)">
+        <div class="ei" style="background:rgba(251,188,4,.14)"><svg width="15" height="15" viewBox="0 0 24 24" fill="none"><path d="M13 10V3L4 14h7v7l9-11h-7z" stroke="#FBBC04" stroke-width="1.8" stroke-linecap="round"/></svg></div>
+        <h3>Phase 2 ✓ — Drift &amp; Policy — Live Today</h3>
+        <p>Continuous Drift Detection (Restore / Accept / Drop), Policy-as-Code with per-rule severity, and actionable remediation — demoed live today.</p>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- SLIDE 3: IMPORTER -->
+<div class="slide bg2" data-slide="2">
+  <div class="shell">
+    <div class="hdr">
+      <div class="ico" style="background:rgba(52,168,83,.14)"><svg width="17" height="17" viewBox="0 0 24 24" fill="none"><path d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-8l-4-4m0 0L8 8m4-4v12" stroke="#34A853" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg></div>
+      <div><h2>Phase 1 — AI Importer Engine</h2><div class="hl">From Live Cloud to Perfect Code in Seconds</div></div>
+      <div class="tag" style="background:rgba(52,168,83,.12);border:1px solid rgba(52,168,83,.25);color:#81C784">✓ Complete</div>
+    </div>
+    <div class="split">
+      <div class="sleft">
+        <div class="flist">
+          <div class="fitem"><div class="fnum" style="background:rgba(66,133,244,.14);color:#4285F4">1</div><div><h4>Automated Discovery</h4><p>Scans GCP to identify unmanaged assets across Compute, Storage, Network, and GKE instantly.</p></div></div>
+          <div class="fitem"><div class="fnum" style="background:rgba(251,188,4,.14);color:#FBBC04">2</div><div><h4>LLM-Powered Translation</h4><p>Gemini 2.5 Pro converts raw Google API JSON into structured, valid HCL — multi-file, multi-module.</p></div></div>
+          <div class="fitem"><div class="fnum" style="background:rgba(156,39,176,.14);color:#CE93D8">3</div><div><h4>State Reconciliation</h4><p>Runs <code>terraform import</code> + <code>terraform plan</code> to guarantee Zero Drift between generated code and live environment.</p></div></div>
+          <div class="fitem" style="background:rgba(52,168,83,.05);border-color:rgba(52,168,83,.18)"><div class="fnum" style="background:rgba(52,168,83,.14);color:#34A853">✓</div><div><h4>The Result</h4><p>Weeks of manual reverse-engineering reduced to a <strong style="color:#34A853">single automated command.</strong></p></div></div>
+        </div>
+      </div>
+      <div class="sright">
+        <svg viewBox="0 0 290 340" fill="none" xmlns="http://www.w3.org/2000/svg">
+          <defs><marker id="da" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto"><path d="M2 2L8 5L2 8" fill="none" stroke="#4285F4" stroke-width="1.5" stroke-linecap="round"/></marker>
+          <marker id="dg" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto"><path d="M2 2L8 5L2 8" fill="none" stroke="#34A853" stroke-width="1.5" stroke-linecap="round"/></marker></defs>
+          <rect x="45" y="14" width="200" height="52" rx="9" fill="rgba(66,133,244,.09)" stroke="#4285F4" stroke-width="1"/>
+          <text x="145" y="37" text-anchor="middle" fill="#90CAF9" font-size="11" font-family="Roboto,sans-serif" font-weight="600">GCP Console</text>
+          <text x="145" y="53" text-anchor="middle" fill="rgba(255,255,255,.4)" font-size="9" font-family="Roboto,sans-serif">Live unmanaged assets</text>
+          <line x1="145" y1="68" x2="145" y2="94" stroke="#4285F4" stroke-width="1.3" marker-end="url(#da)"/>
+          <rect x="30" y="96" width="230" height="62" rx="9" fill="rgba(251,188,4,.08)" stroke="#FBBC04" stroke-width="1.2"/>
+          <text x="145" y="120" text-anchor="middle" fill="#FBBC04" font-size="11" font-family="Roboto,sans-serif" font-weight="700">Python / AI Agent</text>
+          <text x="145" y="136" text-anchor="middle" fill="rgba(255,255,255,.45)" font-size="9" font-family="Roboto,sans-serif">Gemini 2.5 Pro + RAG</text>
+          <text x="145" y="150" text-anchor="middle" fill="rgba(255,255,255,.3)" font-size="8.5" font-family="Roboto,sans-serif">JSON → HCL translation</text>
+          <line x1="145" y1="160" x2="145" y2="186" stroke="#34A853" stroke-width="1.3" marker-end="url(#dg)"/>
+          <rect x="30" y="188" width="105" height="52" rx="9" fill="rgba(52,168,83,.08)" stroke="#34A853" stroke-width="1"/>
+          <text x="82" y="211" text-anchor="middle" fill="#81C784" font-size="10.5" font-family="Roboto,sans-serif" font-weight="600">main.tf</text>
+          <text x="82" y="227" text-anchor="middle" fill="rgba(255,255,255,.4)" font-size="8.5" font-family="Roboto,sans-serif">Valid HCL</text>
+          <rect x="155" y="188" width="105" height="52" rx="9" fill="rgba(52,168,83,.08)" stroke="#34A853" stroke-width="1"/>
+          <text x="207" y="211" text-anchor="middle" fill="#81C784" font-size="10.5" font-family="Roboto,sans-serif" font-weight="600">terraform.tfstate</text>
+          <text x="207" y="227" text-anchor="middle" fill="rgba(255,255,255,.4)" font-size="8.5" font-family="Roboto,sans-serif">Zero Drift</text>
+          <rect x="52" y="264" width="186" height="34" rx="8" fill="rgba(52,168,83,.12)" stroke="rgba(52,168,83,.35)" stroke-width="1"/>
+          <text x="145" y="284" text-anchor="middle" fill="#34A853" font-size="10.5" font-family="Roboto,sans-serif" font-weight="600">✓ Production-Ready Output</text>
+        </svg>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- SLIDE 4: RAG -->
+<div class="slide bg3" data-slide="3">
+  <div class="shell">
+    <div class="hdr">
+      <div class="ico" style="background:rgba(251,188,4,.14)"><svg width="17" height="17" viewBox="0 0 24 24" fill="none"><path d="M9.663 17h4.673M12 3v1m6.364 1.636l-.707.707M21 12h-1M4 12H3m3.343-5.657l-.707-.707m2.828 9.9a5 5 0 117.072 0l-.548.547A3.374 3.374 0 0014 18.469V19a2 2 0 11-4 0v-.531c0-.895-.356-1.754-.988-2.386l-.548-.547z" stroke="#FBBC04" stroke-width="1.8" stroke-linecap="round"/></svg></div>
+      <div><h2>The Secret Sauce — RAG &amp; The Learning Loop</h2><div class="hl">Overcoming AI Hallucinations with Deterministic Engineering</div></div>
+      <div class="tag" style="background:rgba(251,188,4,.1);border:1px solid rgba(251,188,4,.25);color:#FBBC04">Core Innovation</div>
+    </div>
+    <div style="display:flex;flex-direction:column;gap:12px;flex:1">
+      <div style="background:rgba(234,67,53,.06);border:1px solid rgba(234,67,53,.15);border-radius:10px;padding:12px 16px;display:flex;gap:10px;align-items:center">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" style="flex-shrink:0"><path d="M12 9v4m0 4h.01M10.29 3.86L1.82 18a2 2 0 001.71 3h16.94a2 2 0 001.71-3L13.71 3.86a2 2 0 00-3.42 0z" stroke="#EA4335" stroke-width="1.8" stroke-linecap="round"/></svg>
+        <div><span style="font-size:11.5px;font-weight:600;color:#FF8A80">The Problem: </span><span style="font-size:11.5px;color:rgba(255,255,255,.6)">Raw LLMs hallucinate incorrect Terraform syntax — making naive generation unreliable for production.</span></div>
+      </div>
+      <div class="pgrid">
+        <div class="pcard" style="background:rgba(66,133,244,.05);border-color:rgba(66,133,244,.16)">
+          <div style="position:absolute;top:0;left:0;right:0;height:3px;background:#4285F4;border-radius:12px 12px 0 0"></div>
+          <div style="width:26px;height:26px;border-radius:7px;background:rgba(66,133,244,.14);display:flex;align-items:center;justify-content:center;margin-top:4px"><svg width="13" height="13" viewBox="0 0 24 24" fill="none"><path d="M12 6.253v13m0-13C10.832 5.477 9.246 5 7.5 5S4.168 5.477 3 6.253v13C4.168 18.477 5.754 18 7.5 18s3.332.477 4.5 1.253m0-13C13.168 5.477 14.754 5 16.5 5c1.747 0 3.332.477 4.5 1.253v13C19.832 18.477 18.247 18 16.5 18c-1.746 0-3.332.477-4.5 1.253" stroke="#4285F4" stroke-width="1.8" stroke-linecap="round"/></svg></div>
+          <h3>Pillar 1 — Schema Grounding</h3>
+          <p>Pulls official HashiCorp docs dynamically, forcing the LLM to adhere to strict, valid provider arguments only.</p>
+          <div class="pn">1</div>
+        </div>
+        <div class="pcard" style="background:rgba(52,168,83,.05);border-color:rgba(52,168,83,.16)">
+          <div style="position:absolute;top:0;left:0;right:0;height:3px;background:#34A853;border-radius:12px 12px 0 0"></div>
+          <div style="width:26px;height:26px;border-radius:7px;background:rgba(52,168,83,.14);display:flex;align-items:center;justify-content:center;margin-top:4px"><svg width="13" height="13" viewBox="0 0 24 24" fill="none"><path d="M17 20h5v-2a3 3 0 00-5.356-1.857M17 20H7m10 0v-2c0-.656-.126-1.283-.356-1.857M7 20H2v-2a3 3 0 015.356-1.857M7 20v-2c0-.656.126-1.283.356-1.857m0 0a5.002 5.002 0 019.288 0M15 7a3 3 0 11-6 0 3 3 0 016 0z" stroke="#34A853" stroke-width="1.8" stroke-linecap="round"/></svg></div>
+          <h3>Pillar 2 — Heuristics Memory</h3>
+          <p>Human-in-the-loop training. Engineers teach Golden Snippets and OMIT rules saved to <code>heuristics.json</code>.</p>
+          <div class="pn">2</div>
+        </div>
+        <div class="pcard" style="background:rgba(251,188,4,.05);border-color:rgba(251,188,4,.16)">
+          <div style="position:absolute;top:0;left:0;right:0;height:3px;background:#FBBC04;border-radius:12px 12px 0 0"></div>
+          <div style="width:26px;height:26px;border-radius:7px;background:rgba(251,188,4,.14);display:flex;align-items:center;justify-content:center;margin-top:4px"><svg width="13" height="13" viewBox="0 0 24 24" fill="none"><path d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" stroke="#FBBC04" stroke-width="1.8" stroke-linecap="round"/></svg></div>
+          <h3>Pillar 3 — Autonomous Self-Healing</h3>
+          <p>Fixes applied proactively on subsequent runs — achieving perfect code on <strong style="color:#FBBC04">Attempt 1.</strong></p>
+          <div class="pn">3</div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- SLIDE 5: DRIFT DETECTION -->
+<div class="slide bg4" data-slide="4">
+  <div class="shell">
+    <div class="hdr">
+      <div class="ico" style="background:rgba(66,133,244,.14)"><svg width="17" height="17" viewBox="0 0 24 24" fill="none"><path d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" stroke="#4285F4" stroke-width="1.8"/><path d="M2.458 12C3.732 7.943 7.523 5 12 5c4.478 0 8.268 2.943 9.542 7-1.274 4.057-5.064 7-9.542 7-4.477 0-8.268-2.943-9.542-7z" stroke="#4285F4" stroke-width="1.8"/></svg></div>
+      <div><h2>Phase 2 — Drift Detection Live Demo</h2><div class="hl">Three Real-World Scenarios Demoed Today</div></div>
+      <div class="tag" style="background:rgba(52,168,83,.12);border:1px solid rgba(52,168,83,.25);color:#81C784">🟢 Live Demo Ready</div>
+    </div>
+    <div class="dtests">
+      <div class="dtest" style="background:rgba(66,133,244,.05);border-color:rgba(66,133,244,.18)">
+        <div class="dtest-num" style="background:rgba(66,133,244,.15);color:#4285F4">T1</div>
+        <div style="flex:1">
+          <h4>Restore <span style="font-size:10px;color:rgba(255,255,255,.4);font-weight:400;margin-left:4px">cloud ← state</span></h4>
+          <p>Storage class changed outside Terraform — agent detects the delta, reverts to state-defined config, and validates compliance automatically.</p>
+          <div class="narr">"Someone changed our bucket's storage class outside of Terraform. Let's catch it and revert."</div>
+        </div>
+        <div style="padding-left:10px;flex-shrink:0"><div style="font-size:10px;background:rgba(66,133,244,.15);color:#90CAF9;padding:3px 9px;border-radius:8px;font-weight:600">REVERT</div></div>
+      </div>
+      <div class="dtest" style="background:rgba(251,188,4,.05);border-color:rgba(251,188,4,.18)">
+        <div class="dtest-num" style="background:rgba(251,188,4,.15);color:#FBBC04">T2</div>
+        <div style="flex:1">
+          <h4>Accept <span style="font-size:10px;color:rgba(255,255,255,.4);font-weight:400;margin-left:4px">cloud → state</span></h4>
+          <p>Cloud value is correct — a manual hotfix worth keeping. Agent pulls cloud reality into state and reconciles Terraform.</p>
+          <div class="narr">"Sometimes the cloud value is the right one — say a manual hotfix we want to keep. Accept pulls cloud into state."</div>
+        </div>
+        <div style="padding-left:10px;flex-shrink:0"><div style="font-size:10px;background:rgba(251,188,4,.15);color:#FBBC04;padding:3px 9px;border-radius:8px;font-weight:600">ACCEPT</div></div>
+      </div>
+      <div class="dtest" style="background:rgba(234,67,53,.05);border-color:rgba(234,67,53,.18)">
+        <div class="dtest-num" style="background:rgba(234,67,53,.15);color:#EA4335">T3</div>
+        <div style="flex:1">
+          <h4>Drop <span style="font-size:10px;color:rgba(255,255,255,.4);font-weight:400;margin-left:4px">cloud deleted out-of-band</span></h4>
+          <p>Bucket deleted directly in console. State references a non-existent resource. Agent detects the orphan and triggers remediation.</p>
+          <div class="narr">"Someone deleted the bucket directly in the console. State still references something that no longer exists. We need a different flow."</div>
+        </div>
+        <div style="padding-left:10px;flex-shrink:0"><div style="font-size:10px;background:rgba(234,67,53,.15);color:#FF8A80;padding:3px 9px;border-radius:8px;font-weight:600">DROP</div></div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- SLIDE 6: POLICY AS CODE -->
+<div class="slide bg4" data-slide="5">
+  <div class="shell">
+    <div class="hdr">
+      <div class="ico" style="background:rgba(234,67,53,.14)"><svg width="17" height="17" viewBox="0 0 24 24" fill="none"><path d="M9 12l2 2 4-4m5.618-4.016A11.955 11.955 0 0112 2.944a11.955 11.955 0 01-8.618 3.04A12.02 12.02 0 003 9c0 5.591 3.824 10.29 9 11.622 5.176-1.332 9-6.03 9-11.622 0-1.042-.133-2.052-.382-3.016z" stroke="#EA4335" stroke-width="1.8" stroke-linecap="round"/></svg></div>
+      <div><h2>Policy as Code Enforcer</h2><div class="hl">Automated Compliance with OPA / Rego — Auditor-Grade Enforcement</div></div>
+      <div class="tag" style="background:rgba(52,168,83,.12);border:1px solid rgba(52,168,83,.25);color:#81C784">🟢 Live Today</div>
+    </div>
+    <div style="display:flex;gap:20px;flex:1">
+      <div style="flex:1.1;display:flex;flex-direction:column;gap:10px">
+        <div class="fitem">
+          <div class="fnum" style="background:rgba(66,133,244,.14);color:#4285F4"><svg width="13" height="13" viewBox="0 0 24 24" fill="none"><path d="M12 2L3 7l9 5 9-5-9-5zM3 17l9 5 9-5M3 12l9 5 9-5" stroke="#4285F4" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg></div>
+          <div><h4>OPA / Rego Standard</h4><p>The same policy engine regulators and auditors already trust — no proprietary lock-in, portable across teams and toolchains.</p></div>
+        </div>
+        <div class="fitem">
+          <div class="fnum" style="background:rgba(234,67,53,.14);color:#EA4335"><svg width="13" height="13" viewBox="0 0 24 24" fill="none"><path d="M7 7h.01M7 3h5c.512 0 1.024.195 1.414.586l7 7a2 2 0 010 2.828l-7 7a2 2 0 01-2.828 0l-7-7A2 2 0 013 12V7a4 4 0 014-4z" stroke="#EA4335" stroke-width="1.8" stroke-linecap="round"/></svg></div>
+          <div><h4>Severity-Prefix Convention</h4><p>Every violation emitted as <code style="background:rgba(234,67,53,.15);color:#FF8A80">[HIGH][rule_id] message</code> — parsed and surfaced in reports with full prioritisation.</p></div>
+        </div>
+        <div class="fitem">
+          <div class="fnum" style="background:rgba(251,188,4,.14);color:#FBBC04"><svg width="13" height="13" viewBox="0 0 24 24" fill="none"><path d="M4 6h16M4 10h16M4 14h8" stroke="#FBBC04" stroke-width="1.8" stroke-linecap="round"/></svg></div>
+          <div><h4>Filename = Rule ID</h4><p>Policy file path resolved automatically. Operators see exactly which file fired — zero ambiguity in audit trails.</p></div>
+        </div>
+        <div class="fitem">
+          <div class="fnum" style="background:rgba(156,39,176,.14);color:#CE93D8"><svg width="13" height="13" viewBox="0 0 24 24" fill="none"><path d="M8 9l3 3-3 3m5 0h3M5 20h14a2 2 0 002-2V6a2 2 0 00-2-2H5a2 2 0 00-2 2v12a2 2 0 002 2z" stroke="#CE93D8" stroke-width="1.8" stroke-linecap="round"/></svg></div>
+          <div><h4>Two Invocation Modes</h4><p><strong style="color:rgba(255,255,255,.8)">Standalone scan</strong> against any Terraform plan, or as a <strong style="color:rgba(255,255,255,.8)">drift-decorator</strong> layered on live drift detection results.</p></div>
+        </div>
+      </div>
+      <div style="flex:.9;display:flex;flex-direction:column;gap:8px">
+        <div style="font-size:11px;font-weight:600;color:rgba(255,255,255,.4);text-transform:uppercase;letter-spacing:1px;margin-bottom:2px">8 Starter Policies Shipped</div>
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;flex:1">
+          <div style="background:rgba(234,67,53,.07);border:1px solid rgba(234,67,53,.18);border-radius:9px;padding:11px 13px;display:flex;gap:9px;align-items:flex-start"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" style="flex-shrink:0;margin-top:1px"><path d="M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-10V7a4 4 0 00-8 0v4h8z" stroke="#EA4335" stroke-width="1.6" stroke-linecap="round"/></svg><div><div style="font-size:11px;font-weight:600;color:rgba(255,255,255,.85)">Bucket Encryption</div><div style="font-size:10px;color:rgba(255,255,255,.4);margin-top:2px">At-rest encryption enforced</div></div></div>
+          <div style="background:rgba(234,67,53,.07);border:1px solid rgba(234,67,53,.18);border-radius:9px;padding:11px 13px;display:flex;gap:9px;align-items:flex-start"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" style="flex-shrink:0;margin-top:1px"><path d="M3.055 11H5a2 2 0 012 2v1a2 2 0 002 2 2 2 0 012 2v2.945M8 3.935V5.5A2.5 2.5 0 0010.5 8h.5a2 2 0 012 2 2 2 0 104 0 2 2 0 012-2h1.064M15 20.488V18a2 2 0 012-2h3.064" stroke="#EA4335" stroke-width="1.6" stroke-linecap="round"/></svg><div><div style="font-size:11px;font-weight:600;color:rgba(255,255,255,.85)">Public Access Block</div><div style="font-size:10px;color:rgba(255,255,255,.4);margin-top:2px">No open bucket ACLs</div></div></div>
+          <div style="background:rgba(251,188,4,.06);border:1px solid rgba(251,188,4,.18);border-radius:9px;padding:11px 13px;display:flex;gap:9px;align-items:flex-start"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" style="flex-shrink:0;margin-top:1px"><path d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" stroke="#FBBC04" stroke-width="1.6" stroke-linecap="round"/></svg><div><div style="font-size:11px;font-weight:600;color:rgba(255,255,255,.85)">Versioning</div><div style="font-size:10px;color:rgba(255,255,255,.4);margin-top:2px">Object versioning enabled</div></div></div>
+          <div style="background:rgba(251,188,4,.06);border:1px solid rgba(251,188,4,.18);border-radius:9px;padding:11px 13px;display:flex;gap:9px;align-items:flex-start"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" style="flex-shrink:0;margin-top:1px"><path d="M8 7V3m8 4V3m-9 8h10M5 21h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v12a2 2 0 002 2z" stroke="#FBBC04" stroke-width="1.6" stroke-linecap="round"/></svg><div><div style="font-size:11px;font-weight:600;color:rgba(255,255,255,.85)">Retention Policy</div><div style="font-size:10px;color:rgba(255,255,255,.4);margin-top:2px">Minimum retention enforced</div></div></div>
+          <div style="background:rgba(66,133,244,.06);border:1px solid rgba(66,133,244,.18);border-radius:9px;padding:11px 13px;display:flex;gap:9px;align-items:flex-start"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" style="flex-shrink:0;margin-top:1px"><path d="M15 7a2 2 0 012 2m4 0a6 6 0 01-7.743 5.743L11 17H9v2H7v2H4a1 1 0 01-1-1v-2.586a1 1 0 01.293-.707l5.964-5.964A6 6 0 1121 9z" stroke="#4285F4" stroke-width="1.6" stroke-linecap="round"/></svg><div><div style="font-size:11px;font-weight:600;color:rgba(255,255,255,.85)">CMEK Disks</div><div style="font-size:10px;color:rgba(255,255,255,.4);margin-top:2px">Customer-managed encryption</div></div></div>
+          <div style="background:rgba(66,133,244,.06);border:1px solid rgba(66,133,244,.18);border-radius:9px;padding:11px 13px;display:flex;gap:9px;align-items:flex-start"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" style="flex-shrink:0;margin-top:1px"><path d="M3.055 11H5a2 2 0 012 2v1a2 2 0 002 2 2 2 0 012 2v2.945M8 3.935V5.5A2.5 2.5 0 0010.5 8h.5a2 2 0 012 2 2 2 0 104 0 2 2 0 012-2h1.064" stroke="#4285F4" stroke-width="1.6" stroke-linecap="round"/></svg><div><div style="font-size:11px;font-weight:600;color:rgba(255,255,255,.85)">No Public IP</div><div style="font-size:10px;color:rgba(255,255,255,.4);margin-top:2px">Public IP assignment blocked</div></div></div>
+          <div style="background:rgba(52,168,83,.06);border:1px solid rgba(52,168,83,.18);border-radius:9px;padding:11px 13px;display:flex;gap:9px;align-items:flex-start"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" style="flex-shrink:0;margin-top:1px"><path d="M9 12l2 2 4-4m5.618-4.016A11.955 11.955 0 0112 2.944a11.955 11.955 0 01-8.618 3.04A12.02 12.02 0 003 9c0 5.591 3.824 10.29 9 11.622 5.176-1.332 9-6.03 9-11.622 0-1.042-.133-2.052-.382-3.016z" stroke="#34A853" stroke-width="1.6" stroke-linecap="round"/></svg><div><div style="font-size:11px;font-weight:600;color:rgba(255,255,255,.85)">Shielded VM</div><div style="font-size:10px;color:rgba(255,255,255,.4);margin-top:2px">Secure Boot + vTPM required</div></div></div>
+          <div style="background:rgba(52,168,83,.06);border:1px solid rgba(52,168,83,.18);border-radius:9px;padding:11px 13px;display:flex;gap:9px;align-items:flex-start"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" style="flex-shrink:0;margin-top:1px"><path d="M7 7h.01M7 3h5c.512 0 1.024.195 1.414.586l7 7a2 2 0 010 2.828l-7 7a2 2 0 01-2.828 0l-7-7A2 2 0 013 12V7a4 4 0 014-4z" stroke="#34A853" stroke-width="1.6" stroke-linecap="round"/></svg><div><div style="font-size:11px;font-weight:600;color:rgba(255,255,255,.85)">Mandatory Labels</div><div style="font-size:10px;color:rgba(255,255,255,.4);margin-top:2px">Cost &amp; ownership tags enforced</div></div></div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- SLIDE 7: WHAT WAS JUST DEMOED -->
+<div class="slide bg5" data-slide="6">
+  <div class="shell">
+    <div class="hdr">
+      <div class="ico" style="background:rgba(52,168,83,.14)"><svg width="17" height="17" viewBox="0 0 24 24" fill="none"><path d="M14.752 11.168l-3.197-2.132A1 1 0 0010 9.87v4.263a1 1 0 001.555.832l3.197-2.132a1 1 0 000-1.664z" stroke="#34A853" stroke-width="1.8"/><path d="M21 12a9 9 0 11-18 0 9 9 0 0118 0z" stroke="#34A853" stroke-width="1.8"/></svg></div>
+      <div><h2>What Was Just Demoed</h2><div class="hl">Four Capabilities in One Unified Platform</div></div>
+      <div class="tag" style="background:rgba(52,168,83,.12);border:1px solid rgba(52,168,83,.25);color:#81C784">Demo Recap</div>
+    </div>
+    <div class="demo-grid">
+      <div class="demo-card" style="background:rgba(66,133,244,.05);border-color:rgba(66,133,244,.16)"><div class="dc-icon">🔍</div><h4>Drift Detection — State vs. Cloud</h4><p>Live diff between Terraform state and actual cloud reality. Every delta surfaced instantly — no manual <code>terraform plan</code> needed.</p></div>
+      <div class="demo-card" style="background:rgba(234,67,53,.05);border-color:rgba(234,67,53,.16)"><div class="dc-icon">🛡️</div><h4>Policy-as-Code with Severity</h4><p>Every resource evaluated against Rego policies — each violation tagged <code style="background:rgba(234,67,53,.15);color:#FF8A80">HIGH</code> / <code style="background:rgba(251,188,4,.12);color:#FBBC04">MEDIUM</code> / <code style="background:rgba(52,168,83,.12);color:#81C784">LOW</code>. Not a score — a prioritised action list.</p></div>
+      <div class="demo-card" style="background:rgba(251,188,4,.05);border-color:rgba(251,188,4,.16)"><div class="dc-icon">📊</div><h4>Drift × Policy in One Pane</h4><p>Drift and compliance unified in a single view — engineers see the state delta and policy violation in context, no tool switching.</p></div>
+      <div class="demo-card" style="background:rgba(52,168,83,.05);border-color:rgba(52,168,83,.16)"><div class="dc-icon">✅</div><h4>Per-Rule Actionable Messages</h4><p>Every finding tells you exactly what to fix and how. Not <em style="color:rgba(255,255,255,.5)">"compliance score: 67%"</em> — specific rule-level guidance with a remediation path per violation.</p></div>
+    </div>
+    <div style="margin-top:14px;background:rgba(52,168,83,.06);border:1px solid rgba(52,168,83,.18);border-radius:10px;padding:12px 18px;display:flex;align-items:center;gap:14px;justify-content:center;flex-wrap:wrap">
+      <div style="font-size:11px;color:rgba(255,255,255,.5)">Demonstrated end-to-end:</div>
+      <div style="font-size:11px;font-weight:600;color:#81C784">T1 Restore</div><div style="color:rgba(255,255,255,.25)">·</div>
+      <div style="font-size:11px;font-weight:600;color:#FBBC04">T2 Accept</div><div style="color:rgba(255,255,255,.25)">·</div>
+      <div style="font-size:11px;font-weight:600;color:#FF8A80">T3 Drop</div><div style="color:rgba(255,255,255,.25)">·</div>
+      <div style="font-size:11px;font-weight:600;color:#CE93D8">Policy Enforcement</div><div style="color:rgba(255,255,255,.25)">·</div>
+      <div style="font-size:11px;font-weight:600;color:#4285F4">Unified Single-Pane View</div>
+    </div>
+  </div>
+</div>
+
+<!-- SLIDE 8: HLD -->
+<div class="slide bg6" data-slide="7">
+  <div class="shell">
+    <div class="hdr">
+      <div class="ico" style="background:rgba(66,133,244,.14)"><svg width="17" height="17" viewBox="0 0 24 24" fill="none"><path d="M4 5a1 1 0 011-1h4a1 1 0 011 1v4a1 1 0 01-1 1H5a1 1 0 01-1-1V5zM14 5a1 1 0 011-1h4a1 1 0 011 1v4a1 1 0 01-1 1h-4a1 1 0 01-1-1V5zM4 15a1 1 0 011-1h4a1 1 0 011 1v4a1 1 0 01-1 1H5a1 1 0 01-1-1v-4zM14 15a1 1 0 011-1h4a1 1 0 011 1v4a1 1 0 01-1 1h-4a1 1 0 01-1-1v-4z" stroke="#4285F4" stroke-width="1.8"/></svg></div>
+      <div><h2>High-Level Design — Full Architecture</h2><div class="hl">Phase 1 + Phase 2 Unified Engine</div></div>
+      <div class="tag" style="background:rgba(66,133,244,.1);border:1px solid rgba(66,133,244,.2);color:#90CAF9">HLD</div>
+    </div>
+    <div class="dw">
+      <svg viewBox="0 0 760 370" fill="none" xmlns="http://www.w3.org/2000/svg">
+        <defs>
+          <marker id="ha" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto"><path d="M2 2L8 5L2 8" fill="none" stroke="#4285F4" stroke-width="1.5" stroke-linecap="round"/></marker>
+          <marker id="hg" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto"><path d="M2 2L8 5L2 8" fill="none" stroke="#34A853" stroke-width="1.5" stroke-linecap="round"/></marker>
+        </defs>
+        <rect x="40" y="16" width="680" height="56" rx="10" fill="rgba(66,133,244,.04)" stroke="rgba(66,133,244,.18)" stroke-width="1" stroke-dasharray="5 4"/>
+        <text x="56" y="35" fill="rgba(66,133,244,.5)" font-size="8.5" font-family="Roboto,sans-serif" font-weight="600">INPUT</text>
+        <rect x="60" y="28" width="130" height="34" rx="7" fill="rgba(66,133,244,.1)" stroke="#4285F4" stroke-width="1"/><text x="125" y="44" text-anchor="middle" fill="#90CAF9" font-size="9.5" font-family="Roboto,sans-serif" font-weight="600">gcloud CLI</text><text x="125" y="56" text-anchor="middle" fill="rgba(255,255,255,.35)" font-size="8" font-family="Roboto,sans-serif">Asset discovery</text>
+        <rect x="208" y="28" width="130" height="34" rx="7" fill="rgba(66,133,244,.1)" stroke="#4285F4" stroke-width="1"/><text x="273" y="44" text-anchor="middle" fill="#90CAF9" font-size="9.5" font-family="Roboto,sans-serif" font-weight="600">User / YAML Input</text><text x="273" y="56" text-anchor="middle" fill="rgba(255,255,255,.35)" font-size="8" font-family="Roboto,sans-serif">Prompt or structured input</text>
+        <rect x="356" y="28" width="145" height="34" rx="7" fill="rgba(66,133,244,.07)" stroke="rgba(66,133,244,.5)" stroke-width="1" stroke-dasharray="4 3"/><text x="428" y="44" text-anchor="middle" fill="#90CAF9" font-size="9.5" font-family="Roboto,sans-serif" font-weight="600">Live Cloud API</text><text x="428" y="56" text-anchor="middle" fill="rgba(255,255,255,.35)" font-size="8" font-family="Roboto,sans-serif">Drift source (Phase 2)</text>
+        <rect x="40" y="86" width="680" height="54" rx="10" fill="rgba(156,39,176,.04)" stroke="rgba(156,39,176,.18)" stroke-width="1" stroke-dasharray="5 4"/>
+        <text x="56" y="103" fill="rgba(156,39,176,.5)" font-size="8.5" font-family="Roboto,sans-serif" font-weight="600">ORCHESTRATION</text>
+        <rect x="60" y="96" width="200" height="34" rx="7" fill="rgba(156,39,176,.1)" stroke="#CE93D8" stroke-width="1"/><text x="160" y="112" text-anchor="middle" fill="#CE93D8" font-size="9.5" font-family="Roboto,sans-serif" font-weight="600">Python ThreadPools</text><text x="160" y="124" text-anchor="middle" fill="rgba(255,255,255,.35)" font-size="8" font-family="Roboto,sans-serif">Parallel bulk processing</text>
+        <rect x="278" y="96" width="200" height="34" rx="7" fill="rgba(156,39,176,.07)" stroke="rgba(156,39,176,.5)" stroke-width="1" stroke-dasharray="4 3"/><text x="378" y="112" text-anchor="middle" fill="#CE93D8" font-size="9.5" font-family="Roboto,sans-serif" font-weight="600">Drift Scheduler</text><text x="378" y="124" text-anchor="middle" fill="rgba(255,255,255,.35)" font-size="8" font-family="Roboto,sans-serif">Continuous diff engine (Phase 2)</text>
+        <line x1="300" y1="72" x2="300" y2="94" stroke="#4285F4" stroke-width="1.2" marker-end="url(#ha)"/>
+        <line x1="300" y1="140" x2="300" y2="166" stroke="#4285F4" stroke-width="1.2" marker-end="url(#ha)"/>
+        <rect x="40" y="168" width="680" height="66" rx="10" fill="rgba(251,188,4,.04)" stroke="rgba(251,188,4,.2)" stroke-width="1" stroke-dasharray="5 4"/>
+        <text x="56" y="186" fill="rgba(251,188,4,.5)" font-size="8.5" font-family="Roboto,sans-serif" font-weight="600">AI / RAG LAYER</text>
+        <rect x="60" y="178" width="126" height="46" rx="7" fill="rgba(251,188,4,.1)" stroke="#FBBC04" stroke-width="1"/><text x="123" y="198" text-anchor="middle" fill="#FBBC04" font-size="9.5" font-family="Roboto,sans-serif" font-weight="600">Gemini 2.5 Pro</text><text x="123" y="213" text-anchor="middle" fill="rgba(255,255,255,.35)" font-size="8" font-family="Roboto,sans-serif">Code generation</text>
+        <rect x="200" y="178" width="126" height="46" rx="7" fill="rgba(251,188,4,.08)" stroke="#FBBC04" stroke-width="1"/><text x="263" y="198" text-anchor="middle" fill="#FBBC04" font-size="9.5" font-family="Roboto,sans-serif" font-weight="600">Docs Scraper</text><text x="263" y="213" text-anchor="middle" fill="rgba(255,255,255,.35)" font-size="8" font-family="Roboto,sans-serif">HashiCorp schema RAG</text>
+        <rect x="340" y="178" width="126" height="46" rx="7" fill="rgba(251,188,4,.08)" stroke="#FBBC04" stroke-width="1"/><text x="403" y="198" text-anchor="middle" fill="#FBBC04" font-size="9.5" font-family="Roboto,sans-serif" font-weight="600">heuristics.json</text><text x="403" y="213" text-anchor="middle" fill="rgba(255,255,255,.35)" font-size="8" font-family="Roboto,sans-serif">Permanent memory</text>
+        <rect x="480" y="178" width="126" height="46" rx="7" fill="rgba(234,67,53,.08)" stroke="rgba(234,67,53,.4)" stroke-width="1" stroke-dasharray="4 3"/><text x="543" y="198" text-anchor="middle" fill="#FF8A80" font-size="9.5" font-family="Roboto,sans-serif" font-weight="600">Rego / OPA</text><text x="543" y="213" text-anchor="middle" fill="rgba(255,255,255,.35)" font-size="8" font-family="Roboto,sans-serif">Policy-as-Code (Phase 2)</text>
+        <line x1="400" y1="234" x2="400" y2="256" stroke="#34A853" stroke-width="1.2" marker-end="url(#hg)"/>
+        <rect x="40" y="258" width="680" height="54" rx="10" fill="rgba(234,67,53,.04)" stroke="rgba(234,67,53,.18)" stroke-width="1" stroke-dasharray="5 4"/>
+        <text x="56" y="276" fill="rgba(234,67,53,.5)" font-size="8.5" font-family="Roboto,sans-serif" font-weight="600">VERIFICATION</text>
+        <rect x="60" y="268" width="150" height="34" rx="7" fill="rgba(234,67,53,.09)" stroke="#EA4335" stroke-width="1"/><text x="135" y="284" text-anchor="middle" fill="#FF8A80" font-size="9.5" font-family="Roboto,sans-serif" font-weight="600">terraform.exe</text><text x="135" y="296" text-anchor="middle" fill="rgba(255,255,255,.35)" font-size="8" font-family="Roboto,sans-serif">import · plan · validate</text>
+        <rect x="228" y="268" width="150" height="34" rx="7" fill="rgba(234,67,53,.06)" stroke="rgba(234,67,53,.4)" stroke-width="1" stroke-dasharray="4 3"/><text x="303" y="284" text-anchor="middle" fill="#FF8A80" font-size="9.5" font-family="Roboto,sans-serif" font-weight="600">Drift Validator</text><text x="303" y="296" text-anchor="middle" fill="rgba(255,255,255,.35)" font-size="8" font-family="Roboto,sans-serif">State vs. Cloud diff (Phase 2)</text>
+        <line x1="400" y1="312" x2="400" y2="332" stroke="#34A853" stroke-width="1.2" marker-end="url(#hg)"/>
+        <rect x="40" y="334" width="680" height="26" rx="8" fill="rgba(52,168,83,.06)" stroke="rgba(52,168,83,.2)" stroke-width="1"/>
+        <text x="130" y="351" text-anchor="middle" fill="#81C784" font-size="9" font-family="Roboto,sans-serif" font-weight="600">.tf / .tfstate files</text>
+        <text x="310" y="351" text-anchor="middle" fill="#81C784" font-size="9" font-family="Roboto,sans-serif" font-weight="600">Drift Report + Policy Violations</text>
+        <text x="530" y="351" text-anchor="middle" fill="#81C784" font-size="9" font-family="Roboto,sans-serif" font-weight="600">Auto PR (GitOps)</text>
+      </svg>
+    </div>
+  </div>
+</div>
+
+<!-- SLIDE 9: TIER 1 ASK -->
+<div class="slide bg7" data-slide="8">
+  <div class="shell">
+    <div class="hdr">
+      <div class="ico" style="background:rgba(251,188,4,.14)"><svg width="17" height="17" viewBox="0 0 24 24" fill="none"><path d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2" stroke="#FBBC04" stroke-width="1.8" stroke-linecap="round"/></svg></div>
+      <div><h2>Tier 1 — Day 1 Ask</h2><div class="hl">Zero-risk, offline-friendly data requests to accelerate production readiness</div></div>
+      <div class="tag" style="background:rgba(251,188,4,.1);border:1px solid rgba(251,188,4,.25);color:#FBBC04">Action Required</div>
+    </div>
+    <div class="tbl-wrap">
+      <table class="etbl">
+        <thead><tr><th style="width:28%">Ask</th><th style="width:46%">Why We Need It</th><th style="width:26%">Sensitivity</th></tr></thead>
+        <tbody>
+          <tr><td><code>gcloud &lt;service&gt; describe ... --format=json</code><br><span style="font-size:10px;color:rgba(255,255,255,.4);margin-top:4px;display:block">Dumps for 10–20 representative resources</span></td><td>Importer schema oracle is only as good as the field shapes it has seen. Real snapshots = real coverage.</td><td><span class="sens" style="background:rgba(52,168,83,.12);color:#81C784;border:1px solid rgba(52,168,83,.25)">🟢 LOW</span><br><span style="font-size:10px;color:rgba(255,255,255,.4);margin-top:4px;display:block">Read-only metadata, no secrets</span></td></tr>
+          <tr><td>Sanitised <code>terraform.tfstate</code><br><span style="font-size:10px;color:rgba(255,255,255,.4);margin-top:4px;display:block">Or a redacted excerpt</span></td><td>Detector + Translator both consume this. Real state has <code>sensitive_attributes</code>, dynamic blocks, modules — all things our 2-resource POC doesn't exercise.</td><td><span class="sens" style="background:rgba(251,188,4,.1);color:#FBBC04;border:1px solid rgba(251,188,4,.25)">🟡 MEDIUM</span><br><span style="font-size:10px;color:rgba(255,255,255,.4);margin-top:4px;display:block"><code>terraform state pull | sanitize</code></span></td></tr>
+          <tr><td>Sample <code>*.tf</code> files<br><span style="font-size:10px;color:rgba(255,255,255,.4);margin-top:4px;display:block">5–10 modules, one per resource type</span></td><td>Validates our Translator output matches house style — variable conventions, module structure, locals usage.</td><td><span class="sens" style="background:rgba(52,168,83,.12);color:#81C784;border:1px solid rgba(52,168,83,.25)">🟢 LOW</span><br><span style="font-size:10px;color:rgba(255,255,255,.4);margin-top:4px;display:block">Share skeletons, redact values</span></td></tr>
+          <tr><td>Resource-type inventory<br><span style="font-size:10px;color:rgba(255,255,255,.4);margin-top:4px;display:block">"We use these 12 GCP services"</span></td><td>Tells us which Rego policies to prioritise. Stops us shipping policies for services they don't run.</td><td><span class="sens" style="background:rgba(52,168,83,.12);color:#81C784;border:1px solid rgba(52,168,83,.25)">🟢 NONE</span><br><span style="font-size:10px;color:rgba(255,255,255,.4);margin-top:4px;display:block">No data — just a service list</span></td></tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+</div>
+
+<!-- SLIDE 10: NEXT STEPS -->
+<div class="slide bg8" data-slide="9">
+  <div class="shell">
+    <div class="hdr">
+      <div class="ico" style="background:rgba(52,168,83,.14)"><svg width="17" height="17" viewBox="0 0 24 24" fill="none"><path d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2m-6 9l2 2 4-4" stroke="#34A853" stroke-width="1.8" stroke-linecap="round"/></svg></div>
+      <div><h2>Next Steps &amp; Call to Action</h2><div class="hl">Clear Path to Production</div></div>
+      <div class="tag" style="background:rgba(234,67,53,.1);border:1px solid rgba(234,67,53,.2);color:#FF8A80">Action Required</div>
+    </div>
+    <div style="display:flex;flex-direction:column;gap:12px;flex:1">
+      <div style="display:flex;gap:12px;align-items:flex-start;border-radius:12px;padding:16px 20px;border:1px solid rgba(66,133,244,.18);background:rgba(66,133,244,.05)">
+        <div style="width:30px;height:30px;border-radius:50%;background:rgba(66,133,244,.15);display:flex;align-items:center;justify-content:center;font-size:13px;font-weight:700;color:#4285F4;flex-shrink:0">1</div>
+        <div><h4 style="font-size:13px;font-weight:600;margin-bottom:5px">Formal Approval — Phase 2 Production Sign-off</h4><p style="font-size:11.5px;color:rgba(255,255,255,.6);line-height:1.6">Endorse the completed Phase 2 capabilities — Drift Detection (Restore / Accept / Drop), Policy-as-Code enforcement, and unified single-pane operations — for progression to client environments.</p></div>
+      </div>
+      <div style="display:flex;gap:12px;align-items:flex-start;border-radius:12px;padding:16px 20px;border:1px solid rgba(251,188,4,.18);background:rgba(251,188,4,.05)">
+        <div style="width:30px;height:30px;border-radius:50%;background:rgba(251,188,4,.15);display:flex;align-items:center;justify-content:center;font-size:13px;font-weight:700;color:#FBBC04;flex-shrink:0">2</div>
+        <div><h4 style="font-size:13px;font-weight:600;margin-bottom:5px">Tier 1 Data — Client Engagement Prerequisites</h4><p style="font-size:11.5px;color:rgba(255,255,255,.6);line-height:1.6">Share the 4 zero-risk data requests from the previous slide — required to validate coverage against real resource shapes, state files, and module conventions before go-live.</p></div>
+      </div>
+      <div style="display:flex;gap:12px;align-items:flex-start;border-radius:12px;padding:16px 20px;border:1px solid rgba(234,67,53,.18);background:rgba(234,67,53,.05)">
+        <div style="width:30px;height:30px;border-radius:50%;background:rgba(234,67,53,.15);display:flex;align-items:center;justify-content:center;font-size:13px;font-weight:700;color:#EA4335;flex-shrink:0">3</div>
+        <div>
+          <h4 style="font-size:13px;font-weight:600;margin-bottom:5px">Tooling Approvals — Two Service Requests</h4>
+          <div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:6px">
+            <div style="background:rgba(255,255,255,.04);border:1px solid rgba(255,255,255,.08);border-radius:8px;padding:5px 10px;font-size:11px;color:rgba(255,255,255,.65)">🛡️ <strong style="color:rgba(255,255,255,.8)">OPA / tfsec / checkov</strong> — Policy engine install</div>
+            <div style="background:rgba(255,255,255,.04);border:1px solid rgba(255,255,255,.08);border-radius:8px;padding:5px 10px;font-size:11px;color:rgba(255,255,255,.65)">☁️ <strong style="color:rgba(255,255,255,.8)">Terraformer / gcloud beta</strong> — Read-only access</div>
+          </div>
+        </div>
+      </div>
+      <div style="background:linear-gradient(135deg,rgba(66,133,244,.08),rgba(52,168,83,.06));border:1px solid rgba(66,133,244,.18);border-radius:11px;padding:14px 20px;display:flex;align-items:center;gap:14px">
+        <div style="font-size:22px">🚀</div>
+        <div>
+          <div style="font-size:13px;font-weight:600;margin-bottom:3px">Both phases proven. Engine is live. Ready to onboard the first client environment.</div>
+          <div style="font-size:11px;color:rgba(255,255,255,.45)">Phase 1 + Phase 2 complete · Drift Detection demoed · Policy enforcement active · GitOps-ready</div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+</div><!-- deck -->
+
+<div class="nav">
+  <button onclick="go(-1)">← Prev</button>
+  <span class="counter" id="ctr">1 / 10</span>
+  <button onclick="go(1)">Next →</button>
+  <button class="dl nav" onclick="dlPPT()">⬇ Download</button>
+</div>
+
+<script>
+  const slides = document.querySelectorAll('[data-slide]');
+  const total = slides.length;
+  let cur = 0;
+
+  function showSlide(n) {
+    slides.forEach(s => s.classList.remove('active'));
+    slides[n].classList.add('active');
+    document.getElementById('ctr').textContent = (n + 1) + ' / ' + total;
+    document.getElementById('prog').style.width = ((n + 1) / total * 100) + '%';
+  }
+
+  function go(d) {
+    cur = Math.max(0, Math.min(total - 1, cur + d));
+    showSlide(cur);
+  }
+
+  document.addEventListener('keydown', function(e) {
+    if (e.key === 'ArrowRight' || e.key === 'ArrowDown') go(1);
+    if (e.key === 'ArrowLeft' || e.key === 'ArrowUp') go(-1);
+  });
+
+  showSlide(0);
+
+  function dlPPT() {
+    var btn = document.querySelector('.dl');
+    btn.textContent = '⏳ Generating…'; btn.disabled = true;
+    var html = '<!DOCTYPE html><html><head><meta charset="UTF-8"><title>AI IaC Phase 1 & 2</title><style>body{font-family:Arial,sans-serif;background:#0d1117;color:#fff;margin:0}.cover{min-height:100vh;display:flex;flex-direction:column;align-items:center;justify-content:center;background:linear-gradient(135deg,#070d1a,#0d1f3c);text-align:center;padding:60px}.cover h1{font-size:40px;margin-bottom:12px}.slide{page-break-before:always;padding:56px;min-height:600px;border-bottom:2px solid #0d1f3c}h2{font-size:26px;color:#4285F4;border-bottom:2px solid rgba(66,133,244,.22);padding-bottom:10px;margin-bottom:18px}pre{font-size:13px;line-height:2;color:rgba(255,255,255,.75);white-space:pre-wrap;font-family:Arial,sans-serif}.sn{font-size:10px;color:rgba(255,255,255,.28);margin-bottom:6px;text-transform:uppercase;letter-spacing:1px}</style></head><body><div class="cover"><h1>AI-Powered Infrastructure as Code</h1><p style="color:rgba(255,255,255,.5);font-size:18px">Phase 1 & 2 — Complete & Demo Ready</p></div>';
+    var titles = ['Title','Executive Summary','Phase 1 — AI Importer Engine','RAG & The Learning Loop','Phase 2 — Drift Detection','Policy as Code Enforcer','What Was Just Demoed','High-Level Design','Tier 1 — Day 1 Ask','Next Steps & Call to Action'];
+    slides.forEach(function(s, i) {
+      html += '<div class="slide"><div class="sn">Slide ' + (i+1) + ' of ' + total + '</div><h2>' + titles[i] + '</h2><pre>' + (s.innerText || s.textContent).trim().substring(0, 800) + '</pre></div>';
+    });
+    html += '</body></html>';
+    var blob = new Blob([html], {type:'text/html'});
+    var a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = 'IaC-AI-Complete.html';
+    a.click();
+    btn.textContent = '✅ Downloaded!';
+    setTimeout(function(){ btn.textContent = '⬇ Download'; btn.disabled = false; }, 2000);
+  }
+</script>
+</body>
+</html>
