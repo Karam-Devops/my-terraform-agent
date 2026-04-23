@@ -1,5 +1,6 @@
 prod-470211
 
+python -m my-terraform-agent.importer.run
 python -m detector.run
 python -m policy.run
 
