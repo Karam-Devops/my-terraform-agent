@@ -2,6 +2,7 @@
 
 from .. import llm_provider
 from . import config
+from . import post_llm_overrides
 from .schema_prompt import build_schema_summary
 
 
@@ -172,6 +173,16 @@ def generate_hcl_from_json(resource_json_str, tf_type, hcl_name, attempt, schema
             return None
             
         cleaned_hcl = generated_hcl.strip().replace("```hcl", "").replace("```", "").strip()
+
+        # Deterministic post-pass to fix known LLM hallucinations of provider
+        # field names (see importer/post_llm_overrides.py for rationale). Runs
+        # before the resource-line check so the validator sees the corrected
+        # text. Fail-OPEN: if the override layer errors internally it returns
+        # the input unchanged with an empty corrections list.
+        cleaned_hcl, corrections = post_llm_overrides.apply_overrides(tf_type, cleaned_hcl)
+        for desc in corrections:
+            print(f"   - [POST-LLM] {desc}")
+
         if f'resource "{tf_type}" "{hcl_name}"' not in cleaned_hcl:
             print(f"   ❌ VALIDATION FAILED: LLM output did not contain the required resource line.")
             return None

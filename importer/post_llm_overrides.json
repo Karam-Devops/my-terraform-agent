@@ -1,0 +1,14 @@
+{
+  "_doc": "Deterministic post-LLM HCL corrections. See importer/post_llm_overrides.py for the rule shape, when to add entries, and the failure model. Each entry MUST include a `comment` field explaining WHY the rename/deletion is correct -- future maintainers should be able to verify the fix is still valid against the current provider schema without git-archaeology.",
+
+  "google_compute_instance": {
+    "renames": [
+      {
+        "comment": "The reservation_affinity block's discriminator field is named `type` in the current provider schema (registry.terraform.io/hashicorp/google v6+). The LLM frequently emits `consume_reservation_type` instead, which is the underlying GCP API field name -- it appears that way in older provider docs and in the raw cloud JSON, but Terraform's HCL surface uses the shorter `type`. Mechanical rename, always correct within reservation_affinity{} blocks. Verified: importer/knowledge_base/google_compute_instance.json shows reservation_affinity.type as the correct path; consume_reservation_type does not exist in the schema.",
+        "block_path": "reservation_affinity",
+        "from": "consume_reservation_type",
+        "to": "type"
+      }
+    ]
+  }
+}
