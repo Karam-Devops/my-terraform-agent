@@ -1,7 +1,11 @@
 # my-terraform-agent/translator/config.py
 
+from common.terraform_path import resolve_terraform_path as _resolve_terraform
+
 # --- Paths ---
-TERRAFORM_PATH = r"C:\Terraform\terraform.exe"
+# TERRAFORM_PATH is resolved lazily on first attribute access (see __getattr__
+# at the bottom of this module). See common/terraform_path.py for the
+# resolution order ($TERRAFORM_BINARY → platform default → PATH → fail).
 
 # --- LLM Settings ---
 MAX_RETRIES = 3 # We'll keep retries lower for translation, as it's less prone to state-engine quirks
@@ -55,3 +59,14 @@ CRITICAL AZURE ARCHITECTURAL RULES:
     *   For `azurerm_public_ip`: You MUST use the plural `zones` argument with a list of strings (e.g., `zones = ["1"]`).
 10. **Variable declaration completeness (STRICT):** For EVERY `var.<NAME>` reference you emit anywhere in the HCL output, you MUST also emit a corresponding `variable "<NAME>" { ... }` declaration block in the same output. The output is a self-contained Terraform module — undeclared variables cause `terraform validate` to fail with `Reference to undeclared input variable`. This rule subsumes Rule 7's `admin_ssh_key` requirement and applies to every other variable reference (e.g., `var.resource_group_name`, `var.location`, `var.subnet_id`). Before finalizing your output, scan it: every `var.X` you wrote needs a `variable "X" {}` block somewhere in the same file. References inside `#` comments or `/* ... */` blocks do not need declarations.
 """
+
+
+# --- Lazy attributes (PEP 562) ---
+# Existing callers do `config.TERRAFORM_PATH`. Defer resolution to first
+# access so this module imports cleanly even when Terraform isn't yet on
+# the machine, and so a deployment-time TERRAFORM_BINARY env var still
+# wins over any import-time snapshot.
+def __getattr__(name):
+    if name == "TERRAFORM_PATH":
+        return _resolve_terraform()
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

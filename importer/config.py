@@ -1,7 +1,13 @@
 # importer/config.py
 
+from common.terraform_path import resolve_terraform_path as _resolve_terraform
+
 # --- CLI Paths ---
-TERRAFORM_PATH = r"C:\Terraform\terraform.exe"
+# TERRAFORM_PATH is resolved lazily on first attribute access (see __getattr__
+# at the bottom of this module). Three places used to hardcode the Windows
+# install path here, in translator/config.py, and in agent_nodes.py — that
+# broke on every machine where Terraform lived elsewhere or was only on PATH.
+# The resolver checks $TERRAFORM_BINARY → platform default → PATH → fail.
 GCLOUD_CMD_PATH = r"C:\Program Files (x86)\Google\Cloud SDK\google-cloud-sdk\bin\gcloud.cmd"
 
 # --- Concurrency Settings ---
@@ -122,3 +128,15 @@ TF_TYPE_TO_GITHUB_DOC_PATH = {
     "google_storage_bucket": "storage_bucket",
     "google_sql_database_instance": "sql_database_instance",
 }
+
+
+# --- Lazy attributes (PEP 562) ---
+# Existing callers do `config.TERRAFORM_PATH`. Resolving at import time
+# would (a) force every module that imports this file to fail at import
+# if Terraform isn't installed yet, and (b) freeze the value before the
+# Cloud Run image's TERRAFORM_BINARY env var has a chance to apply. So
+# we defer resolution to first access.
+def __getattr__(name):
+    if name == "TERRAFORM_PATH":
+        return _resolve_terraform()
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

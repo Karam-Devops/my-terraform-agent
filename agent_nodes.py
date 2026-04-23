@@ -124,7 +124,8 @@ def validate_code_node(state: AgentState) -> dict:
                     with open(os.path.join(temp_dir, os.path.basename(file_path)), "w", encoding='utf-8') as f:
                         f.write(content)
             
-            terraform_path = "C:\\Terraform\\terraform.exe"
+            from common.terraform_path import resolve_terraform_path
+            terraform_path = resolve_terraform_path()
             
             print(f"Running 'terraform init' in {temp_dir}...")
             init_proc = subprocess.run([terraform_path, "init", "-input=false"], cwd=temp_dir, capture_output=True, text=True, check=False)

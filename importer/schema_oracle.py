@@ -103,12 +103,18 @@ def _generate_schema(dest_path: str) -> None:
             "be produced without them."
         )
 
+    # Resolve terraform binary via the common resolver — falls through env
+    # var → platform default → PATH lookup so this works on every dev
+    # machine and inside the Cloud Run image alike.
+    from common.terraform_path import resolve_terraform_path
+    terraform_bin = resolve_terraform_path()
+
     fd, tmp_path = tempfile.mkstemp(suffix=".json", prefix=".tf_schema_")
     os.close(fd)
     try:
         with open(tmp_path, "wb") as out:
             subprocess.run(
-                ["terraform", "providers", "schema", "-json"],
+                [terraform_bin, "providers", "schema", "-json"],
                 cwd=root,
                 stdout=out,
                 stderr=subprocess.PIPE,

@@ -134,9 +134,22 @@ def _run_terraform(args: List[str]) -> int:
         full_args = list(args)
     pretty = "terraform " + " ".join(full_args)
     print(f"  → Running: {pretty}")
+
+    # Resolve terraform binary via the common resolver. This used to be a
+    # bare "terraform" + FileNotFoundError catch — same end result, but
+    # now the error message points at the resolver's install hint instead
+    # of just "not found on PATH" (which was misleading on machines where
+    # the binary existed at the Windows default but wasn't on PATH).
+    try:
+        from common.terraform_path import resolve_terraform_path
+        terraform_bin = resolve_terraform_path()
+    except RuntimeError as e:
+        print(f"  ❌ {e}")
+        return 127
+
     try:
         proc = subprocess.Popen(
-            ["terraform"] + full_args,
+            [terraform_bin] + full_args,
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
             text=True,
@@ -148,7 +161,9 @@ def _run_terraform(args: List[str]) -> int:
             errors="replace",
         )
     except FileNotFoundError:
-        print("  ❌ `terraform` not found on PATH. Action skipped.")
+        # Defensive: shouldn't happen post-resolver, but handle gracefully
+        # if the resolved path becomes invalid between resolution and exec.
+        print(f"  ❌ `{terraform_bin}` no longer exists. Action skipped.")
         return 127
 
     assert proc.stdout is not None  # for type-checkers; Popen with PIPE guarantees this
