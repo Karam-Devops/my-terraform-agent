@@ -12,7 +12,7 @@ prints a structured drift report, and exits non-zero if drift was found.
 import os
 import sys
 
-from . import config, state_reader, cloud_snapshot, diff_engine
+from . import config, state_reader, cloud_snapshot, diff_engine, remediator
 
 
 def main() -> int:
@@ -43,6 +43,13 @@ def main() -> int:
         ))
 
     drift_count = diff_engine.print_report(drifts)
+
+    # If we found drift AND we're sitting at an interactive terminal, walk
+    # the user through remediation. The remediator no-ops in CI / non-tty
+    # contexts so the exit code below remains the canonical CI signal.
+    if drift_count > 0:
+        remediator.run_remediation(drifts)
+
     return 1 if drift_count > 0 else 0
 
 

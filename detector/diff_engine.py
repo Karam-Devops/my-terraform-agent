@@ -17,6 +17,7 @@ Truth-of-last-resort remains `terraform plan`, run by the executor after
 any remediation. This engine is for fast detection, not formal proof.
 """
 
+import fnmatch
 import re
 from dataclasses import dataclass, field
 from typing import Any, List, Optional
@@ -108,9 +109,30 @@ def _flatten_metadata_items(metadata_dict: Any) -> Any:
     return flattened
 
 
+def _filter_label_keys(labels_dict: Any, patterns: List[str]) -> Any:
+    """
+    Drop keys from a `labels` dict whose name matches any fnmatch glob in
+    `patterns`. No-op when input isn't a dict or no patterns are configured.
+
+    This exists to silence cloud-managed labels (`goog-ops-agent-policy`,
+    `goog-terraform-provisioned`, etc.) that no human declared and that
+    would otherwise show as drift forever. We deliberately filter BOTH
+    sides — after a remediation Accept the cloud value lands in state too,
+    so a state-side filter prevents the noise from leaking back in.
+    Human-added keys (`team`, `env`, ...) are unaffected by `goog-*`.
+    """
+    if not patterns or not isinstance(labels_dict, dict):
+        return labels_dict
+    return {
+        k: v for k, v in labels_dict.items()
+        if not any(fnmatch.fnmatchcase(k, p) for p in patterns)
+    }
+
+
 # --- Normalizers ---------------------------------------------------------
 
-def _normalize_cloud(node: Any, ignored: set, aliases: dict, leaf_only: set) -> Any:
+def _normalize_cloud(node: Any, ignored: set, aliases: dict, leaf_only: set,
+                     label_key_ignore: List[str]) -> Any:
     """Recursively reshape cloud JSON to look like Terraform state."""
     if isinstance(node, dict):
         out: dict = {}
@@ -120,10 +142,14 @@ def _normalize_cloud(node: Any, ignored: set, aliases: dict, leaf_only: set) -> 
             # Honour ignore in any of: original key, snake_case, renamed alias.
             if k in ignored or snake in ignored or renamed in ignored:
                 continue
-            normalized = _normalize_cloud(v, ignored, aliases, leaf_only)
+            normalized = _normalize_cloud(v, ignored, aliases, leaf_only, label_key_ignore)
             # Special-case: flatten metadata.items into a key-value map.
             if renamed == "metadata":
                 normalized = _flatten_metadata_items(normalized)
+            # Drop cloud-managed label keys (e.g. goog-*) before they reach
+            # the diff walker. Same per-field treatment as metadata.items.
+            if renamed == "labels":
+                normalized = _filter_label_keys(normalized, label_key_ignore)
             # Leaf-only stripping for known projects/.../<leaf> fields.
             if renamed in leaf_only:
                 normalized = _strip_to_leaf(normalized)
@@ -132,24 +158,30 @@ def _normalize_cloud(node: Any, ignored: set, aliases: dict, leaf_only: set) -> 
             out[renamed] = normalized
         return out
     if isinstance(node, list):
-        return [_normalize_cloud(x, ignored, aliases, leaf_only) for x in node]
+        return [_normalize_cloud(x, ignored, aliases, leaf_only, label_key_ignore) for x in node]
     return _strip_url(node)
 
 
-def _normalize_state(node: Any, ignored: set) -> Any:
+def _normalize_state(node: Any, ignored: set, label_key_ignore: List[str]) -> Any:
     """Strip ignored keys and empty values from the state attribute tree."""
     if isinstance(node, dict):
         out: dict = {}
         for k, v in node.items():
             if k in ignored:
                 continue
-            normalized = _normalize_state(v, ignored)
+            normalized = _normalize_state(v, ignored, label_key_ignore)
+            # Symmetric treatment: drop cloud-managed label keys on the
+            # state side too. Mostly a no-op (importer already strips
+            # labels), but matters after an Accept that pulls cloud labels
+            # into state, or for any externally-imported state.
+            if k == "labels":
+                normalized = _filter_label_keys(normalized, label_key_ignore)
             if _is_empty(normalized):
                 continue
             out[k] = normalized
         return out
     if isinstance(node, list):
-        return [_normalize_state(x, ignored) for x in node]
+        return [_normalize_state(x, ignored, label_key_ignore) for x in node]
     return _strip_url(node)
 
 
@@ -278,9 +310,10 @@ def diff_resource(tf_address: str, tf_type: str,
     aliases = config.aliases_for(tf_type)
     leaf_only = config.leaf_only_fields_for(tf_type)
     path_ignore = config.path_ignore_for(tf_type)
+    label_key_ignore = config.label_key_ignore_for(tf_type)
 
-    norm_state = _normalize_state(state_attrs, ignored)
-    norm_cloud = _normalize_cloud(cloud_json, ignored, aliases, leaf_only)
+    norm_state = _normalize_state(state_attrs, ignored, label_key_ignore)
+    norm_cloud = _normalize_cloud(cloud_json, ignored, aliases, leaf_only, label_key_ignore)
 
     _walk(norm_state, norm_cloud, path="", out=drift.items, path_ignore=path_ignore)
     return drift

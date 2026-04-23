@@ -148,6 +148,21 @@ PATH_IGNORE_FIELDS = {
     },
 }
 
+# --- Per-resource: glob patterns for label keys to silently drop on BOTH sides
+# of the `labels` field. Used for cloud-managed labels that appear forever
+# even though no human declared them. Examples:
+#   - `goog-ops-agent-policy: v2-template-1-7-0`  (Ops Agent installer, GCE)
+#   - `goog-terraform-provisioned: true`          (TF provider stamps on create)
+#   - `goog-managed-by: ...`                       (assorted GCP services)
+#
+# Patterns use fnmatch syntax — `goog-*` covers the whole family. Filter is
+# applied to the inner dict of the `labels` field only; other dicts unaffected.
+# Human-added keys (e.g. `team`, `env`) still surface as drift normally.
+LABEL_KEY_IGNORE_PATTERNS = {
+    "google_compute_instance": ["goog-*"],
+    "google_storage_bucket":   ["goog-*"],
+}
+
 # --- Per-resource: fields whose value is a `projects/.../<leaf>` URL on the
 # cloud side but a bare leaf on the state side. We strip cloud to its leaf.
 LEAF_ONLY_FIELDS = {
@@ -262,3 +277,9 @@ def leaf_only_fields_for(tf_type: str) -> set:
 
 def path_ignore_for(tf_type: str) -> set:
     return PATH_IGNORE_FIELDS.get(tf_type, set())
+
+
+def label_key_ignore_for(tf_type: str) -> list:
+    """fnmatch glob patterns for label keys to drop from BOTH sides of the
+    `labels` field. See LABEL_KEY_IGNORE_PATTERNS for the rationale."""
+    return LABEL_KEY_IGNORE_PATTERNS.get(tf_type, [])

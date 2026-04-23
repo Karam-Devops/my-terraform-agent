@@ -57,4 +57,31 @@ def get_resource_details_json(mapping):
     json_output = shell_runner.run_command(command_args)
     if json_output:
         print("✅ Successfully retrieved full resource configuration.")
+        # Inject `project` as a top-level snapshot field. `gcloud describe`
+        # never emits it (the project is implicit in the URL/selfLink path),
+        # so without this:
+        #   - the LLM has no project value to write into HCL,
+        #   - lifecycle_planner.derive_lifecycle_ignores skips `project`
+        #     entirely (it only ignores fields PRESENT in the snapshot),
+        # and the generated HCL ends up missing `project = "..."`. That's a
+        # latent gap: any drop→recreate flow (or `terraform apply` from a
+        # fresh shell with no $env:GOOGLE_PROJECT) then fails with
+        # `Error: project: required field is not set`.
+        #
+        # By injecting here we keep the rest of the pipeline unchanged —
+        # the CRITICAL OVERRIDE in hcl_generator.py already instructs the
+        # LLM to write any optional+computed field with its snapshot value
+        # AND add it to lifecycle.ignore_changes. So the file becomes
+        # self-contained and future-resilient in one shot.
+        try:
+            data = json.loads(json_output)
+            if isinstance(data, dict) and "project" not in data:
+                data["project"] = mapping["project_id"]
+                json_output = json.dumps(data, indent=2)
+                print(f"   - 🏷️  Injected project='{mapping['project_id']}' into snapshot "
+                      f"(gcloud describe omits it; needed for self-contained HCL).")
+        except (json.JSONDecodeError, TypeError):
+            # Fail-open: keep raw output if we can't parse. Downstream
+            # snapshot scrubbers will hit the same error and surface it.
+            pass
     return json_output
