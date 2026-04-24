@@ -3,12 +3,20 @@
 import subprocess
 import shlex
 
+from common.logging import get_logger
+
+log = get_logger(__name__)
+
+
 def run_command(command_args):
     """
     Executes a shell command using the low-level Popen interface to guarantee
     capture of stdout/stderr by reading raw byte streams.
     """
-    print(f"\n▶️  Executing: {shlex.join(command_args)}")
+    # Event-style log: stable event name + structured args.
+    # `cmd` is the shell-joined form (safe for quoting) so dashboards
+    # can filter on a canonical binary name (e.g. cmd starts with "gcloud").
+    log.info("subprocess_start", cmd=shlex.join(command_args))
 
     # We use Popen for direct process control and PIPE to create the I/O streams.
     # We do NOT use text=True. We will handle bytes manually for maximum reliability.
@@ -27,7 +35,11 @@ def run_command(command_args):
 
         # After the process is finished, we check its return code.
         if process.returncode != 0:
-            print(f"❌ Command failed. Raising exception with captured output.")
+            log.error(
+                "subprocess_failed",
+                returncode=process.returncode,
+                cmd=command_args[0] if command_args else "",
+            )
             # We manually raise the exception.
             # Crucially, we populate the 'output' field with the combined, decoded streams.
             raise subprocess.CalledProcessError(

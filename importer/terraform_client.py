@@ -6,6 +6,9 @@ import subprocess
 import os
 import tempfile
 from . import config
+from common.logging import get_logger
+
+log = get_logger(__name__)
 
 
 # ---------------------------------------------------------------------------
@@ -55,7 +58,8 @@ def _ensure_initialized(workdir=None):
     """
     base = workdir or os.getcwd()
     if not os.path.isdir(os.path.join(base, ".terraform")) or not os.path.isfile(os.path.join(base, ".terraform.lock.hcl")):
-        print(f"   - ⚠️ Terraform plugins missing or lock file inconsistent in {base}. Auto-initializing...")
+        log.warning("workdir_uninitialized", workdir=base,
+                    reason="terraform plugins or lock file missing; auto-initializing")
         # Force an upgrade to ensure the lock file is written correctly for the current .tf files
         return init(workdir=workdir, upgrade=True)
     return True
@@ -80,16 +84,21 @@ def init(workdir=None, upgrade=False):
     Lazy-import keeps importer/ decoupled from common/workdir at module
     load time (matches the pattern used in schema_oracle.py).
     """
-    print(f"\n--- {'Re-initializing' if upgrade else 'Initializing'} Terraform in {workdir or os.getcwd()} ---")
+    log.info("terraform_init_start",
+             workdir=workdir or os.getcwd(),
+             upgrade=upgrade)
     if not upgrade and workdir:
         try:
             from common.workdir import seed_lock_file
             if seed_lock_file(workdir):
-                print(f"   - 🔒 Seeded canonical .terraform.lock.hcl into {workdir}")
+                log.info("lock_file_seeded", workdir=workdir)
         except OSError as seed_err:
             # Non-fatal: terraform init will create a fresh lock if the
             # seed copy failed (permissions, disk). Log so it's visible.
-            print(f"   - ⚠️ Could not seed lock file ({seed_err}); init will resolve fresh.")
+            log.warning("lock_file_seed_failed",
+                        workdir=workdir,
+                        error=str(seed_err),
+                        reason="init will resolve fresh from registry")
     command_args = [config.TERRAFORM_PATH, "init"]
     if upgrade:
         command_args.append("-upgrade")
@@ -99,7 +108,7 @@ def init(workdir=None, upgrade=False):
         return True
     except (subprocess.CalledProcessError, FileNotFoundError) as e:
         error_output = e.stderr if hasattr(e, 'stderr') and e.stderr else str(e)
-        print(f"❌ Terraform init failed. Error: {error_output}")
+        log.error("terraform_init_failed", workdir=workdir, error=error_output)
         return False
 
 def import_resource(mapping, force_refresh=False):
@@ -112,35 +121,48 @@ def import_resource(mapping, force_refresh=False):
     """
     workdir = mapping.get("workdir")
     if not _ensure_initialized(workdir=workdir):
-        print(f"❌ Aborting import for '{mapping['resource_name']}' due to initialization failure.")
+        log.error("import_aborted_init_failed",
+                  resource_name=mapping['resource_name'])
         return False
 
     tf_address = f'{mapping["tf_type"]}.{mapping["hcl_name"]}'
 
     if force_refresh:
-        print(f"\n   - 🧹 Forcing state refresh for '{mapping['resource_name']}'...")
+        log.info("state_refresh_forcing",
+                 resource_name=mapping['resource_name'],
+                 tf_address=tf_address)
         remove_args = [config.TERRAFORM_PATH, "state", "rm", tf_address]
         try:
             subprocess.run(remove_args, capture_output=True, text=True, cwd=workdir)
         except Exception:
             pass
 
-    print(f"\n--- Importing '{mapping['resource_name']}' (cwd={workdir}) ---")
+    log.info("import_start",
+             resource_name=mapping['resource_name'],
+             tf_address=tf_address,
+             workdir=workdir)
     import_args = [config.TERRAFORM_PATH, "import", tf_address, mapping["import_id"]]
     try:
         subprocess.run(import_args, check=True, capture_output=True, text=True, cwd=workdir)
-        print(f"✅ Import successful for '{mapping['resource_name']}'.")
+        log.info("import_complete",
+                 resource_name=mapping['resource_name'],
+                 tf_address=tf_address)
         return True
     except subprocess.CalledProcessError as e:
         error_output = e.stderr if e.stderr else e.stdout
 
         if "Resource already managed by Terraform" in error_output and not force_refresh:
-            print(f"✅ Resource '{mapping['resource_name']}' is already managed in state. Skipping import.")
+            log.info("import_already_managed",
+                     resource_name=mapping['resource_name'],
+                     tf_address=tf_address)
             return True
 
         # Extract just the first line for cleaner logging
         first_line = error_output.splitlines()[0] if error_output else "Unknown Error"
-        print(f"❌ Terraform import failed for '{mapping['resource_name']}'. Error: {first_line}")
+        log.error("import_failed",
+                  resource_name=mapping['resource_name'],
+                  tf_address=tf_address,
+                  error=first_line)
         return False
 
 
@@ -288,7 +310,9 @@ def _run_show_json(plan_file, workdir=None):
         result = subprocess.run(show_args, capture_output=True, text=True, check=True, cwd=workdir)
         return json.loads(result.stdout)
     except (subprocess.CalledProcessError, json.JSONDecodeError) as e:
-        print(f"   - WARN: `terraform show -json` failed ({e}); cannot classify structurally.")
+        log.warning("terraform_show_json_failed",
+                    error=str(e),
+                    reason="cannot classify plan structurally; falling back to FAIL")
         return None
 
 
@@ -330,7 +354,7 @@ def plan_for_resource(mapping):
         return (False, "CRITICAL: Terraform failed to initialize. Cannot run plan.")
 
     tf_address = f'{mapping["tf_type"]}.{mapping["hcl_name"]}'
-    print(f"\n--- Verifying '{tf_address}' (scoped plan via -target, cwd={workdir}) ---")
+    log.info("plan_verify_start", tf_address=tf_address, workdir=workdir)
 
     plan_file = None
     output_file = None
@@ -355,18 +379,20 @@ def plan_for_resource(mapping):
             output = f_in.read()
 
         if process.returncode != 0:
-            print(f"   - ❌ FAIL: `terraform plan` exited non-zero for '{tf_address}'.")
+            log.error("plan_nonzero_exit", tf_address=tf_address,
+                      returncode=process.returncode)
             return (False, output)
 
         # Fast path: plan text says "No changes" — no need to show -json.
         if "No changes. Your infrastructure matches the configuration." in output:
-            print(f"   - ✅ PASS: '{tf_address}' matches cloud reality.")
+            log.info("plan_pass", tf_address=tf_address, verdict="matches_cloud")
             return (True, "Plan successful: No changes.")
 
         # Structural classification. Fall back to FAIL if show -json breaks.
         plan_json = _run_show_json(plan_file, workdir=workdir)
         if plan_json is None:
-            print(f"   - ❌ FAIL: '{tf_address}' has changes but classification unavailable.")
+            log.error("plan_classify_unavailable", tf_address=tf_address,
+                      reason="terraform show -json failed; cannot classify")
             return (False, output)
 
         verdict = _classify_plan(plan_json, tf_address)
@@ -376,7 +402,8 @@ def plan_for_resource(mapping):
             # resource (the textual 'No changes' line wasn't present because
             # `-target` may have pulled in dependency resources whose own
             # diffs show in the text). Treat as PASS.
-            print(f"   - ✅ PASS: '{tf_address}' has no diff (sibling resources may differ).")
+            log.info("plan_pass", tf_address=tf_address,
+                     verdict="no_diff_for_target")
             return (True, "Plan successful: No changes for this resource.")
 
         if verdict == "AUTO_APPLY":
@@ -392,25 +419,30 @@ def plan_for_resource(mapping):
                 after = c.get("change", {}).get("after") or {}
                 added_paths.extend(_summarize_additions(before, after))
 
-            print(f"   - 🔄 AUTO-RECONCILE: '{tf_address}' has post-import state catch-up.")
-            if added_paths:
-                print(f"     Fields being acknowledged (cloud already has these values):")
-                for p in added_paths[:10]:
-                    print(f"       + {p}")
-                if len(added_paths) > 10:
-                    print(f"       ... and {len(added_paths) - 10} more")
+            # Single structured event captures the auto-reconcile + field
+            # list (truncated). Operators filter on event=auto_reconcile_start
+            # to audit what we're acknowledging on each import.
+            log.info("auto_reconcile_start",
+                     tf_address=tf_address,
+                     field_count=len(added_paths),
+                     fields=added_paths[:20],
+                     truncated=len(added_paths) > 20,
+                     reason="post-import state catch-up; cloud already has these values")
 
             ok, apply_out = _apply_saved_plan(plan_file, workdir=workdir)
             if not ok:
-                print(f"   - ❌ FAIL: auto-apply failed for '{tf_address}'.")
+                log.error("auto_reconcile_apply_failed",
+                          tf_address=tf_address,
+                          error=apply_out[:500])
                 combined = output + "\n\n--- AUTO-APPLY ERROR ---\n" + apply_out
                 return (False, combined)
 
-            print(f"   - ✅ AUTO-RECONCILED: '{tf_address}' state caught up to cloud.")
+            log.info("auto_reconcile_complete", tf_address=tf_address)
             return (True, "Plan successful: state auto-reconciled to cloud reality.")
 
         # FAIL: real diff that needs human / LLM review.
-        print(f"   - ❌ FAIL: '{tf_address}' has a real diff that needs review.")
+        log.warning("plan_real_diff", tf_address=tf_address,
+                    reason="diff contains mutations or removals; needs review")
         return (False, output)
 
     finally:

@@ -2,9 +2,13 @@
 import json
 from . import config
 from . import shell_runner
+from common.logging import get_logger
+
+log = get_logger(__name__)
+
 
 def discover_resources_of_type(project_id, asset_type):
-    print(f"\n🔎 Searching for asset type: {asset_type}...")
+    log.info("discover_start", project_id=project_id, asset_type=asset_type)
     command_args = (
         config.GCLOUD_CMD_PATH, "--quiet", "asset", "search-all-resources",
         f"--scope=projects/{project_id}", f"--asset-types={asset_type}", "--format=json"
@@ -13,30 +17,32 @@ def discover_resources_of_type(project_id, asset_type):
     if not output: return []
     try:
         resources = json.loads(output)
-        print(f"   ✅ Found {len(resources)} resource(s).")
+        log.info("discover_complete", asset_type=asset_type, count=len(resources))
         return resources
     except json.JSONDecodeError:
-        print("   ❌ Error: Failed to parse JSON response from gcloud.")
+        log.error("discover_parse_failed", asset_type=asset_type,
+                  reason="gcloud returned non-JSON output")
         return []
 
 def get_resource_details_json(mapping):
     """Gets the full JSON configuration for a selected resource using 'gcloud describe'."""
-    print("\n--- Getting Full Resource Details ---")
-    
     tf_type = mapping["tf_type"]
-    print(f"   - Attempting to find describe command for Terraform type: '{tf_type}'")
-    
-    # ---------------------------------------------------------------------------------
-    # THIS IS THE CRITICAL DEBUGGING LINE
-    # ---------------------------------------------------------------------------------
-    print("\n   [DEBUG] Contents of the loaded TF_TYPE_TO_GCLOUD_INFO dictionary:")
-    print(f"   {json.dumps(config.TF_TYPE_TO_GCLOUD_INFO, indent=4)}")
-    # ---------------------------------------------------------------------------------
-    
+    log.info("describe_start",
+             tf_type=tf_type,
+             resource_name=mapping.get("resource_name"))
+
+    # Previously: a debug print dumping the entire TF_TYPE_TO_GCLOUD_INFO
+    # dictionary on every describe call. Phase 0 audit flagged this as
+    # noise-level output in the hot path (~30 lines of JSON per call, drowns
+    # the real narrative). Removed; the dict is static config loaded at
+    # import time, so if you need to inspect it, do so at the REPL rather
+    # than on every invocation.
+
     info = config.TF_TYPE_TO_GCLOUD_INFO.get(tf_type)
-    
+
     if not info:
-        print(f"\n❌ Cannot get details: No 'describe' command configured for {tf_type}.")
+        log.error("describe_unsupported_type", tf_type=tf_type,
+                  reason="no describe command configured")
         return None
 
     command_args = [config.GCLOUD_CMD_PATH, "--quiet"]
@@ -65,7 +71,8 @@ def get_resource_details_json(mapping):
     
     json_output = shell_runner.run_command(command_args)
     if json_output:
-        print("✅ Successfully retrieved full resource configuration.")
+        log.info("describe_complete", tf_type=tf_type,
+                 resource_name=mapping.get("resource_name"))
         # Inject `project` as a top-level snapshot field. `gcloud describe`
         # never emits it (the project is implicit in the URL/selfLink path),
         # so without this:
@@ -88,8 +95,9 @@ def get_resource_details_json(mapping):
             if isinstance(data, dict):
                 if "project" not in data:
                     data["project"] = mapping["project_id"]
-                    print(f"   - 🏷️  Injected project='{mapping['project_id']}' into snapshot "
-                          f"(gcloud describe omits it; needed for self-contained HCL).")
+                    log.info("snapshot_inject_project",
+                             project_id=mapping["project_id"],
+                             reason="gcloud describe omits it; needed for self-contained HCL")
                     mutated = True
 
                 # SA-specific: Terraform's google_service_account requires
@@ -110,8 +118,9 @@ def get_resource_details_json(mapping):
                     email_value = data.get("email")
                     if email_value and "account_id" not in data:
                         data["account_id"] = email_value.split("@", 1)[0]
-                        print(f"   - 🏷️  Injected account_id='{data['account_id']}' for SA "
-                              f"(derived from email; email gets scrubbed downstream).")
+                        log.info("snapshot_inject_account_id",
+                                 account_id=data["account_id"],
+                                 reason="derived from email; email gets scrubbed downstream")
                         mutated = True
 
             if mutated:
