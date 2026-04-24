@@ -87,6 +87,43 @@ class AttrInfo:
 # Schema generation + load
 # ---------------------------------------------------------------------------
 
+def _find_init_dir() -> Optional[str]:
+    """Locate any directory with `.terraform/` we can run schema dump from.
+
+    Per-project workdir refactor: `.terraform/` no longer lives at the
+    repo root. Each per-project workdir under `imported/<project>/` has
+    its own `.terraform/` after the first `terraform init`, and they all
+    install the same GCP provider (the schema is project-agnostic). So we
+    just pick the first workdir with `.terraform/` and use it as cwd for
+    `terraform providers schema -json`.
+
+    Returns None if no workdir has been init'd yet — caller turns that
+    into a clear actionable error message.
+    """
+    # 1. Repo root (back-compat — old commingled layout, before the
+    # per-project refactor; still works if a dev hasn't run the migration).
+    root = _project_root()
+    if os.path.isdir(os.path.join(root, ".terraform")):
+        return root
+
+    # 2. Any per-project workdir under the resolved import base. We import
+    # lazily because schema_oracle is loaded VERY early in some paths and
+    # we don't want a circular import via common.workdir.
+    try:
+        from common.workdir import _resolve_base  # type: ignore[attr-defined]
+        base = _resolve_base()
+    except Exception:
+        return None
+
+    if not os.path.isdir(base):
+        return None
+    for entry in sorted(os.scandir(base), key=lambda e: e.name):
+        if entry.is_dir() and os.path.isdir(os.path.join(entry.path, ".terraform")):
+            return entry.path
+
+    return None
+
+
 def _generate_schema(dest_path: str) -> None:
     """Runs `terraform providers schema -json` and writes the dump to dest.
 
@@ -94,13 +131,14 @@ def _generate_schema(dest_path: str) -> None:
     poisons the cache. Streams stdout to disk in binary mode to dodge
     Windows console-encoding pitfalls.
     """
-    root = _project_root()
-    if not os.path.isdir(os.path.join(root, ".terraform")):
+    init_dir = _find_init_dir()
+    if init_dir is None:
         raise RuntimeError(
-            "Terraform is not initialised in the project root. "
-            "Run `terraform init` (or `terraform init -upgrade`) first so the "
-            "provider plugins are available locally; the schema dump cannot "
-            "be produced without them."
+            "No initialised Terraform working directory found. "
+            "Per-project workdirs are now under `imported/<project_id>/` "
+            "(see common/workdir.py). Import at least one resource (which "
+            "triggers `terraform init` in the per-project workdir) and "
+            "retry; the schema dump runs from any one of them."
         )
 
     # Resolve terraform binary via the common resolver — falls through env
@@ -115,7 +153,7 @@ def _generate_schema(dest_path: str) -> None:
         with open(tmp_path, "wb") as out:
             subprocess.run(
                 [terraform_bin, "providers", "schema", "-json"],
-                cwd=root,
+                cwd=init_dir,
                 stdout=out,
                 stderr=subprocess.PIPE,
                 check=True,

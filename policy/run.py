@@ -3,9 +3,9 @@
 On-demand CLI for policy compliance scanning (POC).
 
 Usage:
-    python -m policy.run
+    python -m policy.run [--project <project_id>]
 
-Reads ./terraform.tfstate, fetches live cloud JSON for the in-scope
+Reads <workdir>/terraform.tfstate, fetches live cloud JSON for the in-scope
 resources, evaluates each against the vendored Rego policy bundle, and
 prints a compliance report grouped by severity. Exits non-zero if any
 HIGH violation is found (CI gate).
@@ -13,8 +13,20 @@ HIGH violation is found (CI gate).
 Reuses detector.state_reader and detector.cloud_snapshot so we don't
 re-implement state parsing or gcloud invocation. The two modules stay
 independent — this is one-way reuse, not a circular dependency.
+
+Per-project workdir refactor
+----------------------------
+Same project-resolution semantics as ``detector/run.py`` -- see that
+module's docstring for the full picker logic. Mirrors the importer's
+per-project layout so a CI job runs::
+
+    python -m policy.run --project prod-470211
+
+against ``imported/prod-470211/terraform.tfstate``, never touching the
+sibling dev project's state.
 """
 
+import argparse
 import json
 import os
 import sys
@@ -24,6 +36,8 @@ from typing import Dict, List, Optional
 # One-way reuse of the detector's already-built input layer.
 from detector import config as detector_config
 from detector import state_reader, cloud_snapshot
+from detector.run import _select_project  # workdir picker (CLI parity)
+from common.workdir import resolve_project_workdir
 
 from . import config, engine
 
@@ -112,8 +126,28 @@ def _print_report(per_resource: Dict[str, List[engine.Violation]]) -> int:
 
 
 def main() -> int:
-    project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
-    os.chdir(project_root)
+    parser = argparse.ArgumentParser(prog="policy.run")
+    parser.add_argument(
+        "--project", "-p",
+        help="GCP project_id whose per-project workdir to scan. "
+             "If omitted, lists available workdirs and prompts.",
+    )
+    args = parser.parse_args()
+
+    project_id = _select_project(args.project)
+    try:
+        workdir = resolve_project_workdir(project_id, create=False)
+    except ValueError as e:
+        print(f"[FAIL] {e}")
+        return 2
+
+    if not os.path.isdir(workdir):
+        print(f"[FAIL] Workdir does not exist: {workdir}")
+        print(f"       Run the importer for project {project_id!r} first.")
+        return 2
+
+    os.chdir(workdir)
+    print(f"--- Project: {project_id}")
     print(f"--- Working directory: {os.getcwd()} ---")
 
     # Fail fast if conftest is missing — the standalone CLI needs the
@@ -124,7 +158,7 @@ def main() -> int:
         print(f"\n\u274c {e}")
         return 2
 
-    state_path = os.path.join(project_root, detector_config.STATE_FILE_NAME)
+    state_path = os.path.join(workdir, detector_config.STATE_FILE_NAME)
     resources = state_reader.read_state(state_path)
     if not resources:
         print("Nothing to scan (no managed resources in state).")

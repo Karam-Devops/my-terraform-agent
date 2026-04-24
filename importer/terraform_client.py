@@ -45,23 +45,57 @@ def extract_error_files(plan_output):
     return list(dict.fromkeys(_ERROR_FILE_RE.findall(plan_output)))
 
 
-def _ensure_initialized():
-    """Internal helper: Checks if Terraform is initialized; runs init if not."""
-    if not os.path.isdir(".terraform") or not os.path.isfile(".terraform.lock.hcl"):
-        print("   - ⚠️ Terraform plugins missing or lock file inconsistent. Auto-initializing...")
+def _ensure_initialized(workdir=None):
+    """Internal helper: checks if Terraform is initialized in `workdir`; runs init if not.
+
+    Per-project workdir refactor: paths are now resolved relative to the
+    explicit workdir, NOT the process cwd. Falls back to process cwd if
+    workdir is None purely for back-compat with any caller still pre-dating
+    the refactor (none in tree, but defensive).
+    """
+    base = workdir or os.getcwd()
+    if not os.path.isdir(os.path.join(base, ".terraform")) or not os.path.isfile(os.path.join(base, ".terraform.lock.hcl")):
+        print(f"   - ⚠️ Terraform plugins missing or lock file inconsistent in {base}. Auto-initializing...")
         # Force an upgrade to ensure the lock file is written correctly for the current .tf files
-        return init(upgrade=True)
+        return init(workdir=workdir, upgrade=True)
     return True
 
-def init(upgrade=False):
-    """Runs 'terraform init'."""
-    print(f"\n--- {'Re-initializing' if upgrade else 'Initializing'} Terraform ---")
+def init(workdir=None, upgrade=False):
+    """Runs 'terraform init' inside `workdir` (or process cwd if None).
+
+    Per-project workdir refactor: every terraform command runs with
+    `cwd=workdir` so the .terraform/ plugin dir, terraform.tfstate, and
+    .terraform.lock.hcl all live alongside the .tf files for THIS project,
+    not commingled at the repo root.
+
+    Canonical-lock seeding: before init runs, we copy the committed
+    `provider_versions/.terraform.lock.hcl` into the workdir if it
+    doesn't already have one. This makes every project (yours, demo,
+    future SaaS client) resolve provider versions identically without
+    requiring per-project lock files to be committed -- which would not
+    work in a multi-tenant context anyway. The seed is a no-op when:
+      * upgrade=True (operator wants a fresh resolve, by definition)
+      * workdir already has a lock file (operator's pin wins)
+      * canonical seed is absent (clean fallback to registry resolution)
+    Lazy-import keeps importer/ decoupled from common/workdir at module
+    load time (matches the pattern used in schema_oracle.py).
+    """
+    print(f"\n--- {'Re-initializing' if upgrade else 'Initializing'} Terraform in {workdir or os.getcwd()} ---")
+    if not upgrade and workdir:
+        try:
+            from common.workdir import seed_lock_file
+            if seed_lock_file(workdir):
+                print(f"   - 🔒 Seeded canonical .terraform.lock.hcl into {workdir}")
+        except OSError as seed_err:
+            # Non-fatal: terraform init will create a fresh lock if the
+            # seed copy failed (permissions, disk). Log so it's visible.
+            print(f"   - ⚠️ Could not seed lock file ({seed_err}); init will resolve fresh.")
     command_args = [config.TERRAFORM_PATH, "init"]
     if upgrade:
         command_args.append("-upgrade")
     try:
         # Use subprocess.run directly as we don't need the complex file-redirection here
-        subprocess.run(command_args, check=True, capture_output=True, text=True)
+        subprocess.run(command_args, check=True, capture_output=True, text=True, cwd=workdir)
         return True
     except (subprocess.CalledProcessError, FileNotFoundError) as e:
         error_output = e.stderr if hasattr(e, 'stderr') and e.stderr else str(e)
@@ -69,8 +103,15 @@ def init(upgrade=False):
         return False
 
 def import_resource(mapping, force_refresh=False):
-    """Runs 'terraform import', ensuring initialization first."""
-    if not _ensure_initialized():
+    """Runs 'terraform import', ensuring initialization first.
+
+    Per-project workdir refactor: pulls workdir from the mapping dict
+    (set by run.py's _map_asset_to_terraform). Every subprocess gets
+    cwd=workdir so the import lands in the per-project terraform.tfstate,
+    not the (now-deleted) commingled one at repo root.
+    """
+    workdir = mapping.get("workdir")
+    if not _ensure_initialized(workdir=workdir):
         print(f"❌ Aborting import for '{mapping['resource_name']}' due to initialization failure.")
         return False
 
@@ -80,14 +121,14 @@ def import_resource(mapping, force_refresh=False):
         print(f"\n   - 🧹 Forcing state refresh for '{mapping['resource_name']}'...")
         remove_args = [config.TERRAFORM_PATH, "state", "rm", tf_address]
         try:
-            subprocess.run(remove_args, capture_output=True, text=True)
+            subprocess.run(remove_args, capture_output=True, text=True, cwd=workdir)
         except Exception:
             pass
 
-    print(f"\n--- Importing '{mapping['resource_name']}' ---")
+    print(f"\n--- Importing '{mapping['resource_name']}' (cwd={workdir}) ---")
     import_args = [config.TERRAFORM_PATH, "import", tf_address, mapping["import_id"]]
     try:
-        subprocess.run(import_args, check=True, capture_output=True, text=True)
+        subprocess.run(import_args, check=True, capture_output=True, text=True, cwd=workdir)
         print(f"✅ Import successful for '{mapping['resource_name']}'.")
         return True
     except subprocess.CalledProcessError as e:
@@ -232,23 +273,30 @@ def _classify_plan(plan_json, tf_address):
     return "AUTO_APPLY"
 
 
-def _run_show_json(plan_file):
+def _run_show_json(plan_file, workdir=None):
     """Convert a saved plan file to structured JSON via `terraform show`.
+
+    `workdir` MUST match the dir where the plan was produced -- `terraform
+    show` resolves state and providers relative to cwd, and a plan file
+    captured under project-A's workdir will fail to render under project-B.
 
     Returns the parsed dict, or None if anything goes wrong (we fall back
     to FAIL classification, which is the safe default).
     """
     show_args = [config.TERRAFORM_PATH, "show", "-json", plan_file]
     try:
-        result = subprocess.run(show_args, capture_output=True, text=True, check=True)
+        result = subprocess.run(show_args, capture_output=True, text=True, check=True, cwd=workdir)
         return json.loads(result.stdout)
     except (subprocess.CalledProcessError, json.JSONDecodeError) as e:
         print(f"   - WARN: `terraform show -json` failed ({e}); cannot classify structurally.")
         return None
 
 
-def _apply_saved_plan(plan_file):
+def _apply_saved_plan(plan_file, workdir=None):
     """Commit a saved plan via `terraform apply <plan_file>`.
+
+    `workdir` MUST match the dir where the plan was produced (see
+    `_run_show_json` for why).
 
     Saved plans don't prompt for confirmation — that's the whole point of
     the save-and-apply pattern. Returns (ok, output_text).
@@ -259,7 +307,7 @@ def _apply_saved_plan(plan_file):
         plan_file,
     ]
     try:
-        result = subprocess.run(apply_args, capture_output=True, text=True, check=True)
+        result = subprocess.run(apply_args, capture_output=True, text=True, check=True, cwd=workdir)
         return True, (result.stdout or "")
     except subprocess.CalledProcessError as e:
         return False, (e.stderr or e.stdout or str(e))
@@ -277,11 +325,12 @@ def plan_for_resource(mapping):
     PASS and AUTO_APPLY (after the apply succeeds). FAIL falls through to
     the existing LLM correction loop unchanged.
     """
-    if not _ensure_initialized():
+    workdir = mapping.get("workdir")
+    if not _ensure_initialized(workdir=workdir):
         return (False, "CRITICAL: Terraform failed to initialize. Cannot run plan.")
 
     tf_address = f'{mapping["tf_type"]}.{mapping["hcl_name"]}'
-    print(f"\n--- Verifying '{tf_address}' (scoped plan via -target) ---")
+    print(f"\n--- Verifying '{tf_address}' (scoped plan via -target, cwd={workdir}) ---")
 
     plan_file = None
     output_file = None
@@ -301,7 +350,7 @@ def plan_for_resource(mapping):
             "-input=false",
         ]
         with open(output_file, 'w', encoding='utf-8') as f_out:
-            process = subprocess.run(plan_args, stdout=f_out, stderr=f_out)
+            process = subprocess.run(plan_args, stdout=f_out, stderr=f_out, cwd=workdir)
         with open(output_file, 'r', encoding='utf-8') as f_in:
             output = f_in.read()
 
@@ -315,7 +364,7 @@ def plan_for_resource(mapping):
             return (True, "Plan successful: No changes.")
 
         # Structural classification. Fall back to FAIL if show -json breaks.
-        plan_json = _run_show_json(plan_file)
+        plan_json = _run_show_json(plan_file, workdir=workdir)
         if plan_json is None:
             print(f"   - ❌ FAIL: '{tf_address}' has changes but classification unavailable.")
             return (False, output)
@@ -351,7 +400,7 @@ def plan_for_resource(mapping):
                 if len(added_paths) > 10:
                     print(f"       ... and {len(added_paths) - 10} more")
 
-            ok, apply_out = _apply_saved_plan(plan_file)
+            ok, apply_out = _apply_saved_plan(plan_file, workdir=workdir)
             if not ok:
                 print(f"   - ❌ FAIL: auto-apply failed for '{tf_address}'.")
                 combined = output + "\n\n--- AUTO-APPLY ERROR ---\n" + apply_out

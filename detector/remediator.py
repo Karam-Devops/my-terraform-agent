@@ -7,9 +7,9 @@ each drifted resource and offers per-resource actions.
 
 For *modified* drift (state and cloud differ on a tracked field):
     [R]estore  — push recorded state back to cloud
-                 (terraform plan -target=ADDR  →  apply -target=ADDR -auto-approve)
+                 (terraform plan -target=ADDR  ->  apply -target=ADDR -auto-approve)
     [A]ccept   — pull cloud changes into state, leaving cloud + HCL untouched
-                 (terraform plan -refresh-only -target=ADDR  →  apply -refresh-only ...)
+                 (terraform plan -refresh-only -target=ADDR  ->  apply -refresh-only ...)
     [S]kip / [Q]uit
 
 For *missing* drift (cloud resource was deleted out-of-band):
@@ -34,7 +34,7 @@ Safety rails baked into every state-mutating action:
   - **No-op detection on plan.** `-detailed-exitcode` lets us distinguish
     "plan errored" (1) from "no changes to make" (0) from "ready to apply"
     (2). Without this, an unmanaged-field drift would yield apply-as-no-op
-    and a falsely cheerful "✅ Restored" report.
+    and a falsely cheerful "[OK] Restored" report.
 
 Design choices worth flagging:
 
@@ -53,7 +53,7 @@ import subprocess
 import sys
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from typing import List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from . import cloud_snapshot, config, state_reader
 from .diff_engine import ResourceDrift, diff_resource
@@ -67,6 +67,91 @@ class RemediationSummary:
     accepted: List[str] = field(default_factory=list)
     skipped: List[str] = field(default_factory=list)
     failed: List[Tuple[str, str]] = field(default_factory=list)  # (addr, op)
+
+
+@dataclass
+class RemediationResult:
+    """Structured outcome of a single `remediate_one()` call.
+
+    The CLI summary path uses bool returns from the action helpers; the
+    programmatic API needs a richer object so a UI can render a status
+    badge without parsing stdout. `success` is the coarse signal; `status`
+    distinguishes "ok" from "failed" / "invalid_action" / "exception" so
+    callers can treat user-declines or no-op plans differently from real
+    errors if they want to.
+    """
+    tf_address: str
+    action: str
+    success: bool
+    status: str = "ok"
+    message: str = ""
+
+
+# --- Confirmation policy (headless-friendly) ----------------------------
+#
+# Why this exists
+# ---------------
+# Every action helper used to call `input()` directly. That's fine for the
+# CLI path but deadlocks any caller without a stdin — Streamlit worker
+# threads, integration tests, the upcoming FastAPI endpoint. Pulling the
+# user-confirmation surface behind a policy object means the action
+# helpers don't change shape between CLI and headless modes; only the
+# policy passed in changes.
+#
+# Two methods cover everything the helpers do today:
+#   - yes_no(prompt, default): single-keystroke Y/N gates ("Proceed with
+#     apply? [y/N]"). Returns "Y" or "N".
+#   - typed(expected, prompt):  type-back-the-address gates used before
+#     destructive ops (recreate, drop). Returns True if the user typed it
+#     correctly, False otherwise.
+#
+# Multi-choice action pickers (R/A/S/Q) live only in run_remediation()
+# and stay CLI-only — the programmatic API picks the action upstream
+# and dispatches directly to a single handler, so there's nothing to
+# generalise.
+
+class ConfirmationPolicy:
+    """Abstract base — subclass and override both methods."""
+    def yes_no(self, prompt: str, *, default: str = "N") -> str:
+        raise NotImplementedError
+    def typed(self, expected: str, prompt: str) -> bool:
+        raise NotImplementedError
+
+
+class InteractivePolicy(ConfirmationPolicy):
+    """The historical CLI path — block on stdin until the user answers.
+
+    Same behavior as the pre-refactor inline `input()` calls: EOF on
+    stdin returns the default (or False, for typed). A typed-confirm
+    mismatch prints an "aborted" notice so the user sees why nothing
+    happened.
+    """
+    def yes_no(self, prompt: str, *, default: str = "N") -> str:
+        return _prompt(prompt, valid={"Y", "N"}, default=default)
+
+    def typed(self, expected: str, prompt: str) -> bool:
+        return _typed_confirm(expected, prompt)
+
+
+class AutoConfirmPolicy(ConfirmationPolicy):
+    """Programmatic confirmation — never blocks, returns the configured answer.
+
+    Used by `remediate_one(..., auto_confirm=True)` and by the Streamlit
+    UI worker thread. The contract: the human has already clicked the
+    Restore/Accept/Drop button upstream, so by the time we reach this
+    layer the confirmation has *already happened* — re-prompting would
+    just deadlock. `typed()` returns True for the same reason: typed
+    confirms are a CLI affordance against fat-finger keystrokes; a UI
+    button click is its own (better) confirmation.
+    """
+    def __init__(self, *, answer: str = "Y"):
+        self._answer = answer.upper()
+
+    def yes_no(self, prompt: str, *, default: str = "N") -> str:
+        return self._answer
+
+    def typed(self, expected: str, prompt: str) -> bool:
+        return True
 
 
 # --- Small I/O helpers ---------------------------------------------------
@@ -110,13 +195,18 @@ def _prompt(text: str, valid: set, default: Optional[str] = None) -> str:
 _INPUT_FALSE_COMMANDS = frozenset({"plan", "apply", "refresh", "destroy", "import"})
 
 
-def _run_terraform(args: List[str]) -> int:
+def _run_terraform(args: List[str], *, cwd: Optional[str] = None) -> int:
     """
     Stream a terraform invocation to stdout, return its exit code.
 
     We stream (Popen + iterate stdout) rather than capture (run + print)
     so the user sees plan output flow in real time during a demo. Slower
     feedback breaks the closed-loop feel.
+
+    `cwd` is the per-project workdir. CLI callers don't need to pass it
+    (the CLI chdir's once at entry). Programmatic callers (Streamlit /
+    FastAPI worker threads) MUST pass it explicitly so two concurrent
+    requests for two different projects don't fight over process cwd.
 
     Two non-obvious behaviours baked in:
       - `-input=false` is forced for plan/apply/refresh-family commands.
@@ -133,7 +223,7 @@ def _run_terraform(args: List[str]) -> int:
     else:
         full_args = list(args)
     pretty = "terraform " + " ".join(full_args)
-    print(f"  → Running: {pretty}")
+    print(f"  -> Running: {pretty}")
 
     # Resolve terraform binary via the common resolver. This used to be a
     # bare "terraform" + FileNotFoundError catch — same end result, but
@@ -144,7 +234,7 @@ def _run_terraform(args: List[str]) -> int:
         from common.terraform_path import resolve_terraform_path
         terraform_bin = resolve_terraform_path()
     except RuntimeError as e:
-        print(f"  ❌ {e}")
+        print(f"  [FAIL] {e}")
         return 127
 
     try:
@@ -154,6 +244,7 @@ def _run_terraform(args: List[str]) -> int:
             stderr=subprocess.STDOUT,
             text=True,
             bufsize=1,
+            cwd=cwd,
             # Force UTF-8 decoding of terraform's stdout. Without this, Python
             # falls back to the system locale (cp1252 on Windows), which
             # mangles terraform's Unicode box-drawing chars (╷│╵) into mojibake.
@@ -163,7 +254,7 @@ def _run_terraform(args: List[str]) -> int:
     except FileNotFoundError:
         # Defensive: shouldn't happen post-resolver, but handle gracefully
         # if the resolved path becomes invalid between resolution and exec.
-        print(f"  ❌ `{terraform_bin}` no longer exists. Action skipped.")
+        print(f"  [FAIL] `{terraform_bin}` no longer exists. Action skipped.")
         return 127
 
     assert proc.stdout is not None  # for type-checkers; Popen with PIPE guarantees this
@@ -175,11 +266,20 @@ def _run_terraform(args: List[str]) -> int:
 
 # --- Safety rails (state backup, post-apply re-verification) ------------
 
-def _state_path() -> str:
-    """Resolve the active terraform.tfstate path. Mirrors run.py's logic so
-    we can locate the file even when the caller didn't pass it through."""
-    project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
-    return os.path.join(project_root, config.STATE_FILE_NAME)
+def _state_path(workdir: Optional[str] = None) -> str:
+    """Resolve the active terraform.tfstate path.
+
+    Per-project workdir refactor: state lives in the per-project workdir,
+    NOT at the repo root any more (the repo root no longer has a
+    terraform.tfstate after migrate_workdir.py ran). Resolution order:
+
+      1. Explicit ``workdir`` argument (programmatic / SaaS path -- the
+         only thread-safe option for concurrent multi-project requests).
+      2. Process cwd (CLI back-compat -- detector/run.py chdirs to the
+         per-project workdir at entry, so getcwd works).
+    """
+    base = workdir or os.getcwd()
+    return os.path.join(base, config.STATE_FILE_NAME)
 
 
 def _backup_state(state_path: str) -> Optional[str]:
@@ -195,7 +295,7 @@ def _backup_state(state_path: str) -> Optional[str]:
     easy to point a `cp` rollback at.
     """
     if not os.path.isfile(state_path):
-        print(f"  ⚠️  Cannot back up state — file not found at {state_path}.")
+        print(f"  [WARN]  Cannot back up state — file not found at {state_path}.")
         return None
 
     ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
@@ -203,9 +303,9 @@ def _backup_state(state_path: str) -> Optional[str]:
     try:
         shutil.copy2(state_path, backup_path)
     except (OSError, IOError) as e:
-        print(f"  ⚠️  State backup failed: {e}")
+        print(f"  [WARN]  State backup failed: {e}")
         return None
-    print(f"  💾 State backed up → {os.path.basename(backup_path)}")
+    print(f"  [STATE] State backed up -> {os.path.basename(backup_path)}")
     return backup_path
 
 
@@ -219,7 +319,7 @@ def _reverify(tf_address: str, state_path: str) -> Optional[ResourceDrift]:
 
     Reverify failure is non-fatal: the caller's apply may have succeeded
     regardless. The point of this function is to *report honestly* —
-    distinguish "✅ Restored AND verified in sync" from "✅ apply ran clean
+    distinguish "[OK] Restored AND verified in sync" from "[OK] apply ran clean
     BUT cloud still differs". Without it, our previous false-success bug
     (apply-as-no-op on unmanaged fields) silently shipped wrong reports.
     """
@@ -227,7 +327,7 @@ def _reverify(tf_address: str, state_path: str) -> Optional[ResourceDrift]:
     target = next((r for r in resources if r.tf_address == tf_address), None)
     if target is None:
         # Expected after a successful `state rm`. Not an error.
-        print(f"  ℹ️  {tf_address} is no longer present in state — nothing to re-diff.")
+        print(f"  [INFO]  {tf_address} is no longer present in state — nothing to re-diff.")
         return None
 
     snapshots = cloud_snapshot.fetch_snapshots([target])
@@ -244,13 +344,13 @@ def _print_reverify_result(drift: Optional[ResourceDrift]) -> None:
     if drift is None:
         return
     if drift.error:
-        print(f"  ⚠️  Re-verify: {drift.error}")
+        print(f"  [WARN]  Re-verify: {drift.error}")
         return
     if not drift.has_drift:
-        print(f"  ✅ Re-verify: {drift.tf_address} is in sync with cloud.")
+        print(f"  [OK] Re-verify: {drift.tf_address} is in sync with cloud.")
         return
     n = len(drift.items)
-    print(f"  ⚠️  Re-verify: drift remains on {drift.tf_address} ({n} item(s)):")
+    print(f"  [WARN]  Re-verify: drift remains on {drift.tf_address} ({n} item(s)):")
     glyph = {"added": "+", "removed": "-", "changed": "~"}
     for item in drift.items:
         print(f"       {glyph.get(item.op, '?')} {item.path}")
@@ -269,21 +369,188 @@ def _typed_confirm(expected: str, prompt_text: str) -> bool:
         return False
     if raw == expected:
         return True
-    print(f"  ⏭  Confirmation did not match (expected '{expected}'). Aborted.")
+    print(f"  [SKIP]  Confirmation did not match (expected '{expected}'). Aborted.")
     return False
+
+
+# --- Pre-apply policy gate (TODO #14, Brainboard parity) ----------------
+#
+# Why this exists
+# ---------------
+# Brainboard et al. surface OPA/Conftest violations alongside the apply
+# diff so operators can't accidentally apply a change that would fail an
+# audit. We already evaluate policies in the detector pass for reporting;
+# this gate plumbs the same evaluation into the remediator so a Restore
+# or Recreate that would land non-compliant state in the cloud is
+# blocked (or at least loudly flagged) before any apply happens.
+#
+# Where it fires
+# --------------
+# Only `_restore` and `_recreate` get the gate. Rationale:
+#   - Restore   pushes state -> cloud, so the post-apply cloud takes the
+#               state's view of the resource. If state's view violates
+#               policy, restore would introduce / preserve the violation.
+#   - Recreate  provisions from HCL after an out-of-band delete. If the
+#               HCL has policy-violating defaults, recreate would put a
+#               non-compliant resource back into the cloud.
+#   - Accept    pulls cloud -> state without changing cloud, so it cannot
+#               INTRODUCE a new cloud-side violation.
+#   - Drop      only mutates terraform.tfstate; cloud is already gone.
+#
+# Threshold
+# ---------
+# Default-blocks on HIGH only. MED/LOW print as warnings but don't gate.
+# Mirrors the standalone CLI's `FAIL_AT_SEVERITY = "HIGH"` default in
+# policy/config.py — operators can override per-call.
+#
+# Failure mode
+# ------------
+# Fail-OPEN: policy module missing, conftest missing, snapshot missing,
+# or any internal error all evaluate to "no violations" and let the
+# apply proceed. We never want a missing dep in the policy layer to
+# block legitimate drift remediation. The detector's own classify_drift
+# follows the same convention.
+
+# Imported lazily inside the helper so importing remediator.py doesn't
+# pull in conftest / policy machinery on systems that don't have it.
+def _policy_check_for(tf_address: str,
+                      cloud_snap: Optional[Dict[str, Any]] = None,
+                      *,
+                      workdir: Optional[str] = None):
+    """Build a policy-evaluation closure for a single resource.
+
+    Returned closure takes no arguments and yields a `PolicyImpact`.
+    Closure form keeps the gate site (`_restore` / `_recreate`) free of
+    snapshot-fetching logic and lets tests inject pre-built impacts.
+
+    `cloud_snap` is the GCP describe-JSON snapshot. When None, the
+    closure fetches it on demand from the live cloud via state lookup.
+    Pre-supplying avoids a redundant cloud round-trip when the caller
+    (typically the detector) already has the snapshot in hand.
+    """
+    def _check():
+        try:
+            from policy import integration as _policy
+        except ImportError:
+            return None  # policy module absent — fail-open
+        snap = cloud_snap
+        if snap is None:
+            snap = _fetch_cloud_snapshot(tf_address, workdir=workdir)
+        # tf_type is the first dotted component of the address. Resources
+        # imported by the importer always have well-formed addresses.
+        try:
+            tf_type = tf_address.split(".", 1)[0]
+        except Exception:
+            return None
+        try:
+            return _policy.classify_drift(tf_address, tf_type, snap)
+        except Exception as e:
+            print(f"  [WARN] Policy gate evaluation failed for {tf_address}: {e}")
+            return None
+    return _check
+
+
+def _fetch_cloud_snapshot(tf_address: str, *, workdir: Optional[str] = None) -> Optional[Dict[str, Any]]:
+    """Fetch the live cloud snapshot for one resource address.
+
+    Mirrors `_reverify` minus the diff step: read state, find the named
+    resource, fetch its cloud snapshot. Returns None on any failure
+    (state missing, address not in state, snapshot fetch errored) so
+    the policy gate falls open.
+    """
+    try:
+        state_path = _state_path(workdir=workdir)
+        resources = state_reader.read_state(state_path)
+        target = next((r for r in resources if r.tf_address == tf_address), None)
+        if target is None:
+            return None
+        snapshots = cloud_snapshot.fetch_snapshots([target])
+        return snapshots.get(target.tf_address)
+    except Exception as e:
+        print(f"  [WARN] Snapshot fetch failed for {tf_address}: {e}")
+        return None
+
+
+def _run_policy_gate(tf_address: str,
+                     policy_check,
+                     confirmation: ConfirmationPolicy,
+                     *,
+                     block_at: str = "HIGH") -> bool:
+    """Evaluate policy and gate the apply on the result.
+
+    Returns True if the apply should proceed (no blocking violations OR
+    user/policy explicitly approved the override), False if blocked.
+
+    Args:
+        tf_address:   Address being remediated (for messages).
+        policy_check: Closure returning a PolicyImpact, or None to skip.
+        confirmation: Policy decides how to answer the override prompt.
+        block_at:     Severity at or above which the gate blocks pending
+                      explicit approval. "HIGH" (default) matches the
+                      standalone CLI's FAIL_AT_SEVERITY.
+    """
+    if policy_check is None:
+        return True
+    impact = policy_check()
+    if impact is None or not impact.is_violating:
+        return True
+
+    # Render every violation so the user (or audit log) sees the full picture.
+    high = impact.high_count
+    med = impact.med_count
+    low = impact.low_count
+    print(f"\n  [POLICY-GATE] Resource {tf_address} violates policy:")
+    print(f"      HIGH={high}  MED={med}  LOW={low}")
+    for v in impact.violations[:10]:  # cap at 10 so we don't drown the operator
+        print(f"      - [{v.severity}][{v.rule_id}] {v.message}")
+    if len(impact.violations) > 10:
+        print(f"      - ... and {len(impact.violations) - 10} more")
+
+    # Block decision: only count violations at or above the configured
+    # threshold. MED/LOW alone print as warnings and let the apply proceed.
+    blocking_count = {
+        "HIGH": high,
+        "MED":  high + med,
+        "LOW":  high + med + low,
+    }.get(block_at.upper(), high)
+    if blocking_count == 0:
+        print(f"  [POLICY-GATE] No {block_at}+ violations; apply proceeds.")
+        return True
+
+    answer = confirmation.yes_no(
+        f"\n  [POLICY-GATE] Proceed despite {blocking_count} blocking "
+        f"violation(s)? [y/N]: ",
+        default="N",
+    )
+    if answer != "Y":
+        print(f"  [POLICY-GATE] Apply blocked.")
+        return False
+    print(f"  [POLICY-GATE] Override accepted; proceeding with apply.")
+    return True
 
 
 # --- Per-resource action handlers ---------------------------------------
 
-def _restore(tf_address: str) -> bool:
+def _restore(tf_address: str,
+             *,
+             confirmation: ConfirmationPolicy,
+             policy_check: Optional[Callable[[], Any]] = None,
+             workdir: Optional[str] = None) -> bool:
     """
-    Cloud ← state. Plan → backup → apply → re-verify.
+    Cloud <- state. Plan -> policy-gate -> backup -> apply -> re-verify.
 
     Returns True iff apply succeeded. Any failure (plan failure, no-op
-    detected, user declines, backup failure, apply failure) returns False
-    so the caller can record it in the summary. Residual drift after a
-    successful apply is reported as success-with-warning, not failure —
-    the apply did do its job; the gap is honest reporting.
+    detected, user declines, policy block, backup failure, apply failure)
+    returns False so the caller can record it in the summary. Residual
+    drift after a successful apply is reported as success-with-warning,
+    not failure — the apply did do its job; the gap is honest reporting.
+
+    `policy_check`: closure returning a `PolicyImpact` (typically built by
+    `_policy_check_for(...)`). When supplied, the gate fires *after* we
+    confirm there's a real change to apply (plan exit 2) but *before* we
+    bother the user with the apply confirmation prompt — a blocked apply
+    is never offered. Defaults to None (gate skipped) so legacy callers
+    keep working unchanged.
 
     Important semantic note: terraform can only restore drift on fields
     declared in HCL. If a drifted field is not in HCL (e.g., bucket has
@@ -297,14 +564,14 @@ def _restore(tf_address: str) -> bool:
     """
     print("\n  Restore action: push recorded state back to cloud.")
     print("  Step 1/3 — generating plan...")
-    rc = _run_terraform(["plan", f"-target={tf_address}", "-detailed-exitcode"])
+    rc = _run_terraform(["plan", f"-target={tf_address}", "-detailed-exitcode"], cwd=workdir)
     if rc == 1:
-        print(f"  ❌ `terraform plan` errored (exit 1). Apply not attempted.")
+        print(f"  [FAIL] `terraform plan` errored (exit 1). Apply not attempted.")
         return False
     if rc == 0:
         # No-change plan — Restore via terraform is impossible for this drift.
         print()
-        print("  ⚠️  terraform plan reports NO changes to make.")
+        print("  [WARN]  terraform plan reports NO changes to make.")
         print("      The drifted field is not declared in your HCL, so terraform")
         print("      treats it as unmanaged and won't push any value to cloud.")
         print()
@@ -318,25 +585,31 @@ def _restore(tf_address: str) -> bool:
         print("             gcloud compute instances remove-labels <name> --labels=<key> ...")
         return False
     if rc != 2:
-        print(f"  ❌ `terraform plan` returned unexpected exit code {rc}. Apply not attempted.")
+        print(f"  [FAIL] `terraform plan` returned unexpected exit code {rc}. Apply not attempted.")
         return False
 
-    answer = _prompt(
+    # Pre-apply policy gate (TODO #14). Brainboard parity: block a HIGH+
+    # violation from sneaking through under the cover of a drift fix.
+    # Fail-OPEN; see `_run_policy_gate` for thresholds and rationale.
+    if not _run_policy_gate(tf_address, policy_check, confirmation):
+        return False
+
+    answer = confirmation.yes_no(
         "\n  Proceed with apply? [y/N]: ",
-        valid={"Y", "N"}, default="N",
+        default="N",
     )
     if answer != "Y":
-        print("  ⏭  Apply skipped.")
+        print("  [SKIP]  Apply skipped.")
         return False
 
-    state_path = _state_path()
+    state_path = _state_path(workdir=workdir)
     print("  Step 2/3 — backing up state and applying...")
     if _backup_state(state_path) is None:
-        print("  ❌ Refusing to apply without a state backup.")
+        print("  [FAIL] Refusing to apply without a state backup.")
         return False
-    rc = _run_terraform(["apply", f"-target={tf_address}", "-auto-approve"])
+    rc = _run_terraform(["apply", f"-target={tf_address}", "-auto-approve"], cwd=workdir)
     if rc != 0:
-        print(f"  ❌ `terraform apply` exited {rc}.")
+        print(f"  [FAIL] `terraform apply` exited {rc}.")
         return False
 
     print("  Step 3/3 — re-verifying against cloud...")
@@ -344,15 +617,15 @@ def _restore(tf_address: str) -> bool:
     _print_reverify_result(drift)
     if drift is not None and drift.has_drift:
         # Apply ran clean but cloud still differs: don't lie about full closure.
-        print(f"  ⚠️  Restored {tf_address}, but cloud still differs from state.")
+        print(f"  [WARN]  Restored {tf_address}, but cloud still differs from state.")
         return True
-    print(f"  ✅ Restored {tf_address} (verified in sync).")
+    print(f"  [OK] Restored {tf_address} (verified in sync).")
     return True
 
 
-def _accept(tf_address: str) -> bool:
+def _accept(tf_address: str, *, confirmation: ConfirmationPolicy, workdir: Optional[str] = None) -> bool:
     """
-    State ← cloud. Refresh-only plan → backup → refresh-only apply → re-verify.
+    State <- cloud. Refresh-only plan -> backup -> refresh-only apply -> re-verify.
 
     Note: this updates terraform.tfstate to match the live cloud, but it
     does NOT update the .tf HCL files. Closing that loop fully needs an
@@ -367,39 +640,39 @@ def _accept(tf_address: str) -> bool:
     print("  Step 1/3 — generating refresh-only plan...")
     rc = _run_terraform([
         "plan", "-refresh-only", f"-target={tf_address}", "-detailed-exitcode",
-    ])
+    ], cwd=workdir)
     if rc == 1:
-        print(f"  ❌ `terraform plan -refresh-only` errored (exit 1). Apply not attempted.")
+        print(f"  [FAIL] `terraform plan -refresh-only` errored (exit 1). Apply not attempted.")
         return False
     if rc == 0:
         print()
-        print("  ⚠️  terraform plan -refresh-only reports NO changes to make.")
+        print("  [WARN]  terraform plan -refresh-only reports NO changes to make.")
         print("      Cloud already matches what terraform reads back into state.")
         print("      The drift the detector reports may live in a field terraform")
         print("      doesn't track in its schema, or may be a detector false positive.")
         return False
     if rc != 2:
-        print(f"  ❌ `terraform plan -refresh-only` returned unexpected exit code {rc}.")
+        print(f"  [FAIL] `terraform plan -refresh-only` returned unexpected exit code {rc}.")
         return False
 
-    answer = _prompt(
+    answer = confirmation.yes_no(
         "\n  Proceed with refresh-only apply? [y/N]: ",
-        valid={"Y", "N"}, default="N",
+        default="N",
     )
     if answer != "Y":
-        print("  ⏭  Apply skipped.")
+        print("  [SKIP]  Apply skipped.")
         return False
 
-    state_path = _state_path()
+    state_path = _state_path(workdir=workdir)
     print("  Step 2/3 — backing up state and applying refresh-only...")
     if _backup_state(state_path) is None:
-        print("  ❌ Refusing to apply without a state backup.")
+        print("  [FAIL] Refusing to apply without a state backup.")
         return False
     rc = _run_terraform([
         "apply", "-refresh-only", f"-target={tf_address}", "-auto-approve",
-    ])
+    ], cwd=workdir)
     if rc != 0:
-        print(f"  ❌ `terraform apply -refresh-only` exited {rc}.")
+        print(f"  [FAIL] `terraform apply -refresh-only` exited {rc}.")
         return False
 
     print("  Step 3/3 — re-verifying against cloud...")
@@ -408,10 +681,10 @@ def _accept(tf_address: str) -> bool:
     if drift is not None and drift.has_drift:
         # Refresh-only pulled what terraform could pull, but our diff still
         # sees a difference — usually a field outside terraform's schema.
-        print(f"  ⚠️  Accepted {tf_address}, but detector still reports drift.")
+        print(f"  [WARN]  Accepted {tf_address}, but detector still reports drift.")
         print(f"      State updated as far as terraform could; HCL still diverged.")
         return True
-    print(f"  ✅ Accepted {tf_address} (verified in sync). State updated; HCL still diverged.")
+    print(f"  [OK] Accepted {tf_address} (verified in sync). State updated; HCL still diverged.")
     return True
 
 
@@ -422,7 +695,11 @@ def _accept(tf_address: str) -> bool:
 # Accept against a phantom — we either re-create from HCL or stop tracking
 # it. Both directions are dangerous, so each is gated by typed-name confirm.
 
-def _recreate(tf_address: str) -> bool:
+def _recreate(tf_address: str,
+              *,
+              confirmation: ConfirmationPolicy,
+              policy_check: Optional[Callable[[], Any]] = None,
+              workdir: Optional[str] = None) -> bool:
     """
     Cloud was deleted; re-create it via terraform from the HCL definition.
 
@@ -432,38 +709,49 @@ def _recreate(tf_address: str) -> bool:
     will accept (name collisions, region changes), so we gate it behind
     typed-name confirmation. Note: any data on the original (bucket
     objects, instance disk contents) is NOT recovered.
+
+    `policy_check`: see `_restore` — same gate, fires after the typed
+    confirm and before backup/apply. For Recreate the gate is arguably
+    *more* important than for Restore: Recreate provisions a brand-new
+    cloud resource, so a non-compliant HCL block goes from "doesn't
+    exist in the cloud" to "exists and is non-compliant" in one step.
     """
     print("\n  Recreate action: re-create the deleted cloud resource from HCL.")
-    print(f"      → `terraform apply -target={tf_address} -auto-approve`")
+    print(f"      -> `terraform apply -target={tf_address} -auto-approve`")
     print("      Risk: this PROVISIONS a new cloud resource. Any data on the")
     print("      original (bucket objects, instance disk contents) is NOT recovered.")
-    if not _typed_confirm(
+    if not confirmation.typed(
         tf_address,
         f"\n  Type the address `{tf_address}` to confirm: ",
     ):
         return False
 
-    state_path = _state_path()
+    # Pre-apply policy gate. See `_restore` for the rationale; same gate,
+    # same fail-OPEN semantics, same default block_at="HIGH".
+    if not _run_policy_gate(tf_address, policy_check, confirmation):
+        return False
+
+    state_path = _state_path(workdir=workdir)
     print("  Step 1/2 — backing up state and applying...")
     if _backup_state(state_path) is None:
-        print("  ❌ Refusing to apply without a state backup.")
+        print("  [FAIL] Refusing to apply without a state backup.")
         return False
-    rc = _run_terraform(["apply", f"-target={tf_address}", "-auto-approve"])
+    rc = _run_terraform(["apply", f"-target={tf_address}", "-auto-approve"], cwd=workdir)
     if rc != 0:
-        print(f"  ❌ `terraform apply` exited {rc}.")
+        print(f"  [FAIL] `terraform apply` exited {rc}.")
         return False
 
     print("  Step 2/2 — re-verifying against cloud...")
     drift = _reverify(tf_address, state_path)
     _print_reverify_result(drift)
     if drift is not None and drift.has_drift:
-        print(f"  ⚠️  Recreated {tf_address}, but cloud still differs from state.")
+        print(f"  [WARN]  Recreated {tf_address}, but cloud still differs from state.")
         return True
-    print(f"  ✅ Recreated {tf_address} (verified in sync).")
+    print(f"  [OK] Recreated {tf_address} (verified in sync).")
     return True
 
 
-def _drop(tf_address: str) -> bool:
+def _drop(tf_address: str, *, confirmation: ConfirmationPolicy, workdir: Optional[str] = None) -> bool:
     """
     Cloud is gone for good; tell terraform to stop tracking it.
 
@@ -473,35 +761,50 @@ def _drop(tf_address: str) -> bool:
     deleting the HCL block manually if the deletion was intentional.
     """
     print("\n  Drop action: remove the resource from terraform state.")
-    print(f"      → `terraform state rm {tf_address}`")
+    print(f"      -> `terraform state rm {tf_address}`")
     print("      The HCL block is NOT removed. Next `terraform plan` will show")
     print("      the resource as 'to add'. Edit your .tf files to drop it for good.")
-    if not _typed_confirm(
+    if not confirmation.typed(
         tf_address,
         f"\n  Type the address `{tf_address}` to confirm: ",
     ):
         return False
 
-    state_path = _state_path()
+    state_path = _state_path(workdir=workdir)
     print("  Step 1/1 — backing up state and removing from state...")
     if _backup_state(state_path) is None:
-        print("  ❌ Refusing to mutate state without a backup.")
+        print("  [FAIL] Refusing to mutate state without a backup.")
         return False
-    rc = _run_terraform(["state", "rm", tf_address])
+    rc = _run_terraform(["state", "rm", tf_address], cwd=workdir)
     if rc != 0:
-        print(f"  ❌ `terraform state rm` exited {rc}.")
+        print(f"  [FAIL] `terraform state rm` exited {rc}.")
         return False
-    print(f"  ✅ Dropped {tf_address} from state.")
+    print(f"  [OK] Dropped {tf_address} from state.")
     return True
 
 
-def _remediate_missing(d: ResourceDrift) -> Tuple[str, bool]:
+def _remediate_missing(d: ResourceDrift,
+                       *,
+                       confirmation: ConfirmationPolicy,
+                       policy_check: Optional[Callable[[], Any]] = None,
+                       workdir: Optional[str] = None,
+                       ) -> Tuple[str, bool]:
     """
     Drive the missing-cloud-resource branch. Returns (action, success):
         action ∈ {"recreated", "dropped", "skipped", "quit"}
         success: True iff the action ran cleanly (or the user explicitly
                  chose Skip, which is a "success" in the sense of being
                  the user's deliberate decision).
+
+    The R/D/S/Q multi-choice prompt is CLI-only — programmatic callers
+    pick the action upstream and dispatch via `remediate_one()` directly
+    to `_recreate` or `_drop`, so this helper never appears in headless
+    flows. Hence we keep the bare `_prompt(...)` here rather than
+    routing through `confirmation`.
+
+    `policy_check` is forwarded only to `_recreate` (Drop never mutates
+    cloud, so the gate would be theatre and `_drop` doesn't accept the
+    kwarg).
     """
     print()
     print("   Cloud resource is gone (deleted out-of-band).")
@@ -517,9 +820,9 @@ def _remediate_missing(d: ResourceDrift) -> Tuple[str, bool]:
     if choice == "S":
         return ("skipped", True)
     if choice == "R":
-        return ("recreated", _recreate(d.tf_address))
+        return ("recreated", _recreate(d.tf_address, confirmation=confirmation, policy_check=policy_check, workdir=workdir))
     # D
-    return ("dropped", _drop(d.tf_address))
+    return ("dropped", _drop(d.tf_address, confirmation=confirmation, workdir=workdir))
 
 
 # --- Per-resource display ------------------------------------------------
@@ -544,19 +847,46 @@ def _print_resource_drift(drift: ResourceDrift) -> None:
 
 # --- Top-level driver ----------------------------------------------------
 
-def run_remediation(drifts: List[ResourceDrift]) -> RemediationSummary:
+def run_remediation(
+    drifts: List[ResourceDrift],
+    *,
+    confirmation: Optional[ConfirmationPolicy] = None,
+    enable_policy_gate: bool = True,
+    workdir: Optional[str] = None,
+) -> RemediationSummary:
     """
     Walk the user through each drifted resource. Safe no-op if there's
     nothing drifted or if we're not on a tty.
+
+    The `confirmation` kwarg controls how per-action gates (Y/N prompts,
+    typed-name confirms) are answered. Default is `InteractivePolicy`,
+    preserving the historical CLI behaviour including the non-tty bail-
+    out. A caller that passes a non-interactive policy (e.g. the batch
+    test harness supplying `AutoConfirmPolicy()`) opts out of the bail-
+    out and drives the action choice itself via the CLI multi-choice
+    prompts — which is rarely what you want. For UI / single-resource
+    remediation use `remediate_one()` instead.
+
+    `enable_policy_gate` (default True) wires the TODO #14 pre-apply
+    policy gate into the Restore and Recreate paths. Set to False to
+    bypass entirely (e.g. emergency hotfix when conftest is unavailable
+    or known to be broken). Off by no-op when the policy module isn't
+    installed — `_policy_check_for` fail-OPENs on ImportError. The CLI
+    flow originally wired the gate ONLY into `remediate_one()`, leaving
+    this driver silently un-gated; the live drift test caught the gap.
     """
     summary = RemediationSummary()
     drifted = [d for d in drifts if d.has_drift]
     if not drifted:
         return summary
 
-    if not _is_interactive():
-        print("\n(non-interactive shell detected; skipping remediation prompt)")
-        return summary
+    # Legacy tty bail-out fires only when no explicit policy was supplied;
+    # callers that pass a policy have opted into headless behaviour.
+    if confirmation is None:
+        if not _is_interactive():
+            print("\n(non-interactive shell detected; skipping remediation prompt)")
+            return summary
+        confirmation = InteractivePolicy()
 
     print("\n" + "=" * 70)
     print("REMEDIATION")
@@ -575,18 +905,27 @@ def run_remediation(drifts: List[ResourceDrift]) -> RemediationSummary:
         print("-" * 70)
         _print_resource_drift(d)
 
+        # Build the per-resource policy checker once — passed only to the
+        # cloud-mutating actions (_restore, _recreate). Accept and Drop
+        # don't take it. The closure is lazy: it doesn't fetch the cloud
+        # snapshot until the gate actually fires, so resources the user
+        # picks Skip on incur zero policy-eval cost.
+        pc: Optional[Callable[[], Any]] = None
+        if enable_policy_gate:
+            pc = _policy_check_for(d.tf_address, workdir=workdir)
+
         # Missing-cloud-resource: distinct flow with [R]ecreate / [D]rop. Both
         # are gated by typed-name confirmation inside the helpers. We fold the
-        # outcomes into the existing summary buckets (recreate→restored,
-        # drop→accepted) since they're semantically equivalent directions.
+        # outcomes into the existing summary buckets (recreate->restored,
+        # drop->accepted) since they're semantically equivalent directions.
         if d.error:
-            action, ok = _remediate_missing(d)
+            action, ok = _remediate_missing(d, confirmation=confirmation, policy_check=pc, workdir=workdir)
             if action == "quit":
                 print("  Quitting remediation. Remaining resources left untouched.")
                 break
             if action == "skipped":
                 summary.skipped.append(d.tf_address)
-                print(f"  ⏭  Skipped {d.tf_address}.")
+                print(f"  [SKIP]  Skipped {d.tf_address}.")
                 continue
             if action == "recreated":
                 if ok:
@@ -613,15 +952,15 @@ def run_remediation(drifts: List[ResourceDrift]) -> RemediationSummary:
             break
         if choice == "S":
             summary.skipped.append(d.tf_address)
-            print(f"  ⏭  Skipped {d.tf_address}.")
+            print(f"  [SKIP]  Skipped {d.tf_address}.")
             continue
         if choice == "R":
-            if _restore(d.tf_address):
+            if _restore(d.tf_address, confirmation=confirmation, policy_check=pc, workdir=workdir):
                 summary.restored.append(d.tf_address)
             else:
                 summary.failed.append((d.tf_address, "restore"))
         elif choice == "A":
-            if _accept(d.tf_address):
+            if _accept(d.tf_address, confirmation=confirmation, workdir=workdir):
                 summary.accepted.append(d.tf_address)
             else:
                 summary.failed.append((d.tf_address, "accept"))
@@ -630,21 +969,149 @@ def run_remediation(drifts: List[ResourceDrift]) -> RemediationSummary:
     return summary
 
 
+# --- Programmatic single-resource API -----------------------------------
+#
+# The Streamlit UI (and the upcoming FastAPI layer) drives remediation one
+# resource at a time: the user clicks Restore on a row, the backend runs
+# the action for that one address, returns a structured verdict, the UI
+# updates the row's status badge, and control returns to the human. This
+# is fundamentally different from `run_remediation()`'s interactive loop —
+# no walk-through, no action-choice prompt, no stdin.
+#
+# `remediate_one()` is the entry point for that flow. It:
+#   1. Picks a confirmation policy (auto-confirm by default for programmatic
+#      callers — the button click upstream IS the confirmation).
+#   2. Dispatches to the matching action helper.
+#   3. Wraps bool/exception outcomes in a `RemediationResult` dataclass so
+#      the caller can render a status badge without parsing stdout.
+#
+# stdout prints still happen inside the helpers; the UI can surface them
+# via log capture or just tail the container logs. Structured output is
+# what we promise; pretty rendering is the caller's job.
+
+_VALID_ACTIONS = ("restore", "accept", "recreate", "drop")
+
+
+def remediate_one(
+    tf_address: str,
+    action: str,
+    *,
+    auto_confirm: bool = True,
+    confirmation: Optional[ConfirmationPolicy] = None,
+    enable_policy_gate: bool = True,
+    cloud_snapshot: Optional[Dict[str, Any]] = None,
+    policy_check: Optional[Callable[[], Any]] = None,
+    workdir: Optional[str] = None,
+) -> RemediationResult:
+    """Run a single remediation action against a single resource.
+
+    Args:
+        tf_address:   Fully-qualified Terraform address, e.g.
+                      ``google_storage_bucket.demo``.
+        action:       One of ``"restore"``, ``"accept"``, ``"recreate"``,
+                      ``"drop"``. Case-insensitive.
+        auto_confirm: When True (the default — programmatic callers usually
+                      want this), every prompt is pre-answered "Y" and
+                      every typed-name confirm auto-passes. When False,
+                      uses InteractivePolicy (stdin). Ignored if
+                      `confirmation` is supplied explicitly.
+        confirmation: Custom `ConfirmationPolicy` for callers that need
+                      finer control (e.g. answer Y to apply prompts but
+                      refuse typed-confirms). Overrides `auto_confirm`.
+        enable_policy_gate: When True (default), Restore/Recreate evaluate
+                      OPA/Conftest policy on the resource pre-apply and
+                      block on HIGH+ violations unless `confirmation`
+                      answers Y to the override prompt. Set False to
+                      bypass entirely (e.g. tests, emergency hotfix).
+                      No-op for Accept/Drop (cloud isn't mutated).
+        cloud_snapshot: Pre-fetched GCP describe-JSON for the resource.
+                      When provided, policy evaluation skips the redundant
+                      cloud round-trip. Typically supplied by the detector
+                      which already has the snapshot in hand.
+        policy_check: Pre-built closure for policy evaluation. When
+                      provided, `enable_policy_gate` and `cloud_snapshot`
+                      are ignored — used by tests to inject deterministic
+                      `PolicyImpact` results.
+        workdir:      Per-project working directory (absolute path) where
+                      terraform.tfstate lives. Programmatic / SaaS callers
+                      MUST pass this -- it's the only thread-safe way to
+                      target a specific project's state when multiple
+                      requests are in flight in the same Python process.
+                      When None, falls back to ``os.getcwd()``, which is
+                      what the CLI relies on (detector/run.py chdirs to
+                      the chosen workdir at entry).
+
+    Returns:
+        `RemediationResult` with `success` set iff the action ran clean
+        (same semantics as the underlying helpers' bool returns). `status`
+        is one of: ``"ok"``, ``"failed"``, ``"invalid_action"``,
+        ``"exception"``. Exceptions from the helpers are caught and turned
+        into result objects — programmatic callers should not have to wrap
+        this in try/except.
+    """
+    if confirmation is None:
+        confirmation = AutoConfirmPolicy() if auto_confirm else InteractivePolicy()
+
+    action_key = action.lower()
+    handler = {
+        "restore":  _restore,
+        "accept":   _accept,
+        "recreate": _recreate,
+        "drop":     _drop,
+    }.get(action_key)
+    if handler is None:
+        return RemediationResult(
+            tf_address=tf_address,
+            action=action,
+            success=False,
+            status="invalid_action",
+            message=f"Unknown action {action!r}; expected one of {list(_VALID_ACTIONS)}.",
+        )
+
+    # Build the policy checker only for actions that mutate cloud
+    # (restore/recreate). Accept/Drop never touch cloud, so a gate there
+    # would be theatre — and would also crash on the unsupported kwarg.
+    pc: Optional[Callable[[], Any]] = None
+    if action_key in ("restore", "recreate") and enable_policy_gate:
+        pc = policy_check or _policy_check_for(tf_address, cloud_snap=cloud_snapshot, workdir=workdir)
+
+    try:
+        if action_key in ("restore", "recreate"):
+            ok = handler(tf_address, confirmation=confirmation, policy_check=pc, workdir=workdir)
+        else:
+            ok = handler(tf_address, confirmation=confirmation, workdir=workdir)
+    except Exception as e:  # pragma: no cover — defensive shell for the UI
+        return RemediationResult(
+            tf_address=tf_address,
+            action=action_key,
+            success=False,
+            status="exception",
+            message=f"{type(e).__name__}: {e}",
+        )
+
+    return RemediationResult(
+        tf_address=tf_address,
+        action=action_key,
+        success=ok,
+        status="ok" if ok else "failed",
+    )
+
+
 def _print_summary(summary: RemediationSummary) -> None:
     print("\n" + "=" * 70)
     print("REMEDIATION SUMMARY")
     print("=" * 70)
-    print(f"  ✅ Restored: {len(summary.restored)}")
+    print(f"  [OK] Restored: {len(summary.restored)}")
     for addr in summary.restored:
         print(f"       {addr}")
-    print(f"  📥 Accepted: {len(summary.accepted)}")
+    print(f"  [ACCEPT] Accepted: {len(summary.accepted)}")
     for addr in summary.accepted:
         print(f"       {addr}")
-    print(f"  ⏭  Skipped:  {len(summary.skipped)}")
+    print(f"  [SKIP]  Skipped:  {len(summary.skipped)}")
     for addr in summary.skipped:
         print(f"       {addr}")
     if summary.failed:
-        print(f"  ❌ Failed:   {len(summary.failed)}")
+        print(f"  [FAIL] Failed:   {len(summary.failed)}")
         for addr, op in summary.failed:
             print(f"       {addr} ({op})")
     print("=" * 70)

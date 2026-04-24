@@ -11,10 +11,27 @@ from . import (
     config, gcp_client, terraform_client, hcl_generator, knowledge_base,
     heuristics, snapshot_scrubber, lifecycle_planner, resource_mode,
 )
+# Root-level app config — distinct from `importer/config.py`. The root holds
+# the project-ID concepts (HOST/TARGET/DEMO) and the resolver that enforces
+# the demo-lock safety gate. Aliased to `app_config` to avoid shadowing the
+# importer-local `config` module imported above.
+from .. import config as app_config
+from common.workdir import resolve_project_workdir
 
-project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
-os.chdir(project_root)
-print(f"--- Ensuring working directory is set to: {os.getcwd()} ---")
+# NOTE: we DELIBERATELY no longer chdir to the repo root here. Each workflow
+# invocation now resolves a per-project working directory via
+# common.workdir.resolve_project_workdir(project_id) AFTER the operator has
+# entered the project ID. All .tf files, terraform.tfstate, and the
+# .terraform/ plugin dir for that project live under that workdir; nothing
+# is written to the repo root any more.
+#
+# History: a previous version of this file did `os.chdir(project_root)` at
+# import time, which (a) caused .tf files from different GCP projects to
+# commingle in the repo root and (b) meant a single shared terraform.tfstate
+# at repo root mixed state across projects -- catastrophic when two demo
+# projects were imported in the same shell. Removed as part of the
+# per-project workdir refactor (see scripts/migrate_workdir.py for the
+# one-shot data migration).
 
 # IGNORE_LIST cumulative state (TODO #8) ----------------------------------
 # Per-run cumulative ignore set keyed by .tf filename. Once a field is added
@@ -300,15 +317,53 @@ def _present_selection_menu(resources):
             else: print("❌ No valid selections made.")
         except ValueError: print("❌ Invalid input.")
 
-def _map_asset_to_terraform(selected_asset, project_id):
-    resource_name = selected_asset.get('displayName') or selected_asset['name'].split('/')[-1]
+def _map_asset_to_terraform(selected_asset, project_id, workdir):
+    """Build the per-resource mapping dict consumed by the rest of the importer.
+
+    `workdir` is the absolute path returned by resolve_project_workdir() for
+    THIS project. It's stuck onto the mapping so every downstream consumer
+    (file writes here in run.py; subprocess calls in terraform_client.py)
+    can pull it back without needing an extra positional arg through every
+    function. `mapping['filename']` stays as a bare basename — joining with
+    `mapping['workdir']` is a single os.path.join at the call sites.
+    """
     asset_type = selected_asset['assetType']
     tf_type = config.ASSET_TO_TERRAFORM_MAP.get(asset_type)
     if not tf_type: return None
-    
+
+    # ---------------- Identity resolution ----------------
+    # For most resources, displayName == name == identifier == HCL-safe label.
+    # Service accounts break that assumption: displayName is a human label
+    # ("POC Smoke SA"), the gcloud-recognised identifier is the email
+    # (poc-sa@<project>.iam.gserviceaccount.com), and neither is a valid
+    # HCL identifier (spaces / @ / .). So we separate two concepts:
+    #
+    #   resource_name  -> what gcloud describe / terraform import need to find
+    #                     this resource. For SAs this is the FULL EMAIL.
+    #   hcl_name_base  -> a stable, HCL-identifier-safe label used to build
+    #                     the resource block label and the .tf filename.
+    #                     For SAs we use the LOCAL PART of the email
+    #                     (everything before '@') -- always valid HCL.
+    #
+    # For all other types both collapse to the same value (back-compat).
+    if asset_type == 'iam.googleapis.com/ServiceAccount':
+        # Asset-search returns the email under additionalAttributes.email,
+        # NOT under displayName. Fallback to the last segment of the asset
+        # name (which is also the email in GCP's URN scheme) if that key
+        # is ever missing.
+        sa_email = (
+            selected_asset.get('additionalAttributes', {}).get('email')
+            or selected_asset['name'].split('/')[-1]
+        )
+        resource_name = sa_email
+        hcl_name_base = sa_email.split('@', 1)[0]  # local part, always HCL-safe
+    else:
+        resource_name = selected_asset.get('displayName') or selected_asset['name'].split('/')[-1]
+        hcl_name_base = resource_name
+
     info = config.TF_TYPE_TO_GCLOUD_INFO.get(tf_type)
     import_id_format = info.get("import_id_format") if info else None
-    
+
     if not import_id_format:
         import_id = selected_asset['name'].split('/', 2)[-1]
     else:
@@ -317,16 +372,25 @@ def _map_asset_to_terraform(selected_asset, project_id):
             'project': project_id, 'name': resource_name,
             'zone': selected_asset.get('location'), 'region': selected_asset.get('location'),
         }
-        if tf_type == 'google_service_account': format_vars['email'] = selected_asset.get('displayName')
+        if tf_type == 'google_service_account':
+            # Use the ACTUAL email (already resolved above into resource_name),
+            # not displayName. The previous code read displayName and produced
+            # import_ids like 'project/POC Smoke SA' that terraform import
+            # could never resolve.
+            format_vars['email'] = resource_name
         if tf_type == 'google_container_node_pool' and 'clusters' in parts:
              format_vars['cluster'] = parts[parts.index('clusters') + 1]
         import_id = import_id_format.format(**format_vars)
 
     return {
-        "tf_type": tf_type, "hcl_name": resource_name.replace('-', '_'),
+        "tf_type": tf_type, "hcl_name": hcl_name_base.replace('-', '_'),
         "resource_name": resource_name, "import_id": import_id,
-        "filename": f"{tf_type}_{resource_name.replace('-', '_')}.tf",
+        "filename": f"{tf_type}_{hcl_name_base.replace('-', '_')}.tf",
         "location": selected_asset.get('location'), "project_id": project_id,
+        # Per-project workdir (absolute path). Carried on the mapping so
+        # downstream file writes and terraform_client subprocess calls can
+        # pull it back without extra plumbing through every signature.
+        "workdir": workdir,
     }
 
 def _generate_and_save_hcl(mapping, schema, heuristics_kb):
@@ -465,8 +529,13 @@ def _generate_and_save_hcl(mapping, schema, heuristics_kb):
     generated_hcl = _scrub_hcl(generated_hcl, keys_to_omit)
 
     try:
-        with open(mapping["filename"], "w", encoding='utf-8-sig') as f: f.write(generated_hcl)
-        print(f"✅ HCL file saved for '{mapping['resource_name']}'")
+        # Per-project workdir refactor: write into mapping['workdir'] (absolute
+        # path resolved upstream by resolve_project_workdir(project_id)) so
+        # files for project-A can never overwrite files for project-B in the
+        # repo root. mapping['filename'] stays as a basename.
+        out_path = os.path.join(mapping["workdir"], mapping["filename"])
+        with open(out_path, "w", encoding='utf-8-sig') as f: f.write(generated_hcl)
+        print(f"✅ HCL file saved for '{mapping['resource_name']}' -> {out_path}")
         time.sleep(1)
     except IOError as e:
         return (mapping, False, {"error": f"File write error: {e}"})
@@ -578,10 +647,12 @@ def _attempt_correction(mapping, resource_json, previous_error, attempt_num, sch
     if not corrected_hcl: return (mapping, "LLM failed to provide a correction.", False)
 
     # 6. HCL Scrubbing
-    from .run import _scrub_hcl 
+    from .run import _scrub_hcl
     corrected_hcl = _scrub_hcl(corrected_hcl, keys_to_omit)
 
-    with open(mapping["filename"], "w", encoding='utf-8-sig') as f: f.write(corrected_hcl)
+    # Per-project workdir refactor (see _generate_and_save_hcl for context).
+    out_path = os.path.join(mapping["workdir"], mapping["filename"])
+    with open(out_path, "w", encoding='utf-8-sig') as f: f.write(corrected_hcl)
     print(f"✅ Saved corrected HCL for '{mapping['resource_name']}'.")
     time.sleep(1)
 
@@ -601,11 +672,43 @@ def run_workflow():
     # path where one process serves many user sessions back-to-back.
     _CUMULATIVE_IGNORES_PER_FILE.clear()
 
-    if not os.path.isdir(".terraform"):
-        if terraform_client.init() is None: return
+    # NOTE: terraform init is DEFERRED until after we know the project_id
+    # and have resolved the per-project workdir. The previous code init'd
+    # against the repo root, which is exactly the commingling we just got
+    # rid of. See common/workdir.py for the rationale.
 
-    project_id = input("Enter your Google Cloud Project ID: ")
-    os.environ["GOOGLE_PROJECT"] = project_id.strip()
+    # TODO #11: route project-ID input through the central resolver so the
+    # DEMO_PROJECT_ID safety lock fires on a fat-finger scan, and so empty
+    # input falls back to the TARGET_PROJECT_ID env var (the eventual UI
+    # path will pre-fill from env without re-prompting).
+    default_hint = (
+        f" [{app_config.config.TARGET_PROJECT_ID}]"
+        if app_config.config.TARGET_PROJECT_ID else ""
+    )
+    raw = input(f"Enter your Google Cloud Project ID{default_hint}: ")
+    try:
+        project_id = app_config.resolve_target_project_id(raw)
+    except ValueError as e:
+        print(f"\n[FAIL] {e}")
+        return
+    os.environ["GOOGLE_PROJECT"] = project_id
+    print(f"   - Scanning project: {project_id}")
+    if app_config.config.DEMO_PROJECT_ID:
+        print(f"   - [DEMO-LOCK] Safety gate active: only "
+              f"{app_config.config.DEMO_PROJECT_ID!r} is permitted in this env.")
+
+    # Per-project workdir resolution. ValueError on a malformed project_id
+    # is path-traversal protection (see common/workdir.py docstring) -- we
+    # surface it cleanly rather than letting it bubble.
+    try:
+        workdir = resolve_project_workdir(project_id)
+    except ValueError as e:
+        print(f"\n[FAIL] Cannot resolve workdir: {e}")
+        return
+    print(f"   - 📁 Per-project workdir: {workdir}")
+    if not os.path.isdir(os.path.join(workdir, ".terraform")):
+        if terraform_client.init(workdir=workdir) is None:
+            return
 
     print("\n--- Stage 1: Discovering All Supported Resources in Parallel ---")
     all_discovered_resources = []
@@ -624,7 +727,7 @@ def run_workflow():
     if not selected_assets: return
     
     print("\n--- Stage 3: Mapping All Selected Assets ---")
-    mappings = [m for m in [_map_asset_to_terraform(asset, project_id) for asset in selected_assets] if m is not None]
+    mappings = [m for m in [_map_asset_to_terraform(asset, project_id, workdir) for asset in selected_assets] if m is not None]
     if not mappings: return
 
     print("\n--- Pre-loading all required documentation schemas and heuristics ---")
@@ -650,7 +753,7 @@ def run_workflow():
     # `_ensure_initialized()` still uses upgrade=True for the missing-lock
     # case (legitimate first-time setup); only this unconditional pre-import
     # init was problematic.
-    terraform_client.init()
+    terraform_client.init(workdir=workdir)
     for result in successful_generations: terraform_client.import_resource(result['mapping'])
 
     print("\n--- Initial Verification of All Generated Files (per-resource scoped plans) ---")
@@ -811,10 +914,12 @@ def run_workflow():
                     )
 
                     if corrected_hcl:
-                        from .run import _scrub_hcl 
+                        from .run import _scrub_hcl
                         corrected_hcl = _scrub_hcl(corrected_hcl, keys_to_omit_immediate)
-                        
-                        with open(mapping["filename"], "w", encoding='utf-8-sig') as f: f.write(corrected_hcl)
+
+                        # Per-project workdir refactor (see _generate_and_save_hcl).
+                        out_path = os.path.join(mapping["workdir"], mapping["filename"])
+                        with open(out_path, "w", encoding='utf-8-sig') as f: f.write(corrected_hcl)
                         time.sleep(1)
                         
                         print("   - Re-attempting import with corrected HCL...")
