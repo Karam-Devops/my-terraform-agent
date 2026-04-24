@@ -1,0 +1,34 @@
+{
+    // VS Code launch configurations for the Terraform IaC Agent.
+    //
+    // Pick a config from the "Run and Debug" panel (Ctrl+Shift+D), then
+    // press F5 to launch. The detector config below also catches the
+    // Windows cp1252-vs-emoji crash by forcing PYTHONIOENCODING=utf-8.
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "name": "Detector: drift report",
+            "type": "debugpy",
+            "request": "launch",
+            "module": "detector.run",
+            "cwd": "${workspaceFolder}",
+            "console": "integratedTerminal",
+            "justMyCode": false,
+            "env": {
+                "PYTHONIOENCODING": "utf-8"
+            }
+        },
+        {
+            "name": "Translator: GCE -> AWS (interactive prompt)",
+            "type": "debugpy",
+            "request": "launch",
+            "module": "translator.run",
+            "cwd": "${workspaceFolder}",
+            "console": "integratedTerminal",
+            "justMyCode": false,
+            "env": {
+                "PYTHONIOENCODING": "utf-8"
+            }
+        }
+    ]
+}

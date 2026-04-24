@@ -1,0 +1,18 @@
+{
+  "allowSubnetCidrRoutesOverlap": false,
+  "creationTimestamp": "2026-04-24T05:22:26.441-07:00",
+  "description": "POC smoke subnet (TODO #15 prep)",
+  "fingerprint": "kOH91BNoUDI=",
+  "gatewayAddress": "10.10.0.1",
+  "id": "4990373476969143917",
+  "ipCidrRange": "10.10.0.0/24",
+  "kind": "compute#subnetwork",
+  "name": "poc-subnet",
+  "network": "https://www.googleapis.com/compute/v1/projects/dev-proj-470211/global/networks/poc-vpc",
+  "privateIpGoogleAccess": false,
+  "privateIpv6GoogleAccess": "DISABLE_GOOGLE_ACCESS",
+  "purpose": "PRIVATE",
+  "region": "https://www.googleapis.com/compute/v1/projects/dev-proj-470211/regions/us-central1",
+  "selfLink": "https://www.googleapis.com/compute/v1/projects/dev-proj-470211/regions/us-central1/subnetworks/poc-subnet",
+  "stackType": "IPV4_ONLY"
+}

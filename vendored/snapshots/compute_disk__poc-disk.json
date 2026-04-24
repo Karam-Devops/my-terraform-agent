@@ -1,0 +1,16 @@
+{
+  "creationTimestamp": "2026-04-24T05:38:54.744-07:00",
+  "description": "POC smoke disk (TODO #15 prep)",
+  "enableConfidentialCompute": false,
+  "id": "3395594271049833137",
+  "kind": "compute#disk",
+  "labelFingerprint": "42WmSpB8rSM=",
+  "name": "poc-disk",
+  "physicalBlockSizeBytes": "4096",
+  "satisfiesPzi": true,
+  "selfLink": "https://www.googleapis.com/compute/v1/projects/dev-proj-470211/zones/us-central1-a/disks/poc-disk",
+  "sizeGb": "10",
+  "status": "READY",
+  "type": "https://www.googleapis.com/compute/v1/projects/dev-proj-470211/zones/us-central1-a/diskTypes/pd-standard",
+  "zone": "https://www.googleapis.com/compute/v1/projects/dev-proj-470211/zones/us-central1-a"
+}

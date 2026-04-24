@@ -1,0 +1,23 @@
+{
+  "allowed": [
+    {
+      "IPProtocol": "icmp"
+    }
+  ],
+  "creationTimestamp": "2026-04-24T05:33:52.377-07:00",
+  "description": "POC smoke firewall - allow ICMP from anywhere (TODO #15 prep)",
+  "direction": "INGRESS",
+  "disabled": false,
+  "id": "1684138327164771807",
+  "kind": "compute#firewall",
+  "logConfig": {
+    "enable": false
+  },
+  "name": "poc-fw-allow-icmp",
+  "network": "https://www.googleapis.com/compute/v1/projects/dev-proj-470211/global/networks/poc-vpc",
+  "priority": 1000,
+  "selfLink": "https://www.googleapis.com/compute/v1/projects/dev-proj-470211/global/firewalls/poc-fw-allow-icmp",
+  "sourceRanges": [
+    "0.0.0.0/0"
+  ]
+}

@@ -1,0 +1,17 @@
+{
+  "autoCreateSubnetworks": false,
+  "creationTimestamp": "2026-04-24T05:17:51.997-07:00",
+  "description": "POC smoke-pass VPC for IaC agent (TODO #15 prep)",
+  "id": "2836363600393068928",
+  "kind": "compute#network",
+  "name": "poc-vpc",
+  "networkFirewallPolicyEnforcementOrder": "AFTER_CLASSIC_FIREWALL",
+  "routingConfig": {
+    "bgpBestPathSelectionMode": "LEGACY",
+    "routingMode": "REGIONAL"
+  },
+  "selfLink": "https://www.googleapis.com/compute/v1/projects/dev-proj-470211/global/networks/poc-vpc",
+  "selfLinkWithId": "https://www.googleapis.com/compute/v1/projects/dev-proj-470211/global/networks/2836363600393068928",
+  "x_gcloud_bgp_routing_mode": "REGIONAL",
+  "x_gcloud_subnet_mode": "CUSTOM"
+}
