@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import unittest
 
-from common.errors import EngineError, UpstreamTimeout
+from common.errors import EngineError, PreflightError, UpstreamTimeout
 
 
 class UpstreamTimeoutTests(unittest.TestCase):
@@ -102,6 +102,65 @@ class UpstreamTimeoutTests(unittest.TestCase):
         except UpstreamTimeout as exc:
             self.assertIs(exc.__cause__, original,
                           "__cause__ must link back to subprocess.TimeoutExpired")
+
+
+class PreflightErrorTests(unittest.TestCase):
+    """Pins the PreflightError contract used by run_workflow A+D pattern.
+
+    run_workflow raises PreflightError when it can't START (bad project
+    ID, unresolvable workdir, terraform init failure). The UI catches
+    EngineError and renders .user_hint; dashboards filter on .stage.
+    Changing these field names breaks both — tests pin them.
+    """
+
+    def test_is_engine_error_subclass(self):
+        """UI's `except EngineError` must also catch PreflightError."""
+        self.assertTrue(issubclass(PreflightError, EngineError))
+        self.assertTrue(issubclass(PreflightError, Exception))
+
+    def test_carries_stage_and_reason(self):
+        """stage + reason are the two fields dashboards filter on."""
+        exc = PreflightError(
+            "project ID 'prod-foo' not permitted under DEMO_PROJECT_ID lock",
+            stage="validate_project_id",
+            reason="demo lock active; only 'demo-bar' allowed",
+        )
+        self.assertEqual(exc.stage, "validate_project_id")
+        self.assertEqual(exc.reason, "demo lock active; only 'demo-bar' allowed")
+        self.assertEqual(exc.fields["stage"], "validate_project_id")
+        self.assertEqual(exc.fields["reason"],
+                         "demo lock active; only 'demo-bar' allowed")
+
+    def test_reason_defaults_to_message(self):
+        """When reason is omitted, message is reused — common case."""
+        exc = PreflightError(
+            "terraform init failed",
+            stage="terraform_init",
+        )
+        self.assertEqual(exc.reason, "terraform init failed")
+
+    def test_user_hint_is_ui_safe(self):
+        """Hint shown to customers must not leak internal terminology."""
+        exc = PreflightError("xx", stage="terraform_init")
+        # No paths, no binary names, no internal stage IDs
+        self.assertNotIn("/", exc.user_hint)
+        self.assertNotIn("terraform", exc.user_hint.lower())
+        self.assertNotIn("workdir", exc.user_hint.lower())
+
+    def test_preserves_cause_chain(self):
+        """Original ValueError from project-ID validation stays in __cause__."""
+        original = ValueError("project ID cannot be empty")
+        try:
+            try:
+                raise original
+            except ValueError as e:
+                raise PreflightError(
+                    "project ID validation failed",
+                    stage="validate_project_id",
+                    reason=str(e),
+                ) from e
+        except PreflightError as exc:
+            self.assertIs(exc.__cause__, original)
 
 
 if __name__ == "__main__":

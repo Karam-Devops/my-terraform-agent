@@ -17,6 +17,15 @@ from . import (
 # importer-local `config` module imported above.
 from .. import config as app_config
 from common.workdir import resolve_project_workdir
+from common.errors import EngineError, PreflightError
+from common.logging import get_logger
+from .results import WorkflowResult
+
+# Module-level logger used by the A+D boundary (workflow_complete event
+# emits the full WorkflowResult via result.as_fields()). Other print()
+# sites in this file remain untouched in C3 -- they're part of the
+# interactive CLI path and get cleaned up in C4 (WARN cluster).
+_log = get_logger(__name__)
 
 # NOTE: we DELIBERATELY no longer chdir to the repo root here. Each workflow
 # invocation now resolves a per-project working directory via
@@ -663,8 +672,26 @@ def _attempt_correction(mapping, resource_json, previous_error, attempt_num, sch
 
     return (mapping, plan_output, is_success)
 
-def run_workflow():
-    """Main function with RAG-powered, parallel bulk import and self-correction."""
+def run_workflow() -> WorkflowResult:
+    """Main function with RAG-powered, parallel bulk import and self-correction.
+
+    A+D return contract (CC-4):
+        * RAISES ``PreflightError`` (``common.errors``) when the workflow
+          cannot START -- invalid project ID, unresolvable workdir,
+          terraform init failure. The ``__main__`` guard and the future
+          Streamlit handler catch ``EngineError`` and render
+          ``.user_hint``.
+        * RETURNS a ``WorkflowResult`` (``importer.results``) when the
+          workflow COMPLETES, regardless of per-resource outcomes. The
+          result's ``.failed`` and ``.imported`` counts drive the UI
+          summary; ``.exit_code`` is used by the CLI entrypoint.
+
+    A zero-selection workflow (no resources discovered, or operator
+    cancelled the selection menu) is NOT an error -- it returns a
+    zeroed result with ``exit_code == 0``. Orchestrators that alert
+    on non-zero exits therefore won't fire for empty projects.
+    """
+    started = time.monotonic()
     print("🚀 Starting Google Cloud to Terraform Import Workflow...")
 
     # TODO #8: clear cumulative IGNORE state from any previous workflow
@@ -689,8 +716,15 @@ def run_workflow():
     try:
         project_id = app_config.resolve_target_project_id(raw)
     except ValueError as e:
-        print(f"\n[FAIL] {e}")
-        return
+        # A+D: invalid project ID is a preflight failure. Raise so the
+        # CLI / Streamlit handler can render .user_hint; caller doesn't
+        # need to distinguish "no project entered" from "workflow ran
+        # but imported zero" -- those are different shapes.
+        raise PreflightError(
+            f"project ID validation failed: {e}",
+            stage="validate_project_id",
+            reason=str(e),
+        ) from e
     os.environ["GOOGLE_PROJECT"] = project_id
     print(f"   - Scanning project: {project_id}")
     if app_config.config.DEMO_PROJECT_ID:
@@ -703,12 +737,22 @@ def run_workflow():
     try:
         workdir = resolve_project_workdir(project_id)
     except ValueError as e:
-        print(f"\n[FAIL] Cannot resolve workdir: {e}")
-        return
+        raise PreflightError(
+            f"cannot resolve workdir: {e}",
+            stage="resolve_workdir",
+            reason=str(e),
+        ) from e
     print(f"   - 📁 Per-project workdir: {workdir}")
     if not os.path.isdir(os.path.join(workdir, ".terraform")):
         if terraform_client.init(workdir=workdir) is None:
-            return
+            # terraform init returns None on failure (current contract).
+            # Without a usable plugin cache nothing downstream will work,
+            # so this is a preflight failure -- raise, don't return.
+            raise PreflightError(
+                "terraform init failed; cannot proceed without plugin cache",
+                stage="terraform_init",
+                reason="terraform init returned None (see prior log events)",
+            )
 
     print("\n--- Stage 1: Discovering All Supported Resources in Parallel ---")
     all_discovered_resources = []
@@ -719,16 +763,35 @@ def run_workflow():
                 resources = future.result()
                 if resources: all_discovered_resources.extend(resources)
             except Exception as exc: print(f"❌ Error during discovery: {exc}")
-    
-    if not all_discovered_resources: return
+
+    if not all_discovered_resources:
+        # Workflow COMPLETED -- project just has no supported resources.
+        # Return a zeroed result (exit 0) rather than raising; orchestrators
+        # shouldn't alert on "empty project".
+        return _build_empty_result(
+            project_id=project_id, selected=0, started=started,
+        )
     all_discovered_resources.sort(key=lambda r: r.get('displayName', r.get('name')))
 
     selected_assets = _present_selection_menu(all_discovered_resources)
-    if not selected_assets: return
-    
+    if not selected_assets:
+        # Operator cancelled the selection menu -- workflow completed,
+        # nothing imported. Zeroed result, exit 0.
+        return _build_empty_result(
+            project_id=project_id, selected=0, started=started,
+        )
+
     print("\n--- Stage 3: Mapping All Selected Assets ---")
     mappings = [m for m in [_map_asset_to_terraform(asset, project_id, workdir) for asset in selected_assets] if m is not None]
-    if not mappings: return
+    if not mappings:
+        # Every selected asset had an asset_type with no Terraform
+        # mapping -- they all fall into the "skipped" bucket. Workflow
+        # completed, no failures to flag. Exit 0.
+        return _build_empty_result(
+            project_id=project_id,
+            selected=len(selected_assets),
+            started=started,
+        )
 
     print("\n--- Pre-loading all required documentation schemas and heuristics ---")
     schemas = {m['tf_type']: knowledge_base.get_schema_for_resource(m['tf_type']) for m in mappings}
@@ -743,7 +806,16 @@ def run_workflow():
             initial_results.append({'mapping': mapping, 'is_success': success, 'data': data})
 
     successful_generations = [r for r in initial_results if r['is_success']]
-    if not successful_generations: return
+    if not successful_generations:
+        # All HCL generations failed -- workflow completed, every mapped
+        # resource ends up in the failed bucket. exit_code will be 1.
+        return _build_result(
+            project_id=project_id,
+            selected=len(selected_assets),
+            imported=0,
+            failed=len(mappings),
+            started=started,
+        )
 
     # Plain `terraform init` (no -upgrade): respects the committed
     # .terraform.lock.hcl so providers resolve to the exact pinned versions.
@@ -984,5 +1056,82 @@ def run_workflow():
     print(f"\nSummary: {len(successful_imports)} / {len(mappings)} resources imported successfully.")
     print("Workflow finished.")
 
+    return _build_result(
+        project_id=project_id,
+        selected=len(selected_assets),
+        imported=len(successful_imports),
+        failed=len(failed_imports),
+        started=started,
+    )
+
+
+def _build_empty_result(*, project_id: str, selected: int,
+                        started: float) -> WorkflowResult:
+    """Shortcut for zero-activity completions (no discovery / user cancel / no mappings).
+
+    ``selected`` is passed explicitly because the meaning differs by
+    call site: 0 for "nothing discovered" / "user cancelled", and
+    ``len(selected_assets)`` for "nothing mapped" (everything fell
+    into the skipped bucket).
+    """
+    return _build_result(
+        project_id=project_id,
+        selected=selected,
+        imported=0,
+        failed=0,
+        started=started,
+    )
+
+
+def _build_result(*, project_id: str, selected: int, imported: int,
+                  failed: int, started: float) -> WorkflowResult:
+    """Assemble the final WorkflowResult and emit the completion event.
+
+    Centralises three concerns that must stay in lockstep:
+        1. Math: skipped = selected - imported - failed (the catch-all
+           bucket; see WorkflowResult docstring for why this is correct).
+        2. Duration: measured with time.monotonic() so clock adjustments
+           don't skew it.
+        3. Log emission: one ``workflow_complete`` event per invocation,
+           carrying the full result payload via ``result.as_fields()``.
+           Dashboards filter on these keys -- they are pinned by the
+           WorkflowResult tests.
+    """
+    skipped = max(0, selected - imported - failed)
+    duration_s = round(time.monotonic() - started, 2)
+    result = WorkflowResult(
+        project_id=project_id,
+        selected=selected,
+        imported=imported,
+        failed=failed,
+        skipped=skipped,
+        duration_s=duration_s,
+    )
+    _log.info("workflow_complete", **result.as_fields())
+    return result
+
+
 if __name__ == "__main__":
-    run_workflow()
+    # A+D boundary (CC-4):
+    #   * PreflightError / any EngineError  -> preflight failure,
+    #     exit 2. Surfaces the typed .user_hint to the operator so
+    #     they see "The workflow could not start ..." instead of a
+    #     stack trace.
+    #   * WorkflowResult returned           -> workflow completed;
+    #     exit code derived from result.exit_code (0 iff failed == 0).
+    #   * Any other unhandled exception     -> bug; exit 3 so CI
+    #     can distinguish it from a clean preflight fail.
+    try:
+        _result = run_workflow()
+    except EngineError as _e:
+        # Engineer-facing detail already in structured logs; operator
+        # sees the UI-safe hint.
+        print(f"\n[FAIL] {_e.user_hint}", file=sys.stderr)
+        _log.error("workflow_preflight_failed",
+                   error_type=type(_e).__name__,
+                   **_e.fields)
+        sys.exit(2)
+    except KeyboardInterrupt:
+        print("\n[ABORTED] Workflow cancelled by operator.", file=sys.stderr)
+        sys.exit(130)  # Unix convention for SIGINT
+    sys.exit(_result.exit_code)

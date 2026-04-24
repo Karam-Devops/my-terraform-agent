@@ -135,3 +135,65 @@ class UpstreamTimeout(EngineError):
         self.elapsed_s = elapsed_s
         self.timeout_s = timeout_s
         self.cmd = cmd or binary
+
+
+class PreflightError(EngineError):
+    """Raised when a workflow cannot START because inputs/environment are invalid.
+
+    This is the "A" in the A+D return pattern used by ``run_workflow``:
+    preflight failures RAISE (can't even begin), workflow-completed
+    results (green, red, or zeros) RETURN a ``WorkflowResult``. Callers
+    that couldn't usefully act on a failed-to-start workflow don't need
+    to branch on a result shape -- they get a typed exception with
+    ``user_hint`` ready for the UI.
+
+    Fires when:
+      * project_id fails the demo-lock safety gate (``ValueError`` from
+        ``config.resolve_target_project_id``)
+      * workdir cannot be resolved (path traversal protection rejects
+        a malformed project_id)
+      * ``terraform init`` fails (missing provider, lock-file drift,
+        registry unreachable) -- operator can't do anything downstream
+        without a usable plugin cache
+
+    Intentionally NOT fired for:
+      * empty discovery results (the project has no supported resources
+        -- workflow completed, just nothing to do; returns a zeroed
+        ``WorkflowResult`` instead)
+      * user cancels selection menu (same rationale)
+      * per-resource HCL generation or plan failures (those land in the
+        ``failed`` bucket of the ``WorkflowResult``; workflow still
+        completed)
+
+    Carries:
+        stage:  short identifier for log filtering. Allowed values pin
+                dashboard queries:
+                  - "validate_project_id"
+                  - "resolve_workdir"
+                  - "terraform_init"
+                Add new values deliberately; operators filter by exact
+                match.
+        reason: human-readable one-liner (usually the caught exception's
+                str()). Goes into ``.fields`` for structured logs.
+    """
+
+    user_hint = (
+        "The workflow could not start because the input or environment "
+        "is invalid. Please verify your project ID and retry. "
+        "If the problem persists, contact your administrator."
+    )
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        stage: str,
+        reason: Optional[str] = None,
+    ) -> None:
+        super().__init__(
+            message,
+            stage=stage,
+            reason=reason or message,
+        )
+        self.stage = stage
+        self.reason = reason or message
