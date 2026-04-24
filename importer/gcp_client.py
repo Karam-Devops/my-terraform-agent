@@ -51,6 +51,15 @@ def get_resource_details_json(mapping):
     
     if "zone_flag" in info and "location" in mapping:
         command_args.extend([info["zone_flag"], mapping["location"]])
+    # Symmetric branch for regional resources (compute_subnetwork,
+    # compute_address). Without this, gcloud rejects the describe call
+    # with "Underspecified resource — please specify --region". The
+    # config dict already declares region_flag for these types; this
+    # branch wires it through. NOTE: a `cluster_flag` branch is still
+    # missing — google_container_node_pool will hit the same bug class
+    # when it's first imported. Fix together when node_pool is added.
+    if "region_flag" in info and "location" in mapping:
+        command_args.extend([info["region_flag"], mapping["location"]])
 
     command_args.append("--format=json")
     
@@ -75,11 +84,38 @@ def get_resource_details_json(mapping):
         # self-contained and future-resilient in one shot.
         try:
             data = json.loads(json_output)
-            if isinstance(data, dict) and "project" not in data:
-                data["project"] = mapping["project_id"]
+            mutated = False
+            if isinstance(data, dict):
+                if "project" not in data:
+                    data["project"] = mapping["project_id"]
+                    print(f"   - 🏷️  Injected project='{mapping['project_id']}' into snapshot "
+                          f"(gcloud describe omits it; needed for self-contained HCL).")
+                    mutated = True
+
+                # SA-specific: Terraform's google_service_account requires
+                # `account_id` (the local part of the email). schema_oracle
+                # correctly classifies `email` as computed (Terraform
+                # synthesises it from account_id + project), so the
+                # snapshot scrubber strips `email` before the LLM sees it.
+                # That destroys the only signal for `account_id`, and the
+                # LLM falls back to the HCL block label — which we made
+                # HCL-safe by replacing hyphens with underscores — producing
+                # illegal account_id values like "poc_sa" that violate
+                # GCP's `^[a-z]([-a-z0-9]*[a-z0-9])?$` regex.
+                #
+                # Inject account_id explicitly here from the email's local
+                # part. Deterministic transform (no LLM hallucination
+                # risk), runs before the snapshot is scrubbed downstream.
+                if mapping.get("tf_type") == "google_service_account":
+                    email_value = data.get("email")
+                    if email_value and "account_id" not in data:
+                        data["account_id"] = email_value.split("@", 1)[0]
+                        print(f"   - 🏷️  Injected account_id='{data['account_id']}' for SA "
+                              f"(derived from email; email gets scrubbed downstream).")
+                        mutated = True
+
+            if mutated:
                 json_output = json.dumps(data, indent=2)
-                print(f"   - 🏷️  Injected project='{mapping['project_id']}' into snapshot "
-                      f"(gcloud describe omits it; needed for self-contained HCL).")
         except (json.JSONDecodeError, TypeError):
             # Fail-open: keep raw output if we can't parse. Downstream
             # snapshot scrubbers will hit the same error and surface it.
