@@ -10,10 +10,51 @@ logger = logging.getLogger(__name__)
 
 def _clean_and_format_hcl(raw_hcl: str) -> str:
     """Safety-net function to ensure no trailing markdown artifacts remain."""
-    if not raw_hcl: 
+    if not raw_hcl:
         return ""
     clean_lines = [line for line in raw_hcl.splitlines() if not line.strip().startswith("```")]
     return "\n".join(clean_lines)
+
+
+def resolve_output_path(source_file_path: str, target: str, prefix: str) -> str:
+    """Compute where a translated `.tf` file should land on disk.
+
+    Old behaviour wrote the translated file next to the source — e.g.
+    ``generated_iac/aws_translated_compute_instance.tf`` sat in the same
+    directory as ``generated_iac/google_compute_instance.tf``. That made
+    the directory increasingly hard to read as more types and target
+    clouds got translated; the GCP originals and translated outputs got
+    jumbled and `terraform validate` could even pick them up as a single
+    workspace.
+
+    New layout writes into a per-target subdirectory of the source dir:
+
+        generated_iac/google_compute_instance.tf            (source)
+        generated_iac/translated/aws/aws_translated_compute_instance.tf
+        generated_iac/translated/azure/azure_translated_compute_instance.tf
+
+    Pulled out as a pure helper so it can be unit-tested without
+    mocking the engine, validator, and LLM. The caller is responsible
+    for `os.makedirs(..., exist_ok=True)` before writing — the helper
+    does NOT touch the filesystem.
+
+    Args:
+        source_file_path: Path to the GCP `.tf` source file.
+        target:           Target cloud, lowercased ("aws" or "azure").
+        prefix:           Filename prefix for the translated file
+                          (typically same as `target`).
+
+    Returns:
+        Absolute or relative path (mirrors the input convention) to
+        where the translated file should be written.
+    """
+    base_name = os.path.basename(source_file_path)
+    clean_name = base_name.replace("google_", "")
+    new_filename = f"{prefix}_translated_{clean_name}"
+    # `or "."` guards the bare-basename case (no directory component).
+    source_dir = os.path.dirname(source_file_path) or "."
+    out_dir = os.path.join(source_dir, "translated", target)
+    return os.path.join(out_dir, new_filename)
 
 def run_translation_pipeline(target_cloud: str, source_file_path: str) -> Tuple[bool, Optional[str]]:
     """
@@ -100,14 +141,15 @@ def run_translation_pipeline(target_cloud: str, source_file_path: str) -> Tuple[
             logger.warning(f"   ⚠️  Validation still failing after {max_attempts} attempts; saving best-effort output for manual review.")
 
     # 5. Define Output Filename
-    base_name = os.path.basename(source_file_path)
-    clean_name = base_name.replace("google_", "")
-    new_filename = f"{prefix}_translated_{clean_name}"
-    output_path = os.path.join(os.path.dirname(source_file_path), new_filename)
+    # Per TODO #13: translated files now land in `<source_dir>/translated/<target>/`
+    # so they don't get jumbled with the GCP originals. See
+    # `resolve_output_path` for the rationale and full layout.
+    output_path = resolve_output_path(source_file_path, target, prefix)
+    os.makedirs(os.path.dirname(output_path), exist_ok=True)
 
     # 7. Save the Output
     try:
-        with open(output_path, "w", encoding='utf-8') as f: 
+        with open(output_path, "w", encoding='utf-8') as f:
             f.write(final_target_hcl)
         
         if is_valid:
