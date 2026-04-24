@@ -1,14 +1,82 @@
 # my-terraform-agent/importer/terraform_client.py
 
 import json
+import os
 import re
 import subprocess
-import os
 import tempfile
+import time
 from . import config
+from common.errors import UpstreamTimeout
 from common.logging import get_logger
 
 log = get_logger(__name__)
+
+# ---------------------------------------------------------------------------
+# Subprocess timeouts (Phase 0 audit CC-2)
+# ---------------------------------------------------------------------------
+#
+# Every terraform shell-out gets an explicit per-call timeout. Without
+# these, a slow upstream (registry stall, GCS auth flake, gcloud ADC
+# refresh hanging) wedges the request until Cloud Run's 60-min request
+# timeout fires -- 60 minutes too long for any client-facing call.
+#
+# Defaults below are tuned for typical p99 latencies + a generous
+# margin. Operators can override per environment via env var (handy
+# for CI runs against a slow staging registry, or for one-off large
+# imports). Override is read at call time so tests can monkey-patch.
+#
+# When changing a default: bump it cautiously. A timeout that fires
+# under load is observable (UpstreamTimeout in logs); a timeout set
+# too high silently degrades the worst-case UX without anyone
+# noticing until a customer complaint.
+_TIMEOUT_INIT_S = float(os.environ.get("MTAGENT_TF_INIT_TIMEOUT_S", "600"))    # provider downloads, p99 ~3min
+_TIMEOUT_IMPORT_S = float(os.environ.get("MTAGENT_TF_IMPORT_TIMEOUT_S", "120"))  # one resource, p99 ~30s
+_TIMEOUT_PLAN_S = float(os.environ.get("MTAGENT_TF_PLAN_TIMEOUT_S", "300"))    # per-target plan, p99 ~60s
+_TIMEOUT_APPLY_S = float(os.environ.get("MTAGENT_TF_APPLY_TIMEOUT_S", "300"))  # auto-reconcile path
+_TIMEOUT_SHOW_S = float(os.environ.get("MTAGENT_TF_SHOW_TIMEOUT_S", "60"))     # render saved plan
+_TIMEOUT_STATE_S = float(os.environ.get("MTAGENT_TF_STATE_TIMEOUT_S", "60"))   # state rm / mv
+
+
+def _run_terraform(args, *, stage, timeout_s, **subprocess_kwargs):
+    """Wrap subprocess.run with timeout + UpstreamTimeout translation.
+
+    Args:
+        args: argv list passed to subprocess.run.
+        stage: short stage name for logs ("init", "plan", "import", ...).
+            Goes into the UpstreamTimeout's `stage` field; operators
+            filter on it.
+        timeout_s: per-call wall-clock budget. None disables -- only
+            allowed for stage="state" (state rm) where uncapped is
+            tolerable because we ignore failures anyway.
+        **subprocess_kwargs: passed through to subprocess.run
+            (capture_output, text, check, cwd, stdin, etc.).
+
+    Raises:
+        UpstreamTimeout: terraform did not finish within timeout_s.
+            Original subprocess.TimeoutExpired preserved in __cause__.
+        Other exceptions: propagated unchanged so callers' existing
+            try/except blocks (catching CalledProcessError, etc.)
+            still work.
+    """
+    started = time.monotonic()
+    try:
+        return subprocess.run(args, timeout=timeout_s, **subprocess_kwargs)
+    except subprocess.TimeoutExpired as e:
+        elapsed = time.monotonic() - started
+        log.error("terraform_timeout",
+                  stage=stage,
+                  elapsed_s=round(elapsed, 2),
+                  timeout_s=timeout_s)
+        raise UpstreamTimeout(
+            f"terraform {stage} timed out after {timeout_s:.0f}s "
+            f"(elapsed {elapsed:.1f}s)",
+            binary="terraform",
+            stage=stage,
+            elapsed_s=round(elapsed, 2),
+            timeout_s=timeout_s or 0.0,
+            cmd="terraform",
+        ) from e
 
 
 # ---------------------------------------------------------------------------
@@ -103,8 +171,17 @@ def init(workdir=None, upgrade=False):
     if upgrade:
         command_args.append("-upgrade")
     try:
-        # Use subprocess.run directly as we don't need the complex file-redirection here
-        subprocess.run(command_args, check=True, capture_output=True, text=True, cwd=workdir)
+        # _run_terraform wraps subprocess.run with the timeout + raises
+        # UpstreamTimeout on expiry (caught at the workflow boundary).
+        _run_terraform(
+            command_args,
+            stage="init",
+            timeout_s=_TIMEOUT_INIT_S,
+            check=True,
+            capture_output=True,
+            text=True,
+            cwd=workdir,
+        )
         return True
     except (subprocess.CalledProcessError, FileNotFoundError) as e:
         error_output = e.stderr if hasattr(e, 'stderr') and e.stderr else str(e)
@@ -133,7 +210,18 @@ def import_resource(mapping, force_refresh=False):
                  tf_address=tf_address)
         remove_args = [config.TERRAFORM_PATH, "state", "rm", tf_address]
         try:
-            subprocess.run(remove_args, capture_output=True, text=True, cwd=workdir)
+            # Best-effort state removal; pre-existing contract is to
+            # swallow failures (the import below will succeed or fail
+            # on its own terms). Timeout is still applied so a hung
+            # state backend does not wedge the import path.
+            _run_terraform(
+                remove_args,
+                stage="state_rm",
+                timeout_s=_TIMEOUT_STATE_S,
+                capture_output=True,
+                text=True,
+                cwd=workdir,
+            )
         except Exception:
             pass
 
@@ -143,7 +231,15 @@ def import_resource(mapping, force_refresh=False):
              workdir=workdir)
     import_args = [config.TERRAFORM_PATH, "import", tf_address, mapping["import_id"]]
     try:
-        subprocess.run(import_args, check=True, capture_output=True, text=True, cwd=workdir)
+        _run_terraform(
+            import_args,
+            stage="import",
+            timeout_s=_TIMEOUT_IMPORT_S,
+            check=True,
+            capture_output=True,
+            text=True,
+            cwd=workdir,
+        )
         log.info("import_complete",
                  resource_name=mapping['resource_name'],
                  tf_address=tf_address)
@@ -307,7 +403,15 @@ def _run_show_json(plan_file, workdir=None):
     """
     show_args = [config.TERRAFORM_PATH, "show", "-json", plan_file]
     try:
-        result = subprocess.run(show_args, capture_output=True, text=True, check=True, cwd=workdir)
+        result = _run_terraform(
+            show_args,
+            stage="show",
+            timeout_s=_TIMEOUT_SHOW_S,
+            capture_output=True,
+            text=True,
+            check=True,
+            cwd=workdir,
+        )
         return json.loads(result.stdout)
     except (subprocess.CalledProcessError, json.JSONDecodeError) as e:
         log.warning("terraform_show_json_failed",
@@ -331,7 +435,15 @@ def _apply_saved_plan(plan_file, workdir=None):
         plan_file,
     ]
     try:
-        result = subprocess.run(apply_args, capture_output=True, text=True, check=True, cwd=workdir)
+        result = _run_terraform(
+            apply_args,
+            stage="apply",
+            timeout_s=_TIMEOUT_APPLY_S,
+            capture_output=True,
+            text=True,
+            check=True,
+            cwd=workdir,
+        )
         return True, (result.stdout or "")
     except subprocess.CalledProcessError as e:
         return False, (e.stderr or e.stdout or str(e))
@@ -373,8 +485,20 @@ def plan_for_resource(mapping):
             "-no-color",
             "-input=false",
         ]
+        # Plan output is captured to a file (can be large on first run
+        # against a full project). _run_terraform propagates timeout
+        # via UpstreamTimeout; caller (plan_for_resource) does NOT
+        # catch it -- lets it bubble to run_workflow boundary so the
+        # whole workflow logs the timeout once, not per-resource.
         with open(output_file, 'w', encoding='utf-8') as f_out:
-            process = subprocess.run(plan_args, stdout=f_out, stderr=f_out, cwd=workdir)
+            process = _run_terraform(
+                plan_args,
+                stage="plan",
+                timeout_s=_TIMEOUT_PLAN_S,
+                stdout=f_out,
+                stderr=f_out,
+                cwd=workdir,
+            )
         with open(output_file, 'r', encoding='utf-8') as f_in:
             output = f_in.read()
 
