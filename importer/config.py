@@ -49,6 +49,23 @@ ASSET_TO_TERRAFORM_MAP = {
     # _map_asset_to_terraform for the parent-name extraction.
     "cloudkms.googleapis.com/KeyRing": "google_kms_key_ring",
     "cloudkms.googleapis.com/CryptoKey": "google_kms_crypto_key",
+
+    # Cloud Run v2 (P2-4) -- the modern (post-2023) Cloud Run resource
+    # shape. The legacy `google_cloud_run_service` (v1) is deprecated;
+    # all new deployments use v2. Maps from the same asset type as v1
+    # (run.googleapis.com/Service) -- the v1/v2 distinction is in the
+    # provider's HCL surface, not in Cloud Asset Inventory's URN scheme.
+    "run.googleapis.com/Service": "google_cloud_run_v2_service",
+
+    # Pub/Sub (P2-5) -- topic + subscription. Both are PROJECT-SCOPED
+    # (global, no per-location config), so neither declares a
+    # zone/region/location flag in TF_TYPE_TO_GCLOUD_INFO. Subscription
+    # references topic via the `topic` attribute in HCL (a full
+    # `projects/<P>/topics/<T>` URN string), so no parent-flag is
+    # needed at describe time -- the relationship is rebuilt by
+    # terraform import from the URN literal.
+    "pubsub.googleapis.com/Topic": "google_pubsub_topic",
+    "pubsub.googleapis.com/Subscription": "google_pubsub_subscription",
 }
 
 # This dictionary now contains the definitive information for describe commands AND import ID formats.
@@ -150,6 +167,31 @@ TF_TYPE_TO_GCLOUD_INFO = {
         "keyring_flag": "--keyring",
         "import_id_format": "projects/{project}/locations/{location}/keyRings/{keyring}/cryptoKeys/{name}",
     },
+
+    # Cloud Run v2 (P2-4) -- regional (one location-string per service,
+    # always a region like us-central1; no zonal or multi-region option).
+    # `--region` is the gcloud flag. import_id format is the full
+    # projects/<P>/locations/<R>/services/<N> URN (Cloud Run accepts
+    # both this and the shorter `<P>/<R>/<N>` form; we use the full URN
+    # for consistency with KMS and GKE clusters).
+    "google_cloud_run_v2_service": {
+        "describe_command": "run services describe",
+        "region_flag": "--region",
+        "import_id_format": "projects/{project}/locations/{region}/services/{name}",
+    },
+
+    # Pub/Sub (P2-5) -- both topic and subscription are PROJECT-SCOPED
+    # (no location). gcloud doesn't take a location flag for either.
+    # The import_id format is the short `<project>/<name>` form that
+    # `terraform import google_pubsub_topic.<label> <id>` accepts.
+    "google_pubsub_topic": {
+        "describe_command": "pubsub topics describe",
+        "import_id_format": "projects/{project}/topics/{name}",
+    },
+    "google_pubsub_subscription": {
+        "describe_command": "pubsub subscriptions describe",
+        "import_id_format": "projects/{project}/subscriptions/{name}",
+    },
 }
 
 # --- NEW AND FINAL: GitHub Documentation Path Mapping ---
@@ -167,6 +209,9 @@ TF_TYPE_TO_GITHUB_DOC_PATH = {
     "google_container_node_pool": "container_node_pool",
     "google_kms_key_ring": "kms_key_ring",       # P2-3
     "google_kms_crypto_key": "kms_crypto_key",   # P2-3
+    "google_cloud_run_v2_service": "cloud_run_v2_service",  # P2-4
+    "google_pubsub_topic": "pubsub_topic",       # P2-5
+    "google_pubsub_subscription": "pubsub_subscription",  # P2-5
     "google_service_account": "google_service_account", # The special case you found
     "google_storage_bucket": "storage_bucket",
     "google_sql_database_instance": "sql_database_instance",
