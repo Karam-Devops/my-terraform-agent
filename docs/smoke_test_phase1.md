@@ -197,3 +197,159 @@ Optional negative tests: [C2 timeout: PASS/SKIP]
 
 If the green path passes, Phase 1 is closed and we move to Phase 2
 (resource coverage push).
+
+---
+
+## Phase 2 wave (P2-1..P2-5 verification)
+
+After Phase 2 ships (commits `b156d81` through `0eabf2d`), the
+SMOKE re-run covers an expanded set of 17 resource types and
+verifies the Phase 2 fixes / additions on top of the Phase 1
+hardening. This section layers ON TOP of the Phase 1 procedure
+above; the pre-requisites + run + log-grepping mechanics are the
+same.
+
+### Phase 2 setup
+
+Phase 2 needs 5 NEW resources in dev-proj-470211 (P2-3 KMS,
+P2-4 Cloud Run, P2-5 Pub/Sub). All near-free.
+
+```bash
+# One-shot bootstrap of the 5 new types (idempotent):
+bash scripts/create_smoke_resources.sh
+```
+
+Wait for Asset API indexing (1-5 min) before running the importer.
+The script verifies at the end -- if any of the 5 new asset types
+isn't listed, wait 60s and re-run just the verify command at the
+script's bottom.
+
+### Phase 2 expanded selection
+
+The selection menu now shows **22 supported resources** (12 from
+Phase 1 wave + 5 new from Phase 2 + 5 cluster-internal items GKE
+auto-creates). Pick all 17 importable ones to verify everything in
+one shot:
+
+| Phase | Wave | Type | Resource |
+|---|---|---|---|
+| 1 | original | google_service_account | `poc-sa` |
+| 1 | original | google_compute_subnetwork | `poc-subnet` |
+| 1 | original | google_compute_network | `poc-vpc` |
+| 1 | original | google_compute_firewall | `poc-fw-allow-icmp` |
+| 1 | original | google_compute_disk (standalone) | `poc-disk` |
+| 1 | original | google_compute_instance | `poc-vm` |
+| 1 | original | google_storage_bucket | `poc-smoke-bucket-...` |
+| 1 | original | google_container_cluster (Autopilot) | `poc-cluster` |
+| 1 | original | google_container_cluster (Standard) | `poc-cluster-std` |
+| 1 | original | google_container_node_pool (Standard) | `default-pool` of poc-cluster-std |
+| **2** | **P2-3** | **google_kms_key_ring** | **`poc-keyring`** |
+| **2** | **P2-3** | **google_kms_crypto_key** | **`poc-key`** |
+| **2** | **P2-4** | **google_cloud_run_v2_service** | **`poc-cloudrun`** |
+| **2** | **P2-5** | **google_pubsub_topic** | **`poc-topic`** |
+| **2** | **P2-5** | **google_pubsub_subscription** | **`poc-subscription`** |
+
+**Skip** (don't pick — known-bad / known-conflict):
+- `google_compute_disk` (boot of poc-vm) — overlap with the VM
+- `google_container_node_pool` (Autopilot's default-pool) — Google
+  blocks describe
+- All `gke-*` firewall rules — GKE-managed, will perpetually drift
+- All `gke-*-default-pool-*` Disk/Instance/InstanceTemplate — GKE
+  internals
+- All 43 `default` per-region subnetworks — noise
+
+### What to verify (delta over Phase 1)
+
+In addition to the Phase 1 checklist, look for these Phase 2 signals:
+
+#### P2-1 (empty-block scrubber)
+
+Look for `post_llm_empty_block_dropped` events in the log. Should
+fire 0-N times depending on what the LLM hallucinates. Each fire =
+"we caught a hallucination the pre-Phase-2 code would have shipped
+to terraform plan-verify".
+
+Search the cluster .tf files after run:
+```bash
+grep -E "_config \{\s*\}|pubsub \{\s*\}" imported/dev-proj-470211/google_container_cluster_*.tf
+```
+Should return **NOTHING**. Empty matches = P2-1 working.
+
+#### P2-2 (locations -> node_locations rename)
+
+Look for `post_llm_correction_applied` event with description
+`renamed '<root>.locations' -> '<root>.node_locations'`.
+
+Search the cluster .tf files:
+```bash
+grep -E "^\s*locations\s*=" imported/dev-proj-470211/google_container_cluster_*.tf
+```
+Should return NOTHING (only `node_locations = ` should appear).
+
+#### P2-3 (CMEK end-to-end)
+
+Look for `discover_complete` events on:
+- `cloudkms.googleapis.com/KeyRing` count=1
+- `cloudkms.googleapis.com/CryptoKey` count=1
+
+`subprocess_start` for crypto_key describe should include
+`--keyring poc-keyring` (the C5 pattern, now mirrored for KMS):
+```
+gcloud kms keys describe poc-key --project=... --location us-central1 --keyring poc-keyring --format=json
+```
+
+Both should reach `hcl_validation_ok` (LLM generates clean HCL for
+KMS — small schema, well-known shape).
+
+#### P2-4 (Cloud Run v2)
+
+Look for `discover_complete` on `run.googleapis.com/Service` count=1.
+
+`subprocess_start` for the describe should be:
+```
+gcloud run services describe poc-cloudrun --project=... --region us-central1 --format=json
+```
+
+Cloud Run v2 has a deep nested schema (template > containers >
+ports etc.) — the LLM may hallucinate; the HCL gen + plan-verify
+flow is the test.
+
+#### P2-5 (Pub/Sub)
+
+Look for `discover_complete` on:
+- `pubsub.googleapis.com/Topic` count=1
+- `pubsub.googleapis.com/Subscription` count=1
+
+Both describes are flag-less (project-scoped):
+```
+gcloud pubsub topics describe poc-topic --project=... --format=json
+gcloud pubsub subscriptions describe poc-subscription --project=... --format=json
+```
+
+Subscription's HCL should reference the topic via a literal
+`topic = "projects/dev-proj-470211/topics/poc-topic"` — no
+terraform-level dependency, just a string.
+
+### Phase 2 success thresholds
+
+| Metric | Target | Comment |
+|---|---|---|
+| `workflow_complete` event emitted | YES | Same as Phase 1 |
+| Selected count | 15 | (10 Phase 1 + 5 Phase 2 picks above) |
+| Imported count | 13-15 | Best case 15/15. Realistic 13/15 if Autopilot pool issues + boot-disk/cluster overlap remain |
+| `post_llm_empty_block_dropped` event count | 0-4 | Each fire = P2-1 working |
+| `post_llm_correction_applied <root>.locations` | 0-2 | Each fire = P2-2 working (Standard clusters only) |
+| Failed cluster cascade | 0-1 | Down from "11 failed (9 sibling-blocked)" pre-Phase-2 |
+
+### Phase 2 cleanup
+
+Same script, now extended to also handle the 5 new types:
+
+```bash
+bash scripts/cleanup_smoke_resources.sh
+```
+
+Note: KMS crypto keys can't be hard-deleted (Google's design --
+24h-30d destruction window). KMS key rings can't be deleted at all.
+Both effects are documented in the script; cost while pending is
+~$0.06/mo, negligible.
