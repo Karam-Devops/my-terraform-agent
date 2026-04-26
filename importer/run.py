@@ -2,6 +2,7 @@
 
 import contextvars
 import os
+import subprocess
 import sys
 import json
 import concurrent.futures
@@ -18,7 +19,7 @@ from . import (
 # importer-local `config` module imported above.
 from .. import config as app_config
 from common.workdir import resolve_project_workdir
-from common.errors import EngineError, PreflightError
+from common.errors import EngineError, PreflightError, UpstreamTimeout
 from common.logging import get_logger
 from .results import WorkflowResult
 
@@ -474,7 +475,44 @@ def _map_asset_to_terraform(selected_asset, project_id, workdir):
 def _generate_and_save_hcl(mapping, schema, heuristics_kb):
     """Initial HCL generation (Attempt 1) - FIXED PROACTIVE MEMORY"""
     print(f"\n⚙️  Generating HCL for '{mapping['resource_name']}'...")
-    resource_json = gcp_client.get_resource_details_json(mapping)
+    # C5.1 (Bug B): convert per-resource describe failures into the
+    # standard (mapping, False, {error}) failure tuple so the parallel
+    # HCL-gen pool can complete and the workflow's A+D contract holds
+    # (run_workflow returns a WorkflowResult with this resource in the
+    # `failed` bucket, instead of crashing on the first
+    # subprocess.CalledProcessError that bubbles through future.result()).
+    # Both exception types must be caught:
+    #   * subprocess.CalledProcessError -- gcloud describe returned
+    #     non-zero (e.g. "Underspecified resource", missing permission,
+    #     resource deleted between discover and describe)
+    #   * UpstreamTimeout -- the per-stage timeout fired before gcloud
+    #     finished (slow API, huge resource, network blip)
+    try:
+        resource_json = gcp_client.get_resource_details_json(mapping)
+    except subprocess.CalledProcessError as e:
+        first_line = (e.stderr or e.output or "").splitlines()[0:1]
+        err_msg = first_line[0] if first_line else f"returncode={e.returncode}"
+        _log.error(
+            "hcl_gen_describe_failed",
+            tf_type=mapping.get("tf_type"),
+            resource_name=mapping.get("resource_name"),
+            returncode=e.returncode,
+            error=err_msg,
+        )
+        return (mapping, False, {
+            "error": f"gcloud describe failed (rc={e.returncode}): {err_msg}",
+        })
+    except UpstreamTimeout as e:
+        _log.error(
+            "hcl_gen_describe_timeout",
+            tf_type=mapping.get("tf_type"),
+            resource_name=mapping.get("resource_name"),
+            timeout_s=e.timeout_s,
+            elapsed_s=e.elapsed_s,
+        )
+        return (mapping, False, {
+            "error": f"gcloud describe timed out after {e.timeout_s}s",
+        })
     if not resource_json: return (mapping, False, {"error": "Failed to get resource details."})
 
     # --- 0. PR-3: schema-driven auto-scrub of pure-computed fields ---

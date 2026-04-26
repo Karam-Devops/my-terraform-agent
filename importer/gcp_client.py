@@ -1,10 +1,59 @@
 # importer/gcp_client.py
 import json
+import re
 from . import config
 from . import shell_runner
 from common.logging import get_logger
 
 log = get_logger(__name__)
+
+
+# C5.1: GCP location strings are EITHER zones (us-central1-a) OR regions
+# (us-central1). For dual-mode resources -- GKE clusters and node pools --
+# we must pick the right gcloud flag at runtime based on the location's
+# shape. Zones always end with `-<single letter>`; regions never do.
+# Pre-compiled because describe runs many times per workflow.
+_ZONE_LOCATION_RE = re.compile(r"^[a-z]+-[a-z]+\d+-[a-z]$")
+
+
+def _is_zonal_location(location: str) -> bool:
+    """Return True iff `location` looks like a GCP zone (us-central1-a)
+    rather than a region (us-central1).
+
+    Pure function so it can be unit-tested without mocking gcloud.
+    """
+    if not location:
+        return False
+    return bool(_ZONE_LOCATION_RE.match(location))
+
+
+def _resolve_location_flag(info: dict, mapping: dict):
+    """Pick the right gcloud --zone / --region flag for this describe.
+
+    Resources fall into three groups:
+      * Zonal-only (compute_instance, compute_disk):  declares zone_flag
+        only -> always emit --zone <location>.
+      * Regional-only (compute_subnetwork, compute_address): declares
+        region_flag only -> always emit --region <location>.
+      * Dual-mode (google_container_cluster, google_container_node_pool):
+        declares BOTH flags -> pick based on whether `location` looks
+        like a zone or region. Zones get --zone, regions get --region.
+
+    Returns a list of args to extend command_args with, or [] if no
+    location flag applies (e.g. global resources like networks/buckets).
+    """
+    location = mapping.get("location")
+    has_zone = "zone_flag" in info
+    has_region = "region_flag" in info
+    if not location or not (has_zone or has_region):
+        return []
+    if has_zone and has_region:
+        # Dual-mode: pick by location shape.
+        flag = info["zone_flag"] if _is_zonal_location(location) else info["region_flag"]
+        return [flag, location]
+    if has_zone:
+        return [info["zone_flag"], location]
+    return [info["region_flag"], location]
 
 
 def discover_resources_of_type(project_id, asset_type):
@@ -55,27 +104,19 @@ def get_resource_details_json(mapping):
     command_args.append(resource_name_to_pass)
     command_args.append(f"--project={mapping['project_id']}")
     
-    if "zone_flag" in info and "location" in mapping:
-        command_args.extend([info["zone_flag"], mapping["location"]])
-    # Symmetric branch for regional resources (compute_subnetwork,
-    # compute_address). Without this, gcloud rejects the describe call
-    # with "Underspecified resource -- please specify --region". The
-    # config dict already declares region_flag for these types; this
-    # branch wires it through.
-    if "region_flag" in info and "location" in mapping:
-        command_args.extend([info["region_flag"], mapping["location"]])
-    # Symmetric branch for nested resources whose describe needs a parent
-    # identifier flag. Currently exercised by google_container_node_pool
-    # (`--cluster <name>`); kept generic so future nested types
-    # (e.g. google_dns_record_set inside a managed zone) can opt in by
+    # Location flag (--zone OR --region) -- C5.1 picker handles
+    # zonal-only, regional-only, and dual-mode (GKE) resources via
+    # _resolve_location_flag. Previously this was three hardcoded
+    # branches that always emitted --zone for any resource declaring
+    # zone_flag, which broke regional GKE clusters (location shape
+    # "us-central1" rejected by `gcloud container ... describe`).
+    command_args.extend(_resolve_location_flag(info, mapping))
+
+    # Parent-identifier flag for nested resources (currently node_pool's
+    # --cluster). Kept generic so future nested types can opt in by
     # declaring `cluster_flag` (or an analogous parent_flag) in
     # TF_TYPE_TO_GCLOUD_INFO and stuffing the parent name onto the
-    # mapping in run.py _map_asset_to_terraform.
-    #
-    # C5 fix: the symmetry note above used to flag this branch as
-    # "still missing"; that gap caused `gcloud container node-pools
-    # describe <pool>` to fail with "Underspecified resource -- please
-    # specify --cluster" the first time a node pool was imported.
+    # mapping in run.py _map_asset_to_terraform (C5 wiring).
     if "cluster_flag" in info and "cluster" in mapping:
         command_args.extend([info["cluster_flag"], mapping["cluster"]])
 

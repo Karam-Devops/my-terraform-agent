@@ -125,10 +125,18 @@ def run_command(command_args, *, timeout: float | None = None):
 
         # After the process is finished, we check its return code.
         if process.returncode != 0:
+            # C5.1: enriched event so operators can triage from a single
+            # log line. Previously emitted only `cmd=<binary>` + returncode,
+            # which forced timestamp-correlation with the prior
+            # subprocess_start to figure out WHICH gcloud call failed.
+            # Now includes the full shell-joined cmd, the basename for
+            # dashboard filtering, and the first 500 chars of stderr.
             log.error(
                 "subprocess_failed",
                 returncode=process.returncode,
-                cmd=command_args[0] if command_args else "",
+                binary=os.path.basename(command_args[0]) if command_args else "",
+                cmd=shlex.join(command_args),
+                stderr=stderr[:500] if stderr else "",
             )
             # We manually raise the exception.
             # Crucially, we populate the 'output' field with the combined, decoded streams.

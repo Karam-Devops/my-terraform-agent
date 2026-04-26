@@ -33,13 +33,23 @@ this single run and tear it down after.
 The current `ASSET_TO_TERRAFORM_MAP` covers ~12 GCP types. For SMOKE
 we pick five that exercise different code paths:
 
-| # | Resource type | What it pins |
-|---|---|---|
-| 1 | `google_compute_instance` | The most common type; exercises zone_flag, lifecycle.ignore_changes synthesis, snapshot scrubber |
-| 2 | `google_compute_subnetwork` | Exercises region_flag (regional resource) |
-| 3 | `google_storage_bucket` | Exercises name_format (`gs://...` prefix), no location flag |
-| 4 | `google_service_account` | Exercises the email-vs-displayName identity split + account_id injection |
-| 5 | `google_container_node_pool` (if available) — else `google_container_cluster` | Exercises C5 cluster_flag (if node_pool); else exercises GKE describe with zone_flag |
+| # | Resource type | What it pins | dev-proj-470211 instance |
+|---|---|---|---|
+| 1 | `google_compute_instance` | The most common type; exercises zone_flag, lifecycle.ignore_changes synthesis, snapshot scrubber | `poc-vm` (us-central1-a) |
+| 2 | `google_compute_subnetwork` | Exercises region_flag (regional resource) | `poc-subnet` (us-central1) |
+| 3 | `google_storage_bucket` | Exercises name_format (`gs://...` prefix), no location flag | `poc-smoke-bucket-dev-proj-470211` |
+| 4 | `google_service_account` | Exercises the email-vs-displayName identity split + account_id injection | `poc-sa@dev-proj-470211.iam.gserviceaccount.com` |
+| 5 | `google_container_node_pool` | **Exercises C5 cluster_flag fix end-to-end** | the default node pool of `poc-cluster-std` (us-central1-a) — Standard mode |
+
+Note on GKE coverage: two clusters exist in dev-proj-470211 — `poc-cluster`
+(Autopilot, regional, us-central1) and `poc-cluster-std` (Standard, zonal,
+us-central1-a). For SMOKE row 5, **pick the node_pool from the Standard
+cluster** (`poc-cluster-std`'s default-pool) — Autopilot deliberately
+hides its node pools from the Asset API, so they're not selectable.
+
+If you also want to exercise `google_container_cluster` itself (e.g. to
+verify the Autopilot mode-detection path in `resource_mode.py`), pick
+`poc-cluster` (Autopilot) as a 6th type. Optional bonus coverage.
 
 If your project doesn't have all five, substitute from the supported
 set in `importer/config.py::ASSET_TO_TERRAFORM_MAP`. Note which

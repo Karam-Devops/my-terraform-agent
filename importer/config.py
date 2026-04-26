@@ -79,15 +79,24 @@ TF_TYPE_TO_GCLOUD_INFO = {
         "import_id_format": "{project}/{name}" # NEW
     },
 
-    # GKE
+    # GKE -- dual-mode (zonal OR regional). Both flags declared so the
+    # describe-side picker in gcp_client._resolve_location_flag can choose
+    # `--zone` or `--region` based on the shape of mapping["location"].
+    # Without `region_flag`, regional clusters and their node pools used
+    # to crash with "Underspecified resource -- please specify --region"
+    # (C5.1 fix; surfaced by the Phase 1 SMOKE against a regional
+    # Autopilot cluster). The `import_id_format` placeholder name is
+    # `{zone}` for back-compat — at format time both `zone` and `region`
+    # format vars carry the same location value, so the URL works either
+    # way.
     "google_container_cluster": {
-        "describe_command": "container clusters describe", 
-        "zone_flag": "--zone",
+        "describe_command": "container clusters describe",
+        "zone_flag": "--zone", "region_flag": "--region",
         "import_id_format": "projects/{project}/locations/{zone}/clusters/{name}" # NEW
     },
     "google_container_node_pool": {
-        "describe_command": "container node-pools describe", 
-        "cluster_flag": "--cluster", "zone_flag": "--zone",
+        "describe_command": "container node-pools describe",
+        "cluster_flag": "--cluster", "zone_flag": "--zone", "region_flag": "--region",
         "import_id_format": "projects/{project}/locations/{zone}/clusters/{cluster}/nodePools/{name}" # NEW
     },
     
