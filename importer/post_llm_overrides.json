@@ -10,5 +10,16 @@
         "to": "type"
       }
     ]
+  },
+
+  "google_container_cluster": {
+    "renames": [
+      {
+        "comment": "P2-2: the cloud snapshot has `nodeLocations` (camelCase API field name); the LLM frequently emits `locations = [...]` at resource-body root, which the provider rejects ('argument named locations is not expected here'). Correct schema field is `node_locations` (snake_case). Universally correct rename for both Standard zonal and Standard regional clusters. Autopilot clusters are protected separately by resource_mode.py's gke_autopilot prune list (which strips `nodeLocations` from the snapshot before the LLM sees it, since Autopilot manages node placement and rejects manual `node_locations` config). block_path empty -> dispatches to _rename_at_top_level. Surfaced by the Phase 1 SMOKE on poc-cluster-std (zonal Standard cluster).",
+        "block_path": "",
+        "from": "locations",
+        "to": "node_locations"
+      }
+    ]
   }
 }

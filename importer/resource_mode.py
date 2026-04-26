@@ -91,6 +91,14 @@ _MODES: Dict[str, Dict[str, Any]] = {
             "defaultMaxPodsPerNode", "default_max_pods_per_node",
             "networkingMode", "networking_mode",
             "podSecurityPolicyConfig", "pod_security_policy_config",
+            # P2-2: Autopilot manages node placement; manual `node_locations`
+            # is rejected by the provider. We strip the snapshot field BEFORE
+            # the LLM sees it so the post-LLM `locations` -> `node_locations`
+            # rename (post_llm_overrides.json google_container_cluster) has
+            # nothing to act on for Autopilot clusters. Standard clusters
+            # keep the field and the rename converts the LLM's hallucinated
+            # `locations` to the correct `node_locations` HCL form.
+            "nodeLocations", "node_locations",
         ],
         # Nested paths to strip (dotted, snake_case; walker handles
         # camelCase automatically). Addons Autopilot manages and the

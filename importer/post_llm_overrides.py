@@ -163,6 +163,32 @@ def _rename_in_block(hcl: str, block_path: str, from_field: str, to_field: str) 
     return hcl, total
 
 
+def _rename_at_top_level(hcl: str, from_field: str, to_field: str) -> Tuple[str, int]:
+    """Rename `from_field` -> `to_field` for resource-body root attributes.
+
+    Counterpart to `_rename_in_block` for the case where the rename
+    target lives DIRECTLY inside the `resource "type" "name" { ... }`
+    declaration, not inside a sub-block. Operates on the entire HCL
+    text. The (?<![A-Za-z0-9_]) lookbehind prevents matching as a
+    suffix of a longer identifier; the (\\s*=) capture restricts the
+    rename to attribute-assignment positions (so we don't accidentally
+    rewrite occurrences inside string values, comments, or the block
+    name of a nested block).
+
+    The mechanism is dispatched in `apply_overrides` when an entry
+    has an empty / missing `block_path`. Caller need not know about
+    this helper -- they just configure the rename in
+    post_llm_overrides.json with `block_path: ""` (or omit the field).
+
+    Surfaced by P2-2: cluster HCL emitted by the LLM uses `locations`
+    (resource-body root attribute) instead of `node_locations`, and
+    the existing block-scoped renamer can't reach root-level fields.
+    """
+    field_pattern = re.compile(rf'(?<![A-Za-z0-9_]){re.escape(from_field)}(\s*=)')
+    new_text, n = field_pattern.subn(f'{to_field}\\1', hcl)
+    return new_text, n
+
+
 def _delete_in_block(hcl: str, block_path: str, field: str) -> Tuple[str, int]:
     """Delete the entire `field = value` line within every occurrence
     of `block_path`. Multi-line string values are out of scope -- LLM
@@ -204,7 +230,10 @@ def apply_overrides(tf_type: str, hcl_text: str) -> Tuple[str, List[str]]:
 
     for rename in rules.get("renames", []):
         try:
-            block_path = rename["block_path"]
+            # block_path is OPTIONAL since P2-2: empty/missing means the
+            # rename targets a resource-body root attribute (no enclosing
+            # nested block). `from` and `to` are required.
+            block_path = rename.get("block_path", "")
             from_field = rename["from"]
             to_field = rename["to"]
         except (KeyError, TypeError) as e:
@@ -215,9 +244,16 @@ def apply_overrides(tf_type: str, hcl_text: str) -> Tuple[str, List[str]]:
                 missing_key=str(e),
             )
             continue
-        hcl_text, n = _rename_in_block(hcl_text, block_path, from_field, to_field)
+        if block_path:
+            hcl_text, n = _rename_in_block(hcl_text, block_path, from_field, to_field)
+            scope_label = f"{block_path}."
+        else:
+            hcl_text, n = _rename_at_top_level(hcl_text, from_field, to_field)
+            scope_label = "<root>."
         if n > 0:
-            corrections.append(f"renamed '{block_path}.{from_field}' -> '{block_path}.{to_field}' ({n}x)")
+            corrections.append(
+                f"renamed '{scope_label}{from_field}' -> '{scope_label}{to_field}' ({n}x)"
+            )
 
     for deletion in rules.get("deletions", []):
         try:
