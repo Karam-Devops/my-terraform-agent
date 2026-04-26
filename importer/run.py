@@ -424,10 +424,22 @@ def _map_asset_to_terraform(selected_asset, project_id, workdir):
     info = config.TF_TYPE_TO_GCLOUD_INFO.get(tf_type)
     import_id_format = info.get("import_id_format") if info else None
 
+    # Extract the parent-cluster name once if this asset is a nested resource.
+    # Same value is consumed in two places:
+    #   1. import_id_format (below) needs `{cluster}` for node pools.
+    #   2. The returned mapping (below-below) needs `mapping["cluster"]` so
+    #      gcp_client.get_resource_details_json can wire it through to the
+    #      `gcloud describe ... --cluster <name>` flag (C5 fix). Without
+    #      step 2 the describe call fails with "Underspecified resource --
+    #      please specify --cluster".
+    parts = selected_asset['name'].split('/')
+    cluster_name = None
+    if tf_type == 'google_container_node_pool' and 'clusters' in parts:
+        cluster_name = parts[parts.index('clusters') + 1]
+
     if not import_id_format:
         import_id = selected_asset['name'].split('/', 2)[-1]
     else:
-        parts = selected_asset['name'].split('/')
         format_vars = {
             'project': project_id, 'name': resource_name,
             'zone': selected_asset.get('location'), 'region': selected_asset.get('location'),
@@ -438,11 +450,11 @@ def _map_asset_to_terraform(selected_asset, project_id, workdir):
             # import_ids like 'project/POC Smoke SA' that terraform import
             # could never resolve.
             format_vars['email'] = resource_name
-        if tf_type == 'google_container_node_pool' and 'clusters' in parts:
-             format_vars['cluster'] = parts[parts.index('clusters') + 1]
+        if cluster_name:
+            format_vars['cluster'] = cluster_name
         import_id = import_id_format.format(**format_vars)
 
-    return {
+    mapping_out = {
         "tf_type": tf_type, "hcl_name": hcl_name_base.replace('-', '_'),
         "resource_name": resource_name, "import_id": import_id,
         "filename": f"{tf_type}_{hcl_name_base.replace('-', '_')}.tf",
@@ -452,6 +464,12 @@ def _map_asset_to_terraform(selected_asset, project_id, workdir):
         # pull it back without extra plumbing through every signature.
         "workdir": workdir,
     }
+    # Persist parent-cluster name only when present, so non-nested resources
+    # don't carry a stray `cluster: None` field that downstream consumers
+    # might confuse with "intentionally cleared".
+    if cluster_name:
+        mapping_out["cluster"] = cluster_name
+    return mapping_out
 
 def _generate_and_save_hcl(mapping, schema, heuristics_kb):
     """Initial HCL generation (Attempt 1) - FIXED PROACTIVE MEMORY"""

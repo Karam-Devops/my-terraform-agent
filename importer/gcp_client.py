@@ -59,13 +59,25 @@ def get_resource_details_json(mapping):
         command_args.extend([info["zone_flag"], mapping["location"]])
     # Symmetric branch for regional resources (compute_subnetwork,
     # compute_address). Without this, gcloud rejects the describe call
-    # with "Underspecified resource — please specify --region". The
+    # with "Underspecified resource -- please specify --region". The
     # config dict already declares region_flag for these types; this
-    # branch wires it through. NOTE: a `cluster_flag` branch is still
-    # missing — google_container_node_pool will hit the same bug class
-    # when it's first imported. Fix together when node_pool is added.
+    # branch wires it through.
     if "region_flag" in info and "location" in mapping:
         command_args.extend([info["region_flag"], mapping["location"]])
+    # Symmetric branch for nested resources whose describe needs a parent
+    # identifier flag. Currently exercised by google_container_node_pool
+    # (`--cluster <name>`); kept generic so future nested types
+    # (e.g. google_dns_record_set inside a managed zone) can opt in by
+    # declaring `cluster_flag` (or an analogous parent_flag) in
+    # TF_TYPE_TO_GCLOUD_INFO and stuffing the parent name onto the
+    # mapping in run.py _map_asset_to_terraform.
+    #
+    # C5 fix: the symmetry note above used to flag this branch as
+    # "still missing"; that gap caused `gcloud container node-pools
+    # describe <pool>` to fail with "Underspecified resource -- please
+    # specify --cluster" the first time a node pool was imported.
+    if "cluster_flag" in info and "cluster" in mapping:
+        command_args.extend([info["cluster_flag"], mapping["cluster"]])
 
     command_args.append("--format=json")
     
