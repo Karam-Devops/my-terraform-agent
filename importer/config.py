@@ -41,6 +41,14 @@ ASSET_TO_TERRAFORM_MAP = {
 
     # Cloud SQL
     "sqladmin.googleapis.com/Instance": "google_sql_database_instance",
+
+    # KMS (P2-3) -- enables CMEK demos: bucket / disk encryption violations
+    # from the Policy engine become "create one of these and reference it"
+    # actionable steps. Crypto keys are nested inside key rings (parent
+    # path segment "keyRings"); see gcp_client.extract_path_segment +
+    # _map_asset_to_terraform for the parent-name extraction.
+    "cloudkms.googleapis.com/KeyRing": "google_kms_key_ring",
+    "cloudkms.googleapis.com/CryptoKey": "google_kms_crypto_key",
 }
 
 # This dictionary now contains the definitive information for describe commands AND import ID formats.
@@ -117,7 +125,31 @@ TF_TYPE_TO_GCLOUD_INFO = {
     "google_sql_database_instance": {
         "describe_command": "sql instances describe",
         "import_id_format": "{project}/{name}" # NEW
-    }
+    },
+
+    # KMS (P2-3) -- KMS uses `--location` (not --zone or --region) because
+    # KMS locations span zonal-style regions ("us-central1"), multi-regions
+    # ("us"), and a special "global" tier. None fit the zone/region picker
+    # in gcp_client._resolve_location_flag, so we declare the third option:
+    # `location_flag` -- always emit `--location <value>` regardless of
+    # location-string shape.
+    "google_kms_key_ring": {
+        "describe_command": "kms keyrings describe",
+        "location_flag": "--location",
+        "import_id_format": "projects/{project}/locations/{location}/keyRings/{name}",
+    },
+    # google_kms_crypto_key is NESTED under a key ring (parent segment
+    # "keyRings"). The keyring name is extracted from the asset path by
+    # run.py _map_asset_to_terraform via gcp_client.extract_path_segment,
+    # threaded onto the mapping as `mapping["keyring"]`, and wired into
+    # `--keyring <name>` by gcp_client.get_resource_details_json. Mirrors
+    # the C5 cluster_flag pattern for google_container_node_pool.
+    "google_kms_crypto_key": {
+        "describe_command": "kms keys describe",
+        "location_flag": "--location",
+        "keyring_flag": "--keyring",
+        "import_id_format": "projects/{project}/locations/{location}/keyRings/{keyring}/cryptoKeys/{name}",
+    },
 }
 
 # --- NEW AND FINAL: GitHub Documentation Path Mapping ---
@@ -133,6 +165,8 @@ TF_TYPE_TO_GITHUB_DOC_PATH = {
     "google_compute_instance_template": "compute_instance_template", # Another slight exception
     "google_container_cluster": "container_cluster",
     "google_container_node_pool": "container_node_pool",
+    "google_kms_key_ring": "kms_key_ring",       # P2-3
+    "google_kms_crypto_key": "kms_crypto_key",   # P2-3
     "google_service_account": "google_service_account", # The special case you found
     "google_storage_bucket": "storage_bucket",
     "google_sql_database_instance": "sql_database_instance",

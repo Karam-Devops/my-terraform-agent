@@ -28,24 +28,32 @@ def _is_zonal_location(location: str) -> bool:
 
 
 def _resolve_location_flag(info: dict, mapping: dict):
-    """Pick the right gcloud --zone / --region flag for this describe.
+    """Pick the right gcloud --zone / --region / --location flag for this describe.
 
-    Resources fall into three groups:
+    Resources fall into four groups:
       * Zonal-only (compute_instance, compute_disk):  declares zone_flag
         only -> always emit --zone <location>.
       * Regional-only (compute_subnetwork, compute_address): declares
         region_flag only -> always emit --region <location>.
       * Dual-mode (google_container_cluster, google_container_node_pool):
-        declares BOTH flags -> pick based on whether `location` looks
-        like a zone or region. Zones get --zone, regions get --region.
+        declares BOTH zone_flag AND region_flag -> pick based on whether
+        `location` looks like a zone or region. Zones get --zone,
+        regions get --region.
+      * Generic-location (P2-3: google_kms_*, where location can be a
+        region OR a multi-region like "us" / "global" that doesn't fit
+        the zone/region heuristic): declares `location_flag` only ->
+        always emit --location <location>. Used when neither the
+        zonal/regional dichotomy nor a multi-mode picker applies.
 
     Returns a list of args to extend command_args with, or [] if no
-    location flag applies (e.g. global resources like networks/buckets).
+    location flag applies (e.g. global resources like networks/buckets
+    or pubsub topics that are project-scoped without a location).
     """
     location = mapping.get("location")
     has_zone = "zone_flag" in info
     has_region = "region_flag" in info
-    if not location or not (has_zone or has_region):
+    has_location = "location_flag" in info
+    if not location or not (has_zone or has_region or has_location):
         return []
     if has_zone and has_region:
         # Dual-mode: pick by location shape.
@@ -53,7 +61,52 @@ def _resolve_location_flag(info: dict, mapping: dict):
         return [flag, location]
     if has_zone:
         return [info["zone_flag"], location]
-    return [info["region_flag"], location]
+    if has_region:
+        return [info["region_flag"], location]
+    return [info["location_flag"], location]
+
+
+def extract_path_segment(asset_path: str, segment_name: str):
+    """Pull the value following `segment_name` from a GCP asset URN path.
+
+    Cloud Asset Inventory exposes resources via paths like::
+
+        //container.googleapis.com/projects/P/zones/Z/clusters/C/nodePools/N
+        //cloudkms.googleapis.com/projects/P/locations/L/keyRings/K/cryptoKeys/X
+
+    For nested resources the importer needs to surface the parent
+    identifier (`C` for the node pool, `K` for the crypto key) onto
+    the mapping dict so gcp_client can wire it into the right
+    --cluster / --keyring flag at describe time. Pre-P2-3 this was
+    open-coded in run.py for the `clusters` segment only; this helper
+    generalises so each new nested type just declares the segment
+    name in config and the run.py mapper picks it up.
+
+    Args:
+        asset_path: the full asset name from
+            `gcloud asset search-all-resources` (slashes intact, no
+            leading/trailing whitespace assumed).
+        segment_name: the URN path segment to look for (e.g.
+            "clusters", "keyRings", "managedZones"). Match is exact;
+            the helper does NOT case-fold.
+
+    Returns:
+        The string immediately AFTER `segment_name` in the path, or
+        None if the segment isn't present (which is the common case
+        for non-nested resource types -- callers must handle None and
+        skip the parent-flag wiring).
+
+    Pure function; no I/O. Suitable for unit tests without gcloud.
+    """
+    if not asset_path or not segment_name:
+        return None
+    parts = asset_path.split("/")
+    if segment_name not in parts:
+        return None
+    idx = parts.index(segment_name)
+    if idx + 1 >= len(parts):
+        return None
+    return parts[idx + 1]
 
 
 def discover_resources_of_type(project_id, asset_type):
@@ -112,13 +165,19 @@ def get_resource_details_json(mapping):
     # "us-central1" rejected by `gcloud container ... describe`).
     command_args.extend(_resolve_location_flag(info, mapping))
 
-    # Parent-identifier flag for nested resources (currently node_pool's
-    # --cluster). Kept generic so future nested types can opt in by
-    # declaring `cluster_flag` (or an analogous parent_flag) in
-    # TF_TYPE_TO_GCLOUD_INFO and stuffing the parent name onto the
-    # mapping in run.py _map_asset_to_terraform (C5 wiring).
-    if "cluster_flag" in info and "cluster" in mapping:
+    # Parent-identifier flag for nested resources. Each nested resource
+    # type adds its own (flag, mapping_key) pair here. The pattern is
+    # always the same: the asset path includes the parent's URN segment
+    # (`/clusters/<name>/`, `/keyRings/<name>/`), run.py's mapper extracts
+    # the parent name into mapping["<key>"] via extract_path_segment(),
+    # and the describe call appends `<flag> <name>`. To add another
+    # nested type (DNS records inside a managed zone, BigQuery tables
+    # inside a dataset, etc.), follow the same three-step pattern -- no
+    # generic abstraction needed until we have 4+ instances of it.
+    if "cluster_flag" in info and "cluster" in mapping:  # C5: node_pool
         command_args.extend([info["cluster_flag"], mapping["cluster"]])
+    if "keyring_flag" in info and "keyring" in mapping:  # P2-3: crypto_key
+        command_args.extend([info["keyring_flag"], mapping["keyring"]])
 
     command_args.append("--format=json")
     

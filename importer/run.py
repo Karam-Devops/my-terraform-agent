@@ -425,18 +425,24 @@ def _map_asset_to_terraform(selected_asset, project_id, workdir):
     info = config.TF_TYPE_TO_GCLOUD_INFO.get(tf_type)
     import_id_format = info.get("import_id_format") if info else None
 
-    # Extract the parent-cluster name once if this asset is a nested resource.
-    # Same value is consumed in two places:
-    #   1. import_id_format (below) needs `{cluster}` for node pools.
-    #   2. The returned mapping (below-below) needs `mapping["cluster"]` so
+    # Extract parent-identifier names once if this asset is a nested resource.
+    # Each parent is consumed in two places:
+    #   1. import_id_format (below) needs the placeholder filled
+    #      (`{cluster}` for node pools, `{keyring}` for crypto keys).
+    #   2. The returned mapping (below-below) needs `mapping["<key>"]` so
     #      gcp_client.get_resource_details_json can wire it through to the
-    #      `gcloud describe ... --cluster <name>` flag (C5 fix). Without
-    #      step 2 the describe call fails with "Underspecified resource --
-    #      please specify --cluster".
-    parts = selected_asset['name'].split('/')
-    cluster_name = None
-    if tf_type == 'google_container_node_pool' and 'clusters' in parts:
-        cluster_name = parts[parts.index('clusters') + 1]
+    #      right --cluster / --keyring flag at describe time. Without
+    #      step 2 the describe call fails with "Underspecified resource".
+    #
+    # Uses gcp_client.extract_path_segment (P2-3) so each new nested type
+    # is a one-line addition here, not an open-coded `parts.index()` lookup.
+    asset_path = selected_asset['name']
+    cluster_name = None  # C5: google_container_node_pool
+    keyring_name = None  # P2-3: google_kms_crypto_key
+    if tf_type == 'google_container_node_pool':
+        cluster_name = gcp_client.extract_path_segment(asset_path, 'clusters')
+    elif tf_type == 'google_kms_crypto_key':
+        keyring_name = gcp_client.extract_path_segment(asset_path, 'keyRings')
 
     if not import_id_format:
         import_id = selected_asset['name'].split('/', 2)[-1]
@@ -444,6 +450,7 @@ def _map_asset_to_terraform(selected_asset, project_id, workdir):
         format_vars = {
             'project': project_id, 'name': resource_name,
             'zone': selected_asset.get('location'), 'region': selected_asset.get('location'),
+            'location': selected_asset.get('location'),
         }
         if tf_type == 'google_service_account':
             # Use the ACTUAL email (already resolved above into resource_name),
@@ -453,6 +460,8 @@ def _map_asset_to_terraform(selected_asset, project_id, workdir):
             format_vars['email'] = resource_name
         if cluster_name:
             format_vars['cluster'] = cluster_name
+        if keyring_name:
+            format_vars['keyring'] = keyring_name
         import_id = import_id_format.format(**format_vars)
 
     mapping_out = {
@@ -465,11 +474,13 @@ def _map_asset_to_terraform(selected_asset, project_id, workdir):
         # pull it back without extra plumbing through every signature.
         "workdir": workdir,
     }
-    # Persist parent-cluster name only when present, so non-nested resources
-    # don't carry a stray `cluster: None` field that downstream consumers
-    # might confuse with "intentionally cleared".
+    # Persist parent-identifier names only when present, so non-nested
+    # resources don't carry stray None-valued fields that downstream
+    # consumers might confuse with "intentionally cleared".
     if cluster_name:
         mapping_out["cluster"] = cluster_name
+    if keyring_name:
+        mapping_out["keyring"] = keyring_name
     return mapping_out
 
 def _generate_and_save_hcl(mapping, schema, heuristics_kb):

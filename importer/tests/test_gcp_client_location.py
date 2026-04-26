@@ -15,7 +15,11 @@ from __future__ import annotations
 
 import unittest
 
-from importer.gcp_client import _is_zonal_location, _resolve_location_flag
+from importer.gcp_client import (
+    _is_zonal_location,
+    _resolve_location_flag,
+    extract_path_segment,
+)
 
 
 class IsZonalLocationTests(unittest.TestCase):
@@ -118,6 +122,83 @@ class ResolveLocationFlagTests(unittest.TestCase):
         self.assertEqual(_resolve_location_flag(info, {}), [])
         self.assertEqual(_resolve_location_flag(info, {"location": None}), [])
         self.assertEqual(_resolve_location_flag(info, {"location": ""}), [])
+
+    def test_location_flag_only_used_for_generic_locations(self):
+        """P2-3: KMS-style configs declare `location_flag` only and the
+        location can be a region OR multi-region OR 'global' -- none of
+        which fit the zone/region picker. The picker emits the configured
+        flag with the location verbatim."""
+        info = {"location_flag": "--location"}
+        self.assertEqual(
+            _resolve_location_flag(info, {"location": "us-east1"}),
+            ["--location", "us-east1"],
+        )
+        # Multi-region
+        self.assertEqual(
+            _resolve_location_flag(info, {"location": "us"}),
+            ["--location", "us"],
+        )
+        # 'global' tier
+        self.assertEqual(
+            _resolve_location_flag(info, {"location": "global"}),
+            ["--location", "global"],
+        )
+
+    def test_location_flag_no_op_without_location(self):
+        info = {"location_flag": "--location"}
+        self.assertEqual(_resolve_location_flag(info, {}), [])
+        self.assertEqual(_resolve_location_flag(info, {"location": None}), [])
+
+
+class ExtractPathSegmentTests(unittest.TestCase):
+    """Pin the asset-URN path segment extractor (P2-3).
+
+    The helper drives parent-identifier discovery for nested resources
+    (cluster name for node_pool, keyring name for crypto_key, etc.).
+    Reliability matters because a wrong extraction silently produces
+    an unresolvable describe-call argument that fails late.
+    """
+
+    def test_extracts_cluster_segment_from_node_pool_path(self):
+        """Exercises the C5 case via the new generalised helper."""
+        path = "//container.googleapis.com/projects/p1/zones/us-central1-a/clusters/my-cluster/nodePools/default-pool"
+        self.assertEqual(extract_path_segment(path, "clusters"), "my-cluster")
+
+    def test_extracts_keyring_segment_from_crypto_key_path(self):
+        """Exercises the new P2-3 case for KMS crypto keys."""
+        path = "//cloudkms.googleapis.com/projects/p1/locations/us-east1/keyRings/my-keyring/cryptoKeys/my-key"
+        self.assertEqual(extract_path_segment(path, "keyRings"), "my-keyring")
+
+    def test_extracts_for_regional_path(self):
+        """Regional paths use `/locations/<region>/` instead of `/zones/<zone>/`."""
+        path = "//container.googleapis.com/projects/p1/locations/us-central1/clusters/regional-cluster/nodePools/default"
+        self.assertEqual(extract_path_segment(path, "clusters"), "regional-cluster")
+
+    def test_returns_none_when_segment_absent(self):
+        """Non-nested resource path: no parent segment -> None."""
+        path = "//compute.googleapis.com/projects/p1/zones/us-central1-a/instances/my-vm"
+        self.assertIsNone(extract_path_segment(path, "clusters"))
+        self.assertIsNone(extract_path_segment(path, "keyRings"))
+
+    def test_returns_none_when_segment_at_path_end(self):
+        """Defensive: malformed path with the segment as the last component
+        (no value following) returns None rather than IndexError."""
+        path = "//container.googleapis.com/projects/p1/clusters"
+        self.assertIsNone(extract_path_segment(path, "clusters"))
+
+    def test_returns_none_for_empty_inputs(self):
+        self.assertIsNone(extract_path_segment("", "clusters"))
+        self.assertIsNone(extract_path_segment(None, "clusters"))  # type: ignore[arg-type]
+        self.assertIsNone(extract_path_segment("//x/y/z", ""))
+
+    def test_segment_match_is_case_sensitive(self):
+        """`keyRings` (camelCase from API) != `keyrings` (lowercase). Per
+        GCP's URN convention the segment is always camelCase. We don't
+        case-fold so a typo in config produces a clean None, not a silent
+        match against the wrong segment."""
+        path = "//cloudkms.googleapis.com/projects/p1/locations/us/keyRings/k/cryptoKeys/x"
+        self.assertEqual(extract_path_segment(path, "keyRings"), "k")
+        self.assertIsNone(extract_path_segment(path, "keyrings"))
 
 
 if __name__ == "__main__":
