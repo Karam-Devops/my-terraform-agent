@@ -141,6 +141,146 @@ importer with them.
 
 **Effort.** Half a day. **Phase 1.**
 
+### CC-5. Per-resource customer-facing outcome contract — surfaced by Phase 1 SMOKE
+
+**Today.** `WorkflowResult` (C3, importer) carries only counts:
+`{selected, imported, failed, skipped, duration_s}`. The CLI's
+interactive HITL menu (`[1] snippet | [2] AI auto-correct | [3] skip`)
+is operator-grade: customers should never see options that say
+"provide an HCL snippet" — they don't write HCL, that's what they
+pay us for. The CLI menu is fine for our internal use; the SaaS UI
+needs a different surface area entirely.
+
+The Phase 1 SMOKE made this concrete: 11 of 12 resources landed in
+the `failed` bucket due to LLM-quality hallucinations on cluster
+HCL + sibling-cascade. A customer seeing `failed=11` with no
+per-resource explanation has no path forward. They need:
+
+  - human-readable resource label ("VM 'poc-vm'", not
+    `google_compute_instance.poc_vm`)
+  - plain-English failure reason ("config has fields that don't
+    map cleanly", not raw terraform "Missing required argument")
+  - structured failure CATEGORY so the UI can render appropriate
+    actions per category
+  - actionable next-step buttons (not OMIT/IGNORE/SNIPPET commands)
+
+**Spec.** Extend `WorkflowResult` with a per-resource list:
+
+```python
+@dataclass(frozen=True)
+class ResourceOutcome:
+    name: str                       # "poc-vm"
+    type: str                       # "google_compute_instance"
+    display_type: str               # "VM"  (customer-facing label)
+    status: Literal["imported", "failed", "skipped"]
+    failure_reason: Optional[str]   # enum below
+    failure_message: str            # plain-English
+    technical_details: str          # raw error (collapsible in UI)
+    suggested_actions: list[str]    # ["auto_fix", "skip", "import_anyway"]
+
+# Failure reason enum (initial set)
+TRANSIENT_LLM_HALLUCINATION       # transient -> auto-correct, hidden from customer
+OVERLAP_WITH_OTHER_RESOURCE        # boot disk vs VM, default-pool vs cluster
+PROVIDER_UNSUPPORTED               # not in TF provider
+MANAGED_BY_CLOUD_PROVIDER          # Autopilot pools etc.
+PERMISSION_DENIED                  # gcloud 403
+UPSTREAM_TIMEOUT                   # from C2 UpstreamTimeout
+UNKNOWN                            # catch-all + technical_details
+```
+
+In `WorkflowResult`: add `resources: list[ResourceOutcome]` alongside
+the existing counts. Counts remain for dashboard rollups; per-resource
+list drives UI rendering.
+
+Backend: tag failures in `_generate_and_save_hcl` and the per-resource
+plan-verify loop with the appropriate `failure_reason`. Build the
+`display_type` via a small `IMPORTER_TYPE_TO_DISPLAY` map.
+
+UI: Codify tab renders the three buckets (imported / issues /
+skipped) with the per-resource detail; expand-on-click for
+`technical_details`; per-row action buttons keyed off
+`suggested_actions`.
+
+**Auto-correct as default for SaaS.** A separate but related
+deliverable: in the SaaS path, run AI auto-correct AUTOMATICALLY
+(silently, up to MAX_LLM_RETRIES) BEFORE surfacing failures.
+Customer only sees a failure when the auto-correct loop genuinely
+exhausts retries. Keeps the UI clean of transient
+LLM-hallucination noise that the existing self-correction loop
+fixes anyway.
+
+**Effort.** 1 day backend + Phase 6 UI rendering. Backend lands
+**Phase 5** (when we add the API layer Streamlit calls); UI lands
+**Phase 6**.
+
+### CC-6. Translator multi-file batch selection — surfaced by Phase 1 SMOKE
+
+**Today.** Translator's CLI is single-file: prompts for a
+`source_file_path` (`imported\dev-proj-470211\google_storage_bucket_*.tf`,
+operator types the full path). For the SaaS this is wrong on three
+axes:
+
+  1. Customers shouldn't type paths.
+  2. Customers don't know the on-disk filenames.
+  3. Translating one file at a time defeats the bulk import they
+     just did.
+
+The Importer already has the right pattern (Stage 2 selection menu
+with auto-discovered resources, comma-separated multi-select). The
+Translator should mirror it.
+
+**Spec.** Two layers:
+
+  - **Backend (file discovery + batch processing):**
+    `translator/run.py` adds a `discover_translatable_files(workdir)`
+    helper that walks `imported/<project>/`, parses each `.tf` to
+    extract `(resource_type, resource_name)`, returns a sorted list
+    of `(file_path, resource_type, resource_name, display_label)`
+    tuples. `run_translation_pipeline` becomes
+    `run_translation_batch(target_cloud, source_paths)` returning a
+    `TranslationResult` dataclass mirroring `WorkflowResult` from C3
+    (per-file outcomes + counts + duration).
+
+    Per-file failure isolation (Bug-B-style from C5.1): one file's
+    LLM error must not kill the batch. Each file gets its own
+    try/except wrapping the 3-stage pipeline.
+
+  - **UI (Phase 6 Streamlit Translator tab):** Auto-discover
+    files from the selected workdir, render a checkbox grid
+    (`[ ] VM · poc-vm`, `[ ] Bucket · poc-smoke-bucket`, ...).
+    Plus a target-cloud dropdown (AWS / Azure). Submit triggers
+    the batch. Per-file progress streams via WebSocket / SSE.
+
+**Effort.** 0.5 day backend + Phase 6 UI rendering. Backend lands
+**Phase 3** (rolls into Translator hardening); UI lands **Phase 6**.
+
+### CC-7. LangChain dependency migration before LangChain 4.0 ships
+
+**Today.** `llm_provider.py:35` uses `langchain_google_vertexai.ChatVertexAI`,
+which emits this deprecation warning on every translator
+invocation:
+
+```
+LangChainDeprecationWarning: The class `ChatVertexAI` was deprecated
+in LangChain 3.2.0 and will be removed in 4.0.0. ... use
+`langchain-google-genai` instead.
+```
+
+When LangChain ships 4.0 (no announced date but typically every
+6-12 months for a major), every LLM call breaks. Surfaced by the
+Phase 1 SMOKE Translator run.
+
+**Fix.** Migrate `llm_provider.py` from
+`langchain_google_vertexai.ChatVertexAI` to
+`langchain_google_genai.ChatGoogleGenerativeAI`. Verify the
+`temperature` / `max_tokens` / `model` arg shapes match (they
+should, per LangChain's published migration guide). Run the
+translator test suite + the Phase 1 SMOKE again to confirm
+output quality unchanged.
+
+**Effort.** Half a day. **Phase 3** (rolls into Translator
+hardening — same module touch).
+
 ---
 
 ## Engine-specific work items
@@ -211,15 +351,30 @@ importer with them.
 | CC-4 structured WorkflowResult | Phase 1 | 0.5 day |
 | Importer engine-specific WARN cluster | Phase 1 | 0.5 day |
 | Translator cold-start + tenant params + collisions | Phase 3 | 1 day |
+| **CC-6 Translator multi-file batch selection** (backend) | **Phase 3** | **0.5 day** |
+| **CC-7 LangChain dep migration** | **Phase 3** | **0.5 day** |
 | CC-2 subprocess timeouts (detector half) | Phase 4 | 0.5 day |
 | Detector engine-specific WARN cluster | Phase 4 | 0.5 day |
 | Policy violation cap | Phase 4 | 0.25 day |
 | **CG-1 unmanaged-resource tracking (Drift engine)** | **Phase 4** | **1.5 days** |
+| **CG-2 Detector + Policy coverage parity** | **Phase 4** | **2 days** |
 | CC-3 cold-start preflight | Phase 5 | 1 day |
+| **CC-5 ResourceOutcome backend** | **Phase 5** | **1 day** |
+| **CC-5 + CC-6 UI rendering** | **Phase 6** | **(folded into Phase 6 UI work)** |
 
-**Total additional effort folded in:** ~6.5 days (5 days hygiene
-+ 1.5 days CG-1), distributed across phases that were already going
-to touch each engine. No standalone "fix the audit findings" phase.
+**Total additional effort folded in:** ~10.5 days (5 days original
+hygiene + 1.5 days CG-1 + 4 days surfaced by Phase 1 SMOKE: CC-5
+backend, CC-6 backend, CC-7 dep migration, CG-2 coverage parity),
+distributed across phases that were already going to touch each
+engine. No standalone "fix the audit findings" phase.
+
+**Items surfaced by Phase 1 SMOKE (2026-04-26):** CC-5, CC-6, CC-7,
+CG-2. The smoke against `dev-proj-470211` exercised all 4 engines
+end-to-end and made several latent design issues concrete:
+customer-facing failure rendering needs structure (CC-5), Translator's
+single-file CLI doesn't translate to a SaaS UX (CC-6), LangChain
+deprecation will break us when 4.0 ships (CC-7), Detector + Policy
+cover only 2/11 resource types vs the importer (CG-2).
 
 ---
 
@@ -285,6 +440,69 @@ return type + threading through the UI.
 Firefly will ask "show me unmanaged resources" within the first 5
 minutes. Without CG-1, the answer is "run a fresh import" — which
 is the manual workflow they're paying us to replace.
+
+### CG-2. Detector + Policy resource-coverage parity with Importer — surfaced by Phase 1 SMOKE
+
+**Today.** Detector and Policy share a single `IN_SCOPE_TF_TYPES`
+filter (defined in `detector/config.py`) that currently lists only
+two types:
+
+  - `google_compute_instance`
+  - `google_storage_bucket`
+
+The Phase 1 SMOKE imported 11 resource types into state but
+Detector/Policy could only drift-check / compliance-scan 2 of them
+(`2 in scope, 9 out of scope` was printed verbatim). The other 9
+(disks, firewall, network, subnetwork, clusters, node pool, SA)
+were silently skipped — no drift report, no policy evaluation, no
+indication to the customer that they're flying blind on those
+types.
+
+This is the most embarrassing gap a vendor demo would surface: a
+customer scans their project, the importer finds 30 resources, and
+the drift / policy report only covers 2 of them. The rest are
+invisible.
+
+**Spec.** Two parts:
+
+  1. Expand `IN_SCOPE_TF_TYPES` to match `ASSET_TO_TERRAFORM_MAP`
+     (importer/config.py). Every type the importer can ingest
+     should also be drift-check-able and policy-scan-able.
+
+  2. For each newly-in-scope type, add at minimum:
+     - **Detector**: a `cloud_snapshot` fetcher (most are already
+       reachable via the importer's existing `gcp_client.describe`
+       wrappers — needs a thin reuse layer).
+     - **Policy**: at least one Rego rule per type — start with
+       `mandatory_labels` (the common policy already runs on every
+       type) plus 1-2 type-specific rules where the security
+       community has a strong recommendation
+       (e.g. `gke_cluster_private_nodes`, `compute_disk_encryption`,
+       `firewall_no_open_ssh`).
+
+  3. For types where drift detection requires extra logic
+     (composite resources like `google_container_cluster` with
+     nested node-pool configs), tag those as "drift-aware" vs
+     "drift-stub" so the UI can show "we monitor this type, but
+     the drift checker is conservative — false negatives possible".
+
+**Why this is Phase 4, not earlier.** Detector hygiene fixes (CC-2
+detector half, broad-except tighten, _state_path fallback) and CG-1
+unmanaged tracking should land first. CG-2 sits on top of a clean
+detector — adding more scope to a buggy engine multiplies the bug
+surface.
+
+**Estimate.** 2 days:
+
+  - 0.5 day — extend IN_SCOPE_TF_TYPES + audit each type's
+    cloud_snapshot reachability
+  - 0.5 day — fill gaps with thin reuse-from-importer wrappers
+  - 1 day — write 1-2 Rego rules per type (8-10 new rules), test
+
+**Why this matters for the demo.** Coupled with CG-1 (unmanaged
+tracking), CG-2 is what makes the Drift + Policy engines actually
+useful. Today they're a tech demo on 2 resource types. After
+CG-2 they're production-grade across the importer's whole footprint.
 
 ---
 
