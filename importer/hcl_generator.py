@@ -5,6 +5,7 @@ from common.logging import get_logger
 from .. import llm_provider
 from . import config
 from . import post_llm_overrides
+from . import post_llm_validation
 from .schema_prompt import build_schema_summary
 
 _log = get_logger(__name__)
@@ -29,6 +30,15 @@ def generate_hcl_from_json(resource_json_str, tf_type, hcl_name, attempt, schema
     system_prompt = (
         "You are a precise Terraform HCL code generator. "
         "Your output must be a single, raw HCL resource block and nothing else.\n"
+        "\n"
+        "GLOBAL RULE - DO NOT EMIT EMPTY BLOCKS:\n"
+        "Never emit `block_name {}` (a block with no fields). The Terraform\n"
+        "provider rejects empty blocks for any block whose schema declares\n"
+        "required inner fields, and the importer's post-LLM validator drops\n"
+        "them after the fact. If a block in the input JSON has fields you\n"
+        "cannot map to concrete values, OMIT THE BLOCK ENTIRELY rather than\n"
+        "emitting an empty version. Only emit a block when you have at least\n"
+        "one CONCRETE inner field value to write into it.\n"
     )
 
     is_surgical_mode = False
@@ -245,6 +255,23 @@ def generate_hcl_from_json(resource_json_str, tf_type, hcl_name, attempt, schema
                 "post_llm_correction_applied",
                 tf_type=tf_type,
                 description=desc,
+            )
+
+        # P2-1: schema-driven empty-block hallucination scrubber. Catches
+        # `pod_cidr_overprovision_config {}`, `client_certificate_config {}`,
+        # `pubsub {}`, `advanced_datapath_observability_config {}` and the
+        # whole class of "block emitted with no inner fields when schema
+        # requires them". Pure post-pass; fail-open on oracle errors.
+        cleaned_hcl, dropped_empty_blocks = post_llm_validation.drop_required_field_empty_blocks(
+            cleaned_hcl, tf_type,
+        )
+        for block_name in dropped_empty_blocks:
+            _log.info(
+                "post_llm_empty_block_dropped",
+                tf_type=tf_type,
+                hcl_name=hcl_name,
+                block_name=block_name,
+                reason="schema_requires_inner_field_not_provided",
             )
 
         if f'resource "{tf_type}" "{hcl_name}"' not in cleaned_hcl:
