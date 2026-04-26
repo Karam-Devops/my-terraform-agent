@@ -54,6 +54,10 @@ import os
 import re
 from typing import List, Tuple
 
+from common.logging import get_logger
+
+_log = get_logger(__name__)
+
 _OVERRIDES_FILE = os.path.join(os.path.dirname(__file__), "post_llm_overrides.json")
 _cached_overrides = None
 
@@ -72,7 +76,15 @@ def _load_overrides() -> dict:
         with open(_OVERRIDES_FILE, "r", encoding="utf-8") as f:
             _cached_overrides = json.load(f)
     except (IOError, json.JSONDecodeError) as e:
-        print(f"[POST-LLM] Failed to load {_OVERRIDES_FILE}: {e}. Continuing with no overrides.")
+        # Fail-open: importer continues with the LLM's raw HCL; the
+        # self-correction loop catches any bug the overrides would have
+        # masked. See module docstring "Failure mode" section.
+        _log.warning(
+            "post_llm_overrides_load_failed",
+            path=_OVERRIDES_FILE,
+            error=str(e),
+            fallback="no_overrides_applied",
+        )
         _cached_overrides = {}
     return _cached_overrides
 
@@ -196,7 +208,12 @@ def apply_overrides(tf_type: str, hcl_text: str) -> Tuple[str, List[str]]:
             from_field = rename["from"]
             to_field = rename["to"]
         except (KeyError, TypeError) as e:
-            print(f"[POST-LLM] Malformed rename entry in {tf_type} (missing {e}); skipped.")
+            _log.warning(
+                "post_llm_override_malformed",
+                kind="rename",
+                tf_type=tf_type,
+                missing_key=str(e),
+            )
             continue
         hcl_text, n = _rename_in_block(hcl_text, block_path, from_field, to_field)
         if n > 0:
@@ -207,7 +224,12 @@ def apply_overrides(tf_type: str, hcl_text: str) -> Tuple[str, List[str]]:
             block_path = deletion["block_path"]
             field = deletion["field"]
         except (KeyError, TypeError) as e:
-            print(f"[POST-LLM] Malformed deletion entry in {tf_type} (missing {e}); skipped.")
+            _log.warning(
+                "post_llm_override_malformed",
+                kind="deletion",
+                tf_type=tf_type,
+                missing_key=str(e),
+            )
             continue
         hcl_text, n = _delete_in_block(hcl_text, block_path, field)
         if n > 0:

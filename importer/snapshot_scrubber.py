@@ -29,7 +29,11 @@ this and can clean up anything we missed.
 import json
 from typing import Any, List, Tuple
 
+from common.logging import get_logger
+
 from . import schema_oracle
+
+_log = get_logger(__name__)
 
 
 # ---------------------------------------------------------------------------
@@ -261,7 +265,11 @@ def filter_provider_dropped_paths(resource_json_str: str) -> Tuple[str, List[str
             parts = path.split(".")
             modified.extend(_strip_one_path(data, parts, trail=""))
     except Exception as e:  # noqa: BLE001 - fail open
-        print(f"   - WARN: provider-dropped-paths filter failed, leaving JSON untouched ({e})")
+        _log.warning(
+            "snapshot_scrubber_provider_dropped_filter_failed",
+            error=str(e),
+            fallback="returning_input_unchanged",
+        )
         return resource_json_str, []
 
     if not modified:
@@ -410,7 +418,12 @@ def auto_scrub_cloud_snapshot(
     try:
         oracle = schema_oracle.get_oracle()
     except Exception as e:  # noqa: BLE001 - intentional broad catch, fail open
-        print(f"   - WARN: schema oracle unavailable, skipping auto-scrub ({e})")
+        _log.warning(
+            "snapshot_scrubber_oracle_unavailable",
+            tf_type=tf_type,
+            error=str(e),
+            fallback="skipping_auto_scrub",
+        )
         return resource_json_str, []
 
     try:
@@ -437,7 +450,12 @@ def auto_scrub_cloud_snapshot(
             return resource_json_str, []
         return json.dumps(data, indent=2), all_modified
     except Exception as e:  # noqa: BLE001
-        print(f"   - WARN: auto-scrub failed for {tf_type}, leaving JSON untouched ({e})")
+        _log.warning(
+            "snapshot_scrubber_auto_scrub_failed",
+            tf_type=tf_type,
+            error=str(e),
+            fallback="returning_input_unchanged",
+        )
         return resource_json_str, []
 
 

@@ -35,6 +35,10 @@ import json
 import os
 import sys
 
+from common.logging import get_logger
+
+_log = get_logger(__name__)
+
 KB_DIR = os.path.join(os.path.dirname(__file__), 'knowledge_base')
 
 
@@ -64,35 +68,59 @@ def _attempt_bootstrap(resource_type: str) -> bool:
         import build_kb
         from importer import schema_oracle
 
-        print(f"   - [BOOTSTRAP] KB miss for '{resource_type}'. Generating from `terraform providers schema -json`...")
+        _log.info(
+            "kb_bootstrap_start",
+            resource_type=resource_type,
+            source="terraform_providers_schema",
+        )
         oracle = schema_oracle.get_oracle()
         doc = build_kb.build_one(resource_type, oracle)
         out_path = build_kb.write_one(resource_type, doc)
         args_n = len(doc.get("arguments", []))
         paths_n = len(doc.get("paths", {}))
-        print(f"   - [BOOTSTRAP] OK: {out_path} ({args_n} args, {paths_n} paths)")
+        _log.info(
+            "kb_bootstrap_ok",
+            resource_type=resource_type,
+            path=out_path,
+            arguments=args_n,
+            paths=paths_n,
+        )
         return True
 
     except KeyError as e:
         # Resource type is not in the loaded provider schema — most
         # likely a typo in ASSET_TO_TERRAFORM_MAP, or a resource type
         # from a provider we don't have installed.
-        print(f"   - [BOOTSTRAP] skipped: {e}")
+        _log.warning(
+            "kb_bootstrap_skipped",
+            resource_type=resource_type,
+            reason="not_in_provider_schema",
+            error=str(e),
+        )
         return False
 
     except RuntimeError as e:
         # schema_oracle raises this when `.terraform` isn't initialised
         # OR the terraform binary can't be located. Both have actionable
         # remediation in the error message itself.
-        print(f"   - [BOOTSTRAP] failed: {e}")
-        print("      Falling back to no-context mode for this resource.")
+        _log.warning(
+            "kb_bootstrap_failed",
+            resource_type=resource_type,
+            error=str(e),
+            fallback="no_context_mode",
+        )
         return False
 
     except Exception as e:
         # Catch-all so a bootstrap bug never crashes the importer.
         # Importer continues in degraded mode; user sees the error.
-        print(f"   - [BOOTSTRAP] unexpected error ({type(e).__name__}): {e}")
-        print("      Falling back to no-context mode for this resource.")
+        _log.error(
+            "kb_bootstrap_unexpected_error",
+            resource_type=resource_type,
+            error_type=type(e).__name__,
+            error=str(e),
+            fallback="no_context_mode",
+        )
         return False
 
 
@@ -107,17 +135,29 @@ def get_schema_for_resource(resource_type):
     documentation context).
     """
     file_path = os.path.join(KB_DIR, f"{resource_type}.json")
-    print(f"[KB] Loading schema from {file_path}")
+    # DEBUG-level: this fires once per selected resource per workflow,
+    # would dominate log volume at INFO. Operators rarely care which
+    # cached schema file was loaded; they only care when load FAILS.
+    _log.debug("kb_load_start", resource_type=resource_type, path=file_path)
 
     # Bootstrap path: file missing -> try to generate it, then re-check.
     # We don't call _attempt_bootstrap unconditionally on every load
     # because the happy-path cost (a single os.path.exists) should stay
     # zero-network, zero-subprocess.
     if not os.path.exists(file_path):
-        print("   - [KB] Schema file not found.")
+        _log.info(
+            "kb_cache_miss",
+            resource_type=resource_type,
+            path=file_path,
+            next="attempting_bootstrap",
+        )
         bootstrapped = _attempt_bootstrap(resource_type)
         if not bootstrapped or not os.path.exists(file_path):
-            print("   - [KB] Proceeding without documentation context.")
+            _log.warning(
+                "kb_unavailable",
+                resource_type=resource_type,
+                fallback="no_context_mode",
+            )
             return None
         # Fall through to the normal load path with the freshly
         # written file.
@@ -125,8 +165,13 @@ def get_schema_for_resource(resource_type):
     try:
         with open(file_path, "r", encoding="utf-8") as f:
             schema_data = json.load(f)
-            print("   - [KB] Successfully loaded schema.")
+            _log.debug("kb_load_ok", resource_type=resource_type)
             return schema_data
     except (IOError, json.JSONDecodeError) as e:
-        print(f"   - [KB] Error reading schema file: {e}")
+        _log.error(
+            "kb_load_failed",
+            resource_type=resource_type,
+            path=file_path,
+            error=str(e),
+        )
         return None

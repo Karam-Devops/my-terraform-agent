@@ -1,5 +1,6 @@
 # my-terraform-agent/importer/run.py
 
+import contextvars
 import os
 import sys
 import json
@@ -43,11 +44,11 @@ _log = get_logger(__name__)
 # one-shot data migration).
 
 # IGNORE_LIST cumulative state (TODO #8) ----------------------------------
-# Per-run cumulative ignore set keyed by .tf filename. Once a field is added
-# to a resource's `lifecycle.ignore_changes` from ANY source (heuristic,
-# schema-derived auto-ignore, manual operator teach, error-DB lookup), it
-# stays in the set for every subsequent regen cycle of that file within
-# the same workflow run.
+# Per-WORKFLOW cumulative ignore set keyed by .tf filename. Once a field
+# is added to a resource's `lifecycle.ignore_changes` from ANY source
+# (heuristic, schema-derived auto-ignore, manual operator teach,
+# error-DB lookup), it stays in the set for every subsequent regen cycle
+# of that file within the same workflow run.
 #
 # Why this exists: before this layer, fields_to_ignore was rebuilt from
 # scratch in three different call sites and each one consulted a different
@@ -57,10 +58,57 @@ _log = get_logger(__name__)
 # re-surfaced mid-run. A monotonically-growing per-file set fixes that
 # class of bug without each call site having to remember every source.
 #
-# Cleared at the top of run_workflow() so consecutive workflow invocations
-# in the same Python process (relevant once the importer is driven from
-# Streamlit) don't carry stale state across user sessions.
-_CUMULATIVE_IGNORES_PER_FILE: dict = {}
+# Per-workflow scoping (C4): wrapped in a contextvars.ContextVar so two
+# concurrent run_workflow() invocations in the SAME process — the
+# Streamlit-on-Cloud-Run shape — get independent dicts. Plain
+# `_CUMULATIVE_IGNORES_PER_FILE: dict = {}` at module scope (the C3
+# state) leaked between concurrent tenant sessions: tenant A's
+# ignore-set for `google_compute_instance.foo` would seed tenant B's
+# regen of `google_compute_instance.bar` if they shared a filename
+# template (and they do, by design). The ContextVar gives us:
+#
+#   * Thread isolation: Streamlit's request thread pool each gets its
+#     own dict (Python contextvars are per-thread by default).
+#   * Async isolation: future asyncio.run() callers get task-local
+#     state for free, no rewrite required.
+#   * Auto-cleanup if the workflow raises mid-flight: the next call
+#     re-initialises via `_get_cumulative_ignores()` because the
+#     previous context is gone.
+#
+# We default to `None` (not `{}`) so the lazy `setdefault({})` makes the
+# "fresh ContextVar" case observable in tests; assigning a default dict
+# would silently share that dict across the very contexts we are trying
+# to isolate.
+_CUMULATIVE_IGNORES_VAR: contextvars.ContextVar = contextvars.ContextVar(
+    "importer_cumulative_ignores", default=None,
+)
+
+
+def _get_cumulative_ignores() -> dict:
+    """Return the current workflow's per-filename ignore-set dict.
+
+    Lazily initialises a fresh dict on first access in this context,
+    binding it into the ContextVar so subsequent calls in the same
+    workflow share state (which is the whole point of the cumulative
+    set -- see _compute_ignore_set).
+    """
+    d = _CUMULATIVE_IGNORES_VAR.get()
+    if d is None:
+        d = {}
+        _CUMULATIVE_IGNORES_VAR.set(d)
+    return d
+
+
+def _reset_cumulative_ignores() -> None:
+    """Clear cumulative state at the start of a workflow.
+
+    Called once at the top of run_workflow(). With the ContextVar
+    scoping above, this is belt-and-braces -- a fresh context already
+    starts clean -- but keeping the explicit reset makes the
+    invariant visible in run_workflow() and survives any future
+    refactor that makes a workflow share a context with its caller.
+    """
+    _CUMULATIVE_IGNORES_VAR.set({})
 
 
 def _compute_ignore_set(
@@ -90,11 +138,14 @@ def _compute_ignore_set(
     on `ignore_changes = [terraform_labels]` because there's no configured
     value to compare with.
 
-    Side effect: mutates _CUMULATIVE_IGNORES_PER_FILE[mapping['filename']]
-    so the next cycle starts from the union, not from scratch.
+    Side effect: mutates the per-workflow ContextVar dict at key
+    mapping['filename'] so the next cycle starts from the union, not
+    from scratch. Per-workflow scoping (not per-process) means
+    concurrent Streamlit sessions don't bleed state into each other.
     """
     file_key = mapping['filename']
-    cumulative = _CUMULATIVE_IGNORES_PER_FILE.setdefault(file_key, set())
+    cumulative_per_file = _get_cumulative_ignores()
+    cumulative = cumulative_per_file.setdefault(file_key, set())
     before = set(cumulative)
 
     # 1. Persistent heuristics IGNORE entries for this tf_type.
@@ -545,7 +596,12 @@ def _generate_and_save_hcl(mapping, schema, heuristics_kb):
         out_path = os.path.join(mapping["workdir"], mapping["filename"])
         with open(out_path, "w", encoding='utf-8-sig') as f: f.write(generated_hcl)
         print(f"✅ HCL file saved for '{mapping['resource_name']}' -> {out_path}")
-        time.sleep(1)
+        # C4 removed an unconditional time.sleep(1) here. The `with open`
+        # block already guarantees flush+close before exit, so there is
+        # nothing to wait for. The sleep was a cargo-cult addition with
+        # no failure path to back off from. If a future Windows AV /
+        # file-lock issue surfaces, fix it with a targeted retry on
+        # PermissionError, not a blanket pre-emptive sleep.
     except IOError as e:
         return (mapping, False, {"error": f"File write error: {e}"})
     
@@ -663,7 +719,7 @@ def _attempt_correction(mapping, resource_json, previous_error, attempt_num, sch
     out_path = os.path.join(mapping["workdir"], mapping["filename"])
     with open(out_path, "w", encoding='utf-8-sig') as f: f.write(corrected_hcl)
     print(f"✅ Saved corrected HCL for '{mapping['resource_name']}'.")
-    time.sleep(1)
+    # C4: see _generate_and_save_hcl for time.sleep(1) removal rationale.
 
     print(f"   - Re-attempting import for '{mapping['resource_name']}'...")
     terraform_client.import_resource(mapping, force_refresh=True)
@@ -695,9 +751,13 @@ def run_workflow() -> WorkflowResult:
     print("🚀 Starting Google Cloud to Terraform Import Workflow...")
 
     # TODO #8: clear cumulative IGNORE state from any previous workflow
-    # invocation in the same Python process. Matters for the Streamlit
-    # path where one process serves many user sessions back-to-back.
-    _CUMULATIVE_IGNORES_PER_FILE.clear()
+    # invocation in the same context. With the ContextVar scoping
+    # introduced in C4, fresh contexts already start clean -- this
+    # explicit reset is belt-and-braces for the case where a workflow
+    # is launched inside an existing context (e.g. tests that bind
+    # tenant context first). Without it, two test cases sharing a
+    # context would carry over each other's ignore sets.
+    _reset_cumulative_ignores()
 
     # NOTE: terraform init is DEFERRED until after we know the project_id
     # and have resolved the per-project workdir. The previous code init'd
@@ -992,8 +1052,8 @@ def run_workflow() -> WorkflowResult:
                         # Per-project workdir refactor (see _generate_and_save_hcl).
                         out_path = os.path.join(mapping["workdir"], mapping["filename"])
                         with open(out_path, "w", encoding='utf-8-sig') as f: f.write(corrected_hcl)
-                        time.sleep(1)
-                        
+                        # C4: see _generate_and_save_hcl for time.sleep(1) removal rationale.
+
                         print("   - Re-attempting import with corrected HCL...")
                         terraform_client.import_resource(mapping, force_refresh=True)
                         is_success, plan_output = terraform_client.plan_for_resource(mapping)

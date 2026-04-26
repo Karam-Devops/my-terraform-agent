@@ -1,14 +1,30 @@
 # my-terraform-agent/importer/hcl_generator.py
 
+from common.logging import get_logger
+
 from .. import llm_provider
 from . import config
 from . import post_llm_overrides
 from .schema_prompt import build_schema_summary
 
+_log = get_logger(__name__)
+
+# Cap raw LLM HCL emitted at DEBUG level. Without a cap a single response
+# can easily be 5-30KB and would dominate log lines / Cloud Logging cost.
+# Operators that need the full body should re-run with the LLM provider's
+# native trace logging on.
+_DEBUG_HCL_TRUNCATE = 500
+
 
 def generate_hcl_from_json(resource_json_str, tf_type, hcl_name, attempt, schema=None, previous_error=None, expert_snippet=None, keys_to_omit=None, fields_to_ignore=None, mode_addendum=None):
     """Generates HCL using a strictly separated, additive prompt architecture."""
-    print(f"\n🤖 Calling Text-Generation LLM (Attempt {attempt} of {config.MAX_LLM_RETRIES})...")
+    _log.info(
+        "llm_invoke_start",
+        tf_type=tf_type,
+        hcl_name=hcl_name,
+        attempt=attempt,
+        max_retries=config.MAX_LLM_RETRIES,
+    )
 
     system_prompt = (
         "You are a precise Terraform HCL code generator. "
@@ -20,7 +36,12 @@ def generate_hcl_from_json(resource_json_str, tf_type, hcl_name, attempt, schema
     # 1. Lifecycle Ignore Changes (Appended via Python parsed lists)
     if fields_to_ignore:
         is_surgical_mode = True
-        print(f"   - RAG mode: Instructing LLM to add lifecycle ignore_changes for: {fields_to_ignore}")
+        _log.info(
+            "rag_mode_activated",
+            source="fields_to_ignore_arg",
+            tf_type=tf_type,
+            fields=list(fields_to_ignore),
+        )
         ignore_list_str = ", ".join(f"{f}" for f in fields_to_ignore)
         system_prompt += (
             "\n\n========================================================================\n"
@@ -56,7 +77,12 @@ def generate_hcl_from_json(resource_json_str, tf_type, hcl_name, attempt, schema
             fields_to_ignore = [f.strip() for f in fields_to_ignore if f.strip()]
             
             if fields_to_ignore:
-                print(f"   - RAG mode activated: Instructing LLM to add lifecycle ignore_changes for: {fields_to_ignore}")
+                _log.info(
+                    "rag_mode_activated",
+                    source="expert_snippet_ignore_list",
+                    tf_type=tf_type,
+                    fields=list(fields_to_ignore),
+                )
                 ignore_list_str = ", ".join(f"{f}" for f in fields_to_ignore)
                 system_prompt += (
                     "\n\n========================================================================\n"
@@ -80,7 +106,11 @@ def generate_hcl_from_json(resource_json_str, tf_type, hcl_name, attempt, schema
 
         # Process standard OMIT/Expert Snippets
         if "OMIT" in expert_snippet:
-            print("   - RAG mode activated: Enforcing negative constraints for read-only fields.")
+            _log.info(
+                "rag_mode_activated",
+                source="expert_snippet_omit",
+                tf_type=tf_type,
+            )
         
         # --- THE DEFINITIVE FIX: Stronger Snippet Instructions ---
         # If the string contains anything other than OMIT or IGNORE_LIST commands, it's raw code.
@@ -88,7 +118,11 @@ def generate_hcl_from_json(resource_json_str, tf_type, hcl_name, attempt, schema
         if raw_snippets:
              snippet_to_inject = "\n".join(raw_snippets).strip()
              if snippet_to_inject: # Only inject if there's actual code left
-                 print("   - RAG mode activated: Using verified expert HCL snippet(s).")
+                 _log.info(
+                     "rag_mode_activated",
+                     source="expert_hcl_snippet",
+                     tf_type=tf_type,
+                 )
                  system_prompt += (
                     "\n\n========================================================================\n"
                     "CRITICAL OVERRIDE - USE THIS EXACT CODE BLOCK\n"
@@ -105,7 +139,11 @@ def generate_hcl_from_json(resource_json_str, tf_type, hcl_name, attempt, schema
     # 3. Diff/Error Resolution (Only if not using surgical overrides)
     if previous_error and not is_surgical_mode:
         if "Terraform will perform the following actions" in previous_error or "execution plan" in previous_error:
-            print("   - Context: State Drift / Diff Resolution.")
+            _log.info(
+                "error_context_detected",
+                tf_type=tf_type,
+                context="state_drift_diff",
+            )
             system_prompt += (
                 "\n\n========================================================================\n"
                 "STATE DRIFT DETECTED (TERRAFORM PLAN DIFF)\n"
@@ -125,12 +163,21 @@ def generate_hcl_from_json(resource_json_str, tf_type, hcl_name, attempt, schema
                 "========================================================================\n"
             )
         else:
-            print("   - Context: Syntax / Schema Error.")
+            _log.info(
+                "error_context_detected",
+                tf_type=tf_type,
+                context="syntax_or_schema_error",
+            )
             system_prompt += f"\n\nIn the previous attempt, you failed with this syntax error: `{previous_error}`. You must fix this error."
 
     # 4. Strict Negative Constraints (OMIT keys)
     if keys_to_omit:
-        print(f"   - RAG mode: Applying negative constraints for omitted keys: {keys_to_omit}")
+        _log.info(
+            "rag_mode_activated",
+            source="negative_constraints",
+            tf_type=tf_type,
+            omitted_keys=list(keys_to_omit),
+        )
         system_prompt += (
             "\n\n--- STRICT NEGATIVE CONSTRAINTS ---\n"
             "You MUST NOT generate, include, or mention the following arguments in your HCL, "
@@ -163,15 +210,28 @@ def generate_hcl_from_json(resource_json_str, tf_type, hcl_name, attempt, schema
         response = llm_client.invoke(final_prompt)
         generated_hcl = response.content
 
-        print("\n   [DEBUG] Raw LLM HCL Output:")
-        print("   " + "-"*40)
-        print(generated_hcl)
-        print("   " + "-"*40 + "\n")
+        # DEBUG-only: capped slice of the raw response. Set
+        # MTAGENT_LOG_LEVEL=DEBUG to see this. See _DEBUG_HCL_TRUNCATE
+        # for the truncation rationale.
+        if generated_hcl:
+            _log.debug(
+                "llm_raw_output",
+                tf_type=tf_type,
+                hcl_name=hcl_name,
+                length=len(generated_hcl),
+                preview=generated_hcl[:_DEBUG_HCL_TRUNCATE],
+                truncated=len(generated_hcl) > _DEBUG_HCL_TRUNCATE,
+            )
 
-        if not generated_hcl or not generated_hcl.strip(): 
-            print("   ❌ VALIDATION FAILED: LLM returned an empty response.")
+        if not generated_hcl or not generated_hcl.strip():
+            _log.error(
+                "hcl_validation_failed",
+                tf_type=tf_type,
+                hcl_name=hcl_name,
+                reason="empty_llm_response",
+            )
             return None
-            
+
         cleaned_hcl = generated_hcl.strip().replace("```hcl", "").replace("```", "").strip()
 
         # Deterministic post-pass to fix known LLM hallucinations of provider
@@ -181,14 +241,33 @@ def generate_hcl_from_json(resource_json_str, tf_type, hcl_name, attempt, schema
         # the input unchanged with an empty corrections list.
         cleaned_hcl, corrections = post_llm_overrides.apply_overrides(tf_type, cleaned_hcl)
         for desc in corrections:
-            print(f"   - [POST-LLM] {desc}")
+            _log.info(
+                "post_llm_correction_applied",
+                tf_type=tf_type,
+                description=desc,
+            )
 
         if f'resource "{tf_type}" "{hcl_name}"' not in cleaned_hcl:
-            print(f"   ❌ VALIDATION FAILED: LLM output did not contain the required resource line.")
+            _log.error(
+                "hcl_validation_failed",
+                tf_type=tf_type,
+                hcl_name=hcl_name,
+                reason="missing_resource_line",
+            )
             return None
 
-        print(f"   ✅ HCL validation successful for '{hcl_name}'.")
+        _log.info(
+            "hcl_validation_ok",
+            tf_type=tf_type,
+            hcl_name=hcl_name,
+        )
         return cleaned_hcl
     except Exception as e:
-        print(f"   ❌ An error occurred during the LLM process: {e}")
+        _log.error(
+            "llm_generation_failed",
+            tf_type=tf_type,
+            hcl_name=hcl_name,
+            error_type=type(e).__name__,
+            error=str(e),
+        )
         return None

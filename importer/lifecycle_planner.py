@@ -41,7 +41,11 @@ Scope of this module
 
 from typing import Any, List, Set
 
+from common.logging import get_logger
+
 from . import schema_oracle
+
+_log = get_logger(__name__)
 
 
 # Framework meta-attributes that must NEVER appear in `lifecycle.ignore_changes`,
@@ -91,7 +95,11 @@ def derive_lifecycle_ignores(cloud_data: dict, tf_type: str) -> List[str]:
         if not oracle.has(tf_type):
             return []
     except Exception as e:  # noqa: BLE001 - fail open
-        print(f"   - WARN: schema oracle unavailable for lifecycle planner ({e})")
+        _log.warning(
+            "lifecycle_planner_oracle_unavailable",
+            tf_type=tf_type,
+            error=str(e),
+        )
         return []
 
     # Belt-and-braces: build the explicit pure-computed denylist so we can

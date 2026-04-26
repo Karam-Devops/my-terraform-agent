@@ -362,12 +362,67 @@ class SchemaOracle:
 # ---------------------------------------------------------------------------
 # Module-level singleton
 # ---------------------------------------------------------------------------
-
+#
+# Why a process-wide singleton (and why it is safe under Streamlit / Cloud Run)
+# -----------------------------------------------------------------------------
+# The SchemaOracle holds the parsed `terraform providers schema -json` for
+# every provider available to the workdir's `.terraform/`. It is:
+#
+#   * READ-ONLY after construction. Every public method
+#     (has / get / list_paths / computed_only_paths / ...) is a pure
+#     lookup; nothing mutates the index. So sharing the instance across
+#     tenants / threads / workflows is safe by construction.
+#
+#   * LARGE-ish (~4-12 MB resident, depending on installed providers).
+#     Re-loading per workflow on a hot Cloud Run instance would burn
+#     ~100ms of CPU and double the memory peak unnecessarily. The
+#     singleton is the right call.
+#
+#   * IDENTICAL for every tenant. Provider schemas don't fork by GCP
+#     project ID -- they fork by provider VERSION, which is pinned in
+#     `.terraform.lock.hcl`. We seed every per-project workdir from the
+#     same canonical lock (see provider_versions/.terraform.lock.hcl),
+#     so every tenant resolves to the same schemas. No tenant-specific
+#     view to keep separate.
+#
+# Concurrency note
+# ----------------
+# The `if _SINGLETON is None` check is NOT lock-protected. Two threads
+# entering get_oracle() simultaneously when the singleton is unset will
+# BOTH call SchemaOracle.load(); whichever finishes second will
+# overwrite the first. This is benign:
+#
+#   * load() is idempotent — both calls produce equivalent indexes.
+#   * The first thread already has its returned reference; the
+#     overwrite doesn't invalidate it (Python rebinds the module
+#     attribute, doesn't mutate the existing object).
+#   * Wasted work is bounded to one extra load() per cold start, never
+#     repeated thereafter.
+#
+# Locking would add complexity for negligible benefit. If we ever see a
+# bug here it would be a third use case (e.g. a load() that has side
+# effects), and at that point we add a threading.Lock around get_oracle.
+#
+# When to call with force_refresh=True
+# ------------------------------------
+# Provider version bump in the workdir's .terraform.lock.hcl, OR a
+# `terraform providers schema -json` regeneration in the same process
+# that needs to pick up the new content. Tests use force_refresh=True
+# to get a clean instance per test case.
 _SINGLETON: Optional[SchemaOracle] = None
 
 
 def get_oracle(force_refresh: bool = False) -> SchemaOracle:
-    """Returns the process-wide oracle, building it on first call."""
+    """Returns the process-wide oracle, building it on first call.
+
+    See module-level _SINGLETON comment for why a singleton is safe
+    here (read-only data, identical across tenants, benign load race).
+
+    Args:
+        force_refresh: drop the cached instance and rebuild from disk.
+            Use after a provider version bump in `.terraform.lock.hcl`
+            or to get a clean instance in tests. Off by default.
+    """
     global _SINGLETON
     if _SINGLETON is None or force_refresh:
         _SINGLETON = SchemaOracle.load(force_refresh=force_refresh)

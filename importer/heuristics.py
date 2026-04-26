@@ -4,6 +4,10 @@ import json
 import os
 import re
 
+from common.logging import get_logger
+
+_log = get_logger(__name__)
+
 HEURISTICS_FILE = os.path.join(os.path.dirname(__file__), 'heuristics.json')
 
 
@@ -47,12 +51,15 @@ def warn_legacy_rule_used(tf_type: str, error_key: str, snippet) -> None:
             kind = "SNIPPET"
     else:
         kind = "SNIPPET"
-    print(
-        f"   - ⚠️  [DEPRECATED] heuristics.json rule fired: "
-        f"{tf_type} / {error_key} ({kind}). "
-        f"Schema-oracle pipeline (PR-3..PR-6) should cover this; "
-        f"if it does not, file an issue so we can fix the oracle path "
-        f"instead of patching heuristics."
+    # WARN level: every fire of a legacy rule is a candidate for the
+    # subsystem to be retired. Counting these in Cloud Logging tells
+    # us when the legacy path goes silent and can be deleted.
+    _log.warning(
+        "heuristics_legacy_rule_fired",
+        tf_type=tf_type,
+        error_key=error_key,
+        kind=kind,
+        remediation="schema_oracle_pipeline_should_cover_this",
     )
 
 def load_heuristics():
@@ -63,12 +70,15 @@ def load_heuristics():
         with open(HEURISTICS_FILE, "r", encoding="utf-8") as f:
             return json.load(f)
     except json.JSONDecodeError as e:
-        # --- THE FIX: Never silently overwrite a corrupted file ---
-        print(f"\n❌ CRITICAL ERROR: Your heuristics.json file is corrupted or formatted incorrectly.")
-        print(f"   Details: {e}")
-        print("   Please fix the JSON syntax before running the agent to prevent data loss.")
-        # We return None to signal a hard failure, preventing save_heuristic from overwriting it
-        return None 
+        # Never silently overwrite a corrupted file. Returning None
+        # signals a hard failure that save_heuristic checks for.
+        _log.error(
+            "heuristics_file_corrupted",
+            path=HEURISTICS_FILE,
+            error=str(e),
+            remediation="fix JSON syntax manually before re-running",
+        )
+        return None
     except IOError:
         return {}
 
@@ -99,27 +109,43 @@ def save_heuristic(resource_type, error_signature, correct_snippet):
         is_omit_rule = False
 
     if not error_signature or (error_signature == "generic_error" and not is_omit_rule):
-        print("🧠 HEURISTICS: Not saving solution for a generic or unknown error pattern.")
+        _log.info(
+            "heuristics_save_skipped",
+            reason="generic_or_unknown_error_pattern",
+            resource_type=resource_type,
+        )
         return
 
     heuristics = load_heuristics()
-    
-    # --- THE FIX: Abort save if the file is corrupted ---
-    if heuristics is None:
-        print("   - ❌ Cannot save new heuristic because heuristics.json is currently corrupted.")
-        return
-    # ----------------------------------------------------
 
-    print(f"🧠 HEURISTICS: Learning a new rule for '{resource_type}' triggered by '{error_signature}'...")
-    
+    if heuristics is None:
+        # Abort: the file is corrupted (load_heuristics already logged it).
+        # Saving here would clobber the operator's hand-written rules.
+        _log.error(
+            "heuristics_save_aborted",
+            reason="file_corrupted",
+            resource_type=resource_type,
+        )
+        return
+
+    _log.info(
+        "heuristics_rule_learned",
+        resource_type=resource_type,
+        error_signature=error_signature,
+    )
+
     if resource_type not in heuristics:
         heuristics[resource_type] = {}
-        
+
     heuristics[resource_type][error_signature] = correct_snippet
-    
+
     try:
         with open(HEURISTICS_FILE, "w", encoding="utf-8") as f:
             json.dump(heuristics, f, indent=2)
-        print("   - ✅ Knowledge base updated successfully.")
+        _log.info("heuristics_file_written", path=HEURISTICS_FILE)
     except IOError as e:
-        print(f"   - ❌ Failed to save heuristic: {e}")
+        _log.error(
+            "heuristics_save_failed",
+            path=HEURISTICS_FILE,
+            error=str(e),
+        )
