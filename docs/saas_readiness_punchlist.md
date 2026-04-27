@@ -557,21 +557,27 @@ migration with backend implications").
 | **CG-1 unmanaged-resource tracking (Drift engine)** | **Phase 4** | **1.5 days** |
 | **CG-2 Detector + Policy coverage parity** | **Phase 4** | **4 days** (revised 2026-04-27 with per-type table; ~25 new rules vs original 8-10 estimate) |
 | **CG-3 Public-benchmark + Google-archive control mapping** | **Phase 4** | **2.5 days** (1 day overlaps CG-2's new-rule budget; CG-3 metadata baked into CG-2 rules at creation time) |
+| **CG-4 IaC Status taxonomy parity (5-value enum)** | **Phase 5** | **1 day** (folds in alongside CC-5 backend) |
+| **CG-5 Flags column parity (Policy + Git + Relationships)** | **Phase 5/6 split** | **2 days** (0.5d backend P5 + 1.5d UI P6) |
+| **CG-6 Inventory tab as primary UI surface** | **Phase 6** | folded into existing Phase 6 UI budget |
 | **CC-9 Few-shot golden examples (top 10 types)** | **Phase 4** | **5 days** |
 | CC-3 cold-start preflight | Phase 5 | 1 day |
 | **CC-5 ResourceOutcome backend** | **Phase 5** | **1 day** |
 | **CC-5 + CC-6 UI rendering** | **Phase 6** | **(folded into Phase 6 UI work)** |
 | **CC-8 URN-as-displayName normalisation** | **CLOSED** (Phase 2 P2-6 / `70bf9c0`) | shipped |
 
-**Total additional effort folded in:** ~19 days (5 days original
+**Total additional effort folded in:** ~22 days (5 days original
 hygiene + 1.5 days CG-1 + 6 days surfaced by Phase 1 SMOKE: CC-5
 backend, CC-6 backend, CC-7 dep migration, CG-2 coverage parity
 [bumped to 4 days post-P4-PRE per-type enumeration] + 5 days
 surfaced by Phase 2 SMOKEs: CC-9 few-shot examples + 1.5 days net
 new from Phase 3-end strategic review: CG-3 control mapping minus
-the 1-day CG-2 overlap). No standalone "fix the audit findings"
-phase; every item folds into a phase that was already going to
-touch the relevant engine.
+the 1-day CG-2 overlap + 3 days net new from Phase 4 Firefly-
+inventory-research review: CG-4 taxonomy parity 1d + CG-5 flags
+parity 2d, with CG-6 inventory-tab folded into existing Phase 6
+UI budget). No standalone "fix the audit findings" phase; every
+item folds into a phase that was already going to touch the
+relevant engine.
 
 **Items surfaced by Phase 1 SMOKE (2026-04-26):** CC-5, CC-6, CC-7,
 CG-2. The smoke against `dev-proj-470211` exercised all 4 engines
@@ -604,6 +610,30 @@ cover only 2/11 resource types vs the importer (CG-2).
     (e.g. CMEK rotation = 1 year), which we mirror as
     "Google-archive default" provenance alongside CIS/NIST control
     IDs in our own rules. Three-source citation per rule. Phase 4.
+
+**Items surfaced by Phase 4 Firefly-inventory research (2026-04-27):**
+  * **CG-4 IaC Status taxonomy parity** -- Firefly + ControlMonkey +
+    Brainboard all converged on a 5-value enum (codified /
+    unmanaged / drifted / ghost / ignored). Phase 4 P4-3 shipped 3
+    of 5 (`compliant`, `unmanaged`, `drifted`); CG-4 closes the
+    gap by adding `ghost` (in state, missing from cloud) +
+    `ignored` (per-tenant ignore-rule store). Phase 5 alongside
+    CC-5 backend.
+  * **CG-5 Flags column parity** -- Firefly's Inventory page surfaces
+    6 flag icons per row (Policy / Mutations / Comments / Git /
+    GitOps / Relationships). The 3 we can ship from data already
+    in scope are Policy (already wired via `policy_tag`), Git
+    (derivable from importer's HCL output + commit), Relationships
+    (derivable from tfstate `dependencies`). The other 3 need
+    persistent stores; deferred. Phase 5 backend + Phase 6 UI.
+  * **CG-6 Inventory tab as primary UI surface** -- canonical layout
+    with the column set above. Mirrors Firefly's UX so vendor
+    evaluators recognize the surface within 30 seconds. Folds
+    into Phase 6 UI work; no incremental days.
+
+  Sources for the taxonomy + flag definitions:
+  <https://docs.firefly.ai/introduction/terminology>,
+  <https://docs.firefly.ai/detailed-guides/cloud-asset-inventory>.
 
 The Phase 2 smokes also exposed the per-resource UX vocabulary
 that CC-5 needs to render: 9 distinct `failure_reason` enum values
@@ -925,6 +955,184 @@ program. "We enforce CIS GCP 1.10" is parseable to a
 non-engineer; "we check rotation period" is not. The Google-
 archive citation is a credibility multiplier specifically with
 GCP-focused buyers — they'll recognise the project name.
+
+### CG-4. IaC Status taxonomy parity with Firefly / ControlMonkey — surfaced 2026-04-27
+
+**Today.** Phase 4 P4-3 (`5c6fb06`) shipped `DriftReport` with three
+buckets: `drifted`, `compliant`, `unmanaged`. This covers 3 of the
+5-value enum that Firefly and the rest of the IaC governance
+category use as their canonical inventory status:
+
+| Firefly (canonical) | Our DriftReport today |
+|---|---|
+| Codified | `compliant` (in state) |
+| Unmanaged | `unmanaged` (NEW in P4-3) |
+| Drifted | `drifted` (shape ready; not populated until drift_check wired) |
+| Ghost | -- not surfaced as distinct bucket; folds into the diff_engine `error` field |
+| Ignored | -- no per-tenant ignore-rule store yet |
+
+A vendor evaluating us alongside Firefly (the dominant player) will
+expect to see the 5-value enum verbatim. Operators reading our UI
+who've used Firefly should not have to learn a new vocabulary --
+"Unmanaged" means the same thing in both products; ours just stops
+short of the full taxonomy today.
+
+**Source for the taxonomy:** Firefly Terminology Glossary
+(<https://docs.firefly.ai/introduction/terminology>). Verbatim
+definitions cross-checked against ControlMonkey + Brainboard
+product docs -- all three vendors converged on these 5 values.
+
+**Spec.** Two parts:
+
+  1. **Extend `DriftReport`** (`detector/drift_report.py`) with
+     two new fields:
+     ```python
+     ghost: List[ManagedResource] = field(default_factory=list)
+       # in state, missing from cloud (deleted out-of-band)
+     ignored: List[str] = field(default_factory=list)
+       # tf_addresses skipped per IaC-Ignore rules
+     ```
+     Update `exit_code` to also flag non-zero on `ghost` (a deleted
+     resource the operator didn't intend to delete is a finding).
+     Update `as_fields()` to include the two new counts.
+
+  2. **`Detector.rescan()` populates `ghost`** by calling
+     `cloud_snapshot.fetch_snapshots(state_resources)` on the
+     in-scope subset; any address with snapshot==None +
+     `subprocess.CalledProcessError` from gcloud describe lands
+     in `ghost`. This reuses the existing fail-soft snapshot
+     fetcher; no new gcloud calls invented.
+
+  3. **`ignored` rule store** -- minimum viable: a JSON file at
+     per-project workdir `imported/<project>/ignore_rules.json`
+     with shape `{"rules": [{"tf_address": "...", "reason": "..."}]}`.
+     Loaded at rescan time; `ignored` populated from this list
+     intersected with current state. Phase 6 UI gets the
+     "mark as ignored" button; this commit ships the storage
+     format + loader so the API is ready when the UI lands.
+
+**Estimate.** 1 day:
+  * 0.25 day extend DriftReport + tests (mirrors P4-3 pattern)
+  * 0.25 day rescan() ghost detection wiring + tests
+  * 0.5 day ignore_rules.json format + loader + dataclass tests
+
+**Phase.** Phase 5 -- folds in alongside CC-5 ResourceOutcome
+backend work (CC-5 should adopt the 5-value enum from CG-4 so the
+two surfaces speak the same vocabulary).
+
+**Why this matters for the demo.** A vendor demo that says "we
+support these 3 buckets" while Firefly says "we support these 5"
+gets dinged before the 5-min mark. Closing the gap is a few
+hours' work and converts a perception delta into parity.
+
+### CG-5. Flags column parity (Policy + Git + Relationships) — surfaced 2026-04-27
+
+**Today.** Phase 1 wired `policy_tag` onto `ResourceDrift` so a
+drifted resource with policy violations carries a tag suffix in
+the report. This is half of Firefly's "Policy" flag concept.
+Firefly's Inventory page surfaces 6 flags as visual icons on
+each resource row:
+
+  Policy / Mutations / Comments / Git / GitOps / Relationships
+
+(See <https://docs.firefly.ai/detailed-guides/cloud-asset-inventory>.)
+
+For our SaaS UI, the most impactful are the 3 we can ship from
+data we already have or trivially derive:
+
+  * **Policy** — already wired; just needs UI rendering.
+  * **Git** — derivable from "which `.tf` file the importer wrote
+    + which commit committed it". Needs source-of-truth tracking
+    once Cloud Run packaging adds a Git checkout.
+  * **Relationships** — derivable from Terraform state's
+    `dependencies` array + HCL reference parsing
+    (`google_container_node_pool.cluster = ...`). No new data
+    sources needed.
+
+The other 3 (Mutations / Comments / GitOps) need persistent
+stores or external integrations and are deferred to a Phase 6+
+follow-up.
+
+**Spec.** Three layers:
+
+  1. **Backend** (`detector` + new `inventory_flags.py`):
+     A pure helper that computes the flags for a given resource
+     from data already in scope:
+     ```python
+     def compute_flags(
+         resource: ManagedResource | CloudResource,
+         drift: Optional[ResourceDrift] = None,
+         state: Optional[dict] = None,  # raw tfstate dict for deps
+         hcl_path: Optional[str] = None,  # path inside imported/
+     ) -> list[Literal["policy", "git", "relationships"]]:
+     ```
+     Returns the subset of flags that apply.
+
+  2. **CC-5 ResourceOutcome adopts** the `flags` field (per the
+     CC-5 spec note in CG-4). Single source of truth for both
+     the inventory page and the per-resource detail drawer.
+
+  3. **UI** (Phase 6): icon row in the inventory table; click any
+     flag to filter the table to "only resources with this flag"
+     (Firefly's "click flag in upper right to filter" UX).
+
+**Phase.** Phase 6 -- needs the UI to be useful; the backend
+half is small (~half a day) and folds into Phase 5's CC-5 work.
+
+**Estimate.** 2 days total:
+  * 0.5 day backend `compute_flags()` + tests (Phase 5)
+  * 1.5 day Phase 6 UI rendering + filter chips
+
+### CG-6. Inventory tab as the SaaS UI's primary surface — surfaced 2026-04-27
+
+**Today.** No SaaS UI exists yet (Phase 6 work). When it lands,
+the natural primary surface is a single Inventory page with the
+columns the rest of the category converged on:
+
+  Cloud / Type / Name / Env / IaC Status / Flags / Location / Owner
+
+Per Firefly's `Exploring the Inventory` doc and our own column
+inventory in the related research note, this layout makes the
+product immediately recognizable to anyone who's used Firefly /
+ControlMonkey / Brainboard.
+
+**Spec.** Streamlit page (`app/inventory.py`) with:
+
+  * **Table layout** (left to right):
+      Cloud (icon) | Type (`tf_type`) | Name | Env (label) |
+      **IaC Status** (color-coded badge: green=codified,
+      blue=unmanaged, yellow=drifted, red=ghost, gray=ignored) |
+      **Flags** (icon row: ⚠ Policy, 🔗 Git, ⛓ Relationships) |
+      Location | Owner (deferred -- needs audit-log integration)
+
+  * **Click any row** -> side panel with the full ResourceOutcome
+    detail (ties into CC-5 + CC-6 rendering work). Mirrors
+    Firefly's drawer pattern.
+
+  * **Filter chips** above the table:
+      [All] [Codified N] [Unmanaged N] [Drifted N] [Ghost N]
+      [Ignored N]
+    Plus per-flag chips:
+      [Policy violations N] [Has Git N] [Has Relationships N]
+
+  * **Action buttons** in the side panel context-aware:
+      - Unmanaged -> "Codify this" (hands to importer)
+      - Drifted -> "Restore" / "Accept" / "Show diff"
+      - Ghost -> "Recreate" / "Drop from state"
+      - Codified -> (no action; informational)
+
+**Phase.** Phase 6 (folds into existing UI work). The CG-4 +
+CG-5 backend pieces ship in Phase 5 so by the time Phase 6
+lands the data plumbing is ready to render.
+
+**Estimate.** Folded into the Phase 6 UI budget -- no
+incremental days beyond the existing Phase 6 line item.
+
+**Why this matters for the demo.** Vendor evaluators score on
+"how recognizable is this UI" within the first 30 seconds. A
+Streamlit page that mirrors Firefly's column set + flag
+semantics scores immediately; a custom layout requires
+explaining the vocabulary before any feature gets evaluated.
 
 ---
 
