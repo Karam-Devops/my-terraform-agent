@@ -6,20 +6,42 @@ Resource-type-to-policy mapping is implicit in the directory layout:
 
     policy/policies/
     ├── common/                         # applies to ALL in-scope types
-    │   └── mandatory_labels.rego
-    ├── google_compute_instance/        # applies to GCE only
+    │   ├── mandatory_labels.rego       (GCP shape: input.labels.X)
+    │   └── mandatory_tags.rego         (AWS shape: input.Tags[].Key)
+    │
+    ├── google_compute_instance/        # GCE only
     │   ├── gce_no_public_ip.rego
     │   ├── gce_shielded_vm.rego
     │   └── gce_disk_encryption.rego
-    └── google_storage_bucket/          # applies to buckets only
-        ├── bucket_encryption.rego
-        ├── bucket_public_access.rego
-        ├── bucket_versioning.rego
-        └── bucket_retention.rego
+    ├── google_storage_bucket/          # GCS bucket only
+    │   ├── bucket_encryption.rego
+    │   ├── bucket_public_access.rego
+    │   ├── bucket_versioning.rego
+    │   └── bucket_retention.rego
+    │
+    ├── aws_instance/                   # EC2 only (P3-4)
+    │   ├── ec2_no_public_ip.rego
+    │   ├── ec2_imds_v2.rego
+    │   └── ec2_ebs_encryption.rego
+    └── aws_s3_bucket/                  # S3 bucket only (P3-4)
+        ├── s3_bucket_encryption.rego
+        ├── s3_bucket_public_access.rego
+        ├── s3_bucket_versioning.rego
+        └── s3_bucket_retention.rego
 
 Filename convention: `<rule_id>.rego`. The engine resolves a violation's
 source file by looking up `<rule_id>.rego` in the dirs that were evaluated.
 This keeps the engine zero-config and the report human-readable.
+
+Common-policy gating (P3-4)
+---------------------------
+Both `common/mandatory_labels.rego` and `common/mandatory_tags.rego` fire
+on EVERY resource (GCP + AWS) but each is gated by a precondition
+(`input.labels` or `input.Tags`) so only the matching cloud-shape
+fires per resource. Without the gates, `not input.labels.team` would
+be true for AWS resources (which have no `labels`) and produce a
+false-positive flood. With the gates, exactly one of the two rules
+fires per resource based on which cloud's snapshot shape is present.
 """
 
 import os
@@ -28,9 +50,19 @@ import os
 
 # Resource types we evaluate. Mirrors detector/config.py IN_SCOPE_TF_TYPES;
 # kept independent so policy can be enabled per-type without coupling.
+#
+# P3-4: aws_instance + aws_s3_bucket added. Phase 4 CG-2 will widen this
+# further to match the importer's full type coverage (currently 17 GCP +
+# the 2 AWS types here). For Phase 3 we ship only the AWS analogues of
+# the existing GCP types so policy authoring is symmetric across clouds
+# at the shipped pair.
 IN_SCOPE_TF_TYPES = {
+    # GCP
     "google_compute_instance",
     "google_storage_bucket",
+    # AWS (P3-4)
+    "aws_instance",
+    "aws_s3_bucket",
 }
 
 # --- Policy bundle layout --------------------------------------------------
