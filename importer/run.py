@@ -13,6 +13,7 @@ from . import (
     config, gcp_client, terraform_client, hcl_generator, knowledge_base,
     heuristics, snapshot_scrubber, lifecycle_planner, resource_mode,
     inventory as _inventory,
+    quarantine as _quarantine,
 )
 # Root-level app config — distinct from `importer/config.py`. The root holds
 # the project-ID concepts (HOST/TARGET/DEMO) and the resolver that enforces
@@ -992,6 +993,12 @@ def run_workflow() -> WorkflowResult:
     successful_imports = [r for r in all_results if r['is_success']]
     failed_imports = [r for r in all_results if not r['is_success']]
 
+    # CG-7 quarantine accounting -- track resources moved out of the
+    # workdir for customer-facing "Needs Attention" reporting. Always
+    # populated (zero in CLI mode); WorkflowResult carries the count
+    # so dashboards filter on it uniformly.
+    quarantined_count = 0
+
     if failed_imports:
         # Path 1: classify failures into self_broken vs blocked-by-sibling
         # so we work on causes first. Blocked items often auto-resolve when
@@ -1002,12 +1009,97 @@ def run_workflow() -> WorkflowResult:
         n_self = sum(1 for i in failed_imports if i.get('_blockage') == 'self_broken')
         n_blocked = sum(1 for i in failed_imports if i.get('_blockage') == 'blocked')
 
-        print("\n" + "="*70)
-        print(f"--- Starting Interactive Correction for {len(failed_imports)} Failed Resources ---")
-        if n_blocked:
+        # CG-7 (P4 hotfix): headless quarantine path. When
+        # IMPORTER_AUTO_QUARANTINE=1 (set by Cloud Run / SaaS), skip
+        # the interactive 3-option HITL menu entirely. Quarantine each
+        # self-broken resource (move .tf to _quarantine/ + state rm)
+        # so the blocked siblings can re-verify cleanly. The HITL menu
+        # is operator-grade and inappropriate for customer surfaces;
+        # see CC-5 spec + docs/saas_readiness_punchlist.md CG-7.
+        if _quarantine.is_auto_quarantine_enabled():
+            print("\n" + "="*70)
+            print(f"--- CG-7 Headless Quarantine ({len(failed_imports)} failed resources) ---")
             print(f"    {n_self} self-broken · {n_blocked} blocked by sibling files")
-            print(f"    Blocked items will auto-reverify after their blocker is fixed.")
-        print("="*70)
+            print(f"    Quarantining self-broken; survivors will re-verify automatically.")
+            print("="*70)
+
+            for failed_item in list(failed_imports):
+                if failed_item.get('_blockage') != 'self_broken':
+                    continue
+                mapping = failed_item['mapping']
+                tf_address = f"{mapping['tf_type']}.{mapping['hcl_name']}"
+                hcl_filename = mapping.get('filename')
+                workdir = mapping.get('workdir')
+                reason = (
+                    f"Auto-quarantined after import + plan verification "
+                    f"failed.\n\n"
+                    f"Terraform error (truncated):\n"
+                    f"{(failed_item['data'].get('error') or '')[:1000]}"
+                )
+                ok = _quarantine.quarantine_resource(
+                    workdir=workdir,
+                    tf_address=tf_address,
+                    hcl_filename=hcl_filename,
+                    reason=reason,
+                )
+                if ok:
+                    quarantined_count += 1
+                    failed_imports.remove(failed_item)
+                    print(f"   ⚠  Quarantined {tf_address} -> "
+                          f"_quarantine/{hcl_filename}")
+                else:
+                    # quarantine_resource already logged the reason;
+                    # leave the item in failed_imports so it lands in
+                    # the `failed` bucket of the WorkflowResult.
+                    print(f"   ❌ Quarantine failed for {tf_address}; "
+                          f"will report as failed.")
+
+            # Re-verify the survivors (previously blocked-by-sibling).
+            # Most should now pass since the broken .tf files are out
+            # of the workdir.
+            still_failing = []
+            for failed_item in list(failed_imports):
+                mapping = failed_item['mapping']
+                tf_address = f"{mapping['tf_type']}.{mapping['hcl_name']}"
+                replan_rc = terraform_client.plan_for_resource(mapping)
+                if replan_rc == 0:
+                    # Auto-promoted to imported.
+                    successful_imports.append(failed_item)
+                    failed_imports.remove(failed_item)
+                    print(f"   ✅ Auto-promoted (sibling unblocked): {tf_address}")
+                else:
+                    still_failing.append(tf_address)
+
+            if still_failing:
+                print(f"\n   {len(still_failing)} resource(s) still failing after "
+                      f"quarantine of self-broken siblings:")
+                for addr in still_failing:
+                    print(f"     • {addr}")
+                # These remain in failed_imports and will land in
+                # the WorkflowResult's `failed` bucket.
+
+            # CG-7 headless mode finished -- skip the interactive HITL
+            # menu entirely. The remaining failed_imports (if any) are
+            # unrecoverable; they'll land in WorkflowResult's `failed`
+            # bucket and the customer-facing UI surfaces them as
+            # "Couldn't process".
+            print(f"\n   CG-7 quarantine summary: {quarantined_count} quarantined, "
+                  f"{len(failed_imports)} hard-failed")
+            print("="*70 + "\n")
+            # Skip to result construction at the bottom of run_workflow
+            # by clearing the list -- the existing CLI menu loop below
+            # is gated on `failed_imports` being truthy.
+            failed_imports = []
+
+        # Existing interactive CLI menu (only runs when CG-7 headless
+        # mode is OFF and there are still failures to handle).
+        if failed_imports:
+            print("\n" + "="*70)
+            print(f"--- Starting Interactive Correction for {len(failed_imports)} Failed Resources ---")
+            if n_blocked:
+                print(f"    {n_self} self-broken · {n_blocked} blocked by sibling files")
+                print(f"    Blocked items will auto-reverify after their blocker is fixed.")
+            print("="*70)
 
         for failed_item in list(failed_imports):
             # Path 1: skip items that were auto-promoted by a sibling fix
@@ -1217,6 +1309,7 @@ def run_workflow() -> WorkflowResult:
         imported=len(successful_imports),
         failed=len(failed_imports),
         started=started,
+        needs_attention=quarantined_count,
     )
 
 
@@ -1239,20 +1332,26 @@ def _build_empty_result(*, project_id: str, selected: int,
 
 
 def _build_result(*, project_id: str, selected: int, imported: int,
-                  failed: int, started: float) -> WorkflowResult:
+                  failed: int, started: float,
+                  needs_attention: int = 0) -> WorkflowResult:
     """Assemble the final WorkflowResult and emit the completion event.
 
     Centralises three concerns that must stay in lockstep:
-        1. Math: skipped = selected - imported - failed (the catch-all
-           bucket; see WorkflowResult docstring for why this is correct).
+        1. Math: skipped = selected - imported - failed - needs_attention
+           (the catch-all bucket; see WorkflowResult docstring for why
+           this is correct).
         2. Duration: measured with time.monotonic() so clock adjustments
            don't skew it.
         3. Log emission: one ``workflow_complete`` event per invocation,
            carrying the full result payload via ``result.as_fields()``.
            Dashboards filter on these keys -- they are pinned by the
            WorkflowResult tests.
+
+    CG-7 (P4 hotfix): added ``needs_attention`` param. Defaults 0 to
+    preserve back-compat for the existing CLI-only call sites that
+    didn't account for quarantined resources.
     """
-    skipped = max(0, selected - imported - failed)
+    skipped = max(0, selected - imported - failed - needs_attention)
     duration_s = round(time.monotonic() - started, 2)
     result = WorkflowResult(
         project_id=project_id,
@@ -1261,6 +1360,7 @@ def _build_result(*, project_id: str, selected: int, imported: int,
         failed=failed,
         skipped=skipped,
         duration_s=duration_s,
+        needs_attention=needs_attention,
     )
     _log.info("workflow_complete", **result.as_fields())
     return result

@@ -96,6 +96,14 @@ class WorkflowResult:
     failed: int
     skipped: int
     duration_s: float
+    # CG-7 (P4 hotfix): resources whose .tf was quarantined after
+    # exhausting auto-correct retries. Default 0 to preserve the
+    # field set's back-compat for any caller constructing
+    # WorkflowResult directly. The accounting invariant becomes:
+    #   imported + needs_attention + failed + skipped == selected.
+    # Customer-facing UI surfaces this as the "Needs Attention"
+    # bucket per CC-5 spec; CLI just prints the count.
+    needs_attention: int = 0
 
     @property
     def exit_code(self) -> int:
@@ -104,8 +112,15 @@ class WorkflowResult:
         Note: a workflow with selected=0 (nothing to do) returns 0.
         That's correct -- the workflow completed, the operator
         chose not to import anything, there's nothing to fail on.
+
+        CG-7: needs_attention also flips exit_code to 1 -- a
+        quarantined resource is a finding the operator must review,
+        not a silent OK. Mirrors how DriftReport.exit_code treats
+        ``unmanaged`` and ``inventory_errors`` as non-zero.
         """
-        return 0 if self.failed == 0 else 1
+        if self.failed > 0 or self.needs_attention > 0:
+            return 1
+        return 0
 
     def as_fields(self) -> dict[str, Any]:
         """Flat dict for structured-log emission.

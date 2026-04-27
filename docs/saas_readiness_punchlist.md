@@ -560,6 +560,7 @@ migration with backend implications").
 | **CG-4 IaC Status taxonomy parity (5-value enum)** | **Phase 5** | **1 day** (folds in alongside CC-5 backend) |
 | **CG-5 Flags column parity (Policy + Git + Relationships)** | **Phase 5/6 split** | **2 days** (0.5d backend P5 + 1.5d UI P6) |
 | **CG-6 Inventory tab as primary UI surface** | **Phase 6** | folded into existing Phase 6 UI budget |
+| **CG-7 Failure isolation via quarantine pattern** | **Phase 4 hotfix (SHIPPED)** | **0.5 day** -- shipped same wave as P4-11/P4-12 SMOKE-4 hotfixes |
 | **CC-9 Few-shot golden examples (top 10 types)** | **Phase 4** | **5 days** |
 | CC-3 cold-start preflight | Phase 5 | 1 day |
 | **CC-5 ResourceOutcome backend** | **Phase 5** | **1 day** |
@@ -1133,6 +1134,83 @@ incremental days beyond the existing Phase 6 line item.
 Streamlit page that mirrors Firefly's column set + flag
 semantics scores immediately; a custom layout requires
 explaining the vocabulary before any feature gets evaluated.
+
+### CG-7. Failure isolation via quarantine pattern — surfaced + SHIPPED in SMOKE 4 hotfix wave (2026-04-27)
+
+**Today (after CG-7 ship).** When a resource's per-resource plan
+verification fails, the importer now offers TWO paths:
+
+  * **CLI / interactive (default):** existing 3-option HITL menu
+    unchanged. Operator picks snippet / AI self-correct / skip
+    per resource. Right tool for our local debugging.
+
+  * **Headless (SaaS Cloud Run):** when env var
+    ``IMPORTER_AUTO_QUARANTINE=1`` is set, the importer skips the
+    HITL menu and quarantines self-broken resources automatically.
+    Each quarantined resource gets:
+      1. ``.tf`` file moved to ``<workdir>/_quarantine/<filename>``
+      2. ``terraform state rm <addr>`` to keep state consistent
+         (revert-on-failure if state-rm fails, so workdir + state
+         can never diverge)
+      3. A ``<filename>.quarantine.txt`` sidecar explaining WHY
+         (the truncated terraform error)
+    After quarantine, plan verification re-runs on the survivors --
+    previously "blocked-by-sibling" resources auto-promote to
+    imported. Result: maximum salvage, zero customer-facing HITL.
+
+**WorkflowResult adopts ``needs_attention`` field.** Counts the
+quarantined resources separately from ``failed`` (which now means
+"couldn't even import" -- a stronger negative signal). Accounting
+invariant: ``imported + needs_attention + failed + skipped ==
+selected``. ``exit_code`` is 1 when needs_attention > 0 (gates CI).
+
+**Pre-fix problem statement:** ``terraform plan -target=ADDR``
+parses every ``.tf`` file in the workdir BEFORE honouring
+``-target``. One broken ``.tf`` cascade-blocks plan verification on
+EVERY other resource. SMOKE 4 hit this concretely: 1 self-broken
+resource (poc-cloudrun, P4-11 startup_cpu_boost) + 13
+blocked-by-sibling resources, all reported as "failed" until the
+operator fixed the broken one interactively.
+
+**Spec.** Three new files + one extension:
+
+  * ``importer/quarantine.py`` (NEW) -- pure function module:
+      - ``is_auto_quarantine_enabled() -> bool`` (env var parse)
+      - ``quarantine_path(workdir) -> str`` (lazy dir creation)
+      - ``quarantine_resource(workdir, tf_address, hcl_filename,
+        reason) -> bool`` (move + state_rm + sidecar; revert on
+        partial failure)
+  * ``importer/terraform_client.py`` (EXTENDED) -- public
+    ``state_rm(tf_address, *, workdir) -> bool``. Mirrors the
+    existing in-line state-rm in ``import_resource()``; same
+    timeout budget (60s).
+  * ``importer/results.py`` (EXTENDED) -- ``needs_attention: int = 0``
+    field on ``WorkflowResult``. ``exit_code`` returns 1 when
+    needs_attention > 0 (forces CI to gate on quarantined items).
+  * ``importer/run.py`` (WIRED) -- in the failed_imports loop,
+    when ``IMPORTER_AUTO_QUARANTINE`` is set, skip the HITL menu
+    and run quarantine + replan instead.
+
+**Tests.** 13 new (4 needs_attention + 9 quarantine):
+  * ``WorkflowResultNeedsAttentionTests`` -- field carries count,
+    defaults to 0, exit_code semantics
+  * ``IsAutoQuarantineEnabledTests`` -- env var parsing (truthy /
+    falsy / unset / whitespace)
+  * ``QuarantinePathTests`` -- pure function; doesn't create dir
+  * ``QuarantineResourceHappyPathTests`` -- moves file + invokes
+    state_rm + writes sidecar
+  * ``QuarantineResourceFailureModeTests`` -- missing source file,
+    state_rm failure with file-revert (workdir+state stay
+    consistent)
+
+terraform_client.state_rm is mocked so tests don't shell out.
+
+**Phase mapping update.** P4-11 / P4-12 / CG-7 form the SMOKE 4
+hotfix wave -- all three landed before the user's SMOKE 4 re-run.
+
+**Future work (Phase 5):** replace the env-var gate with an
+explicit ``run_workflow(headless=True)`` kwarg once the call
+surface gets a Phase 5 refresh. Same logic; cleaner contract.
 
 ---
 

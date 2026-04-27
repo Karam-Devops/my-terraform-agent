@@ -188,6 +188,60 @@ def init(workdir=None, upgrade=False):
         log.error("terraform_init_failed", workdir=workdir, error=error_output)
         return False
 
+def state_rm(tf_address: str, *, workdir: str) -> bool:
+    """Remove a resource entry from terraform state.
+
+    Public helper used by importer.quarantine.quarantine_resource()
+    (CG-7) to keep state consistent when a .tf file is moved out
+    of the workdir. Without this companion call, the state would
+    still reference the resource and the next ``terraform plan``
+    would see "in state, no config -> destroy".
+
+    Args:
+        tf_address: e.g. ``google_cloud_run_v2_service.poc_cloudrun``.
+        workdir: per-project workdir absolute path. Required for
+            cwd plumbing.
+
+    Returns:
+        True iff the state rm subprocess returned 0. False on any
+        failure (subprocess error, timeout, terraform missing).
+        Caller decides whether to retry or surface to the customer.
+
+    Same timeout budget (_TIMEOUT_STATE_S = 60s) as the in-line
+    state-rm at the top of import_resource() so behaviour is
+    consistent.
+    """
+    if not _ensure_initialized(workdir=workdir):
+        log.error("state_rm_aborted_init_failed",
+                  tf_address=tf_address, workdir=workdir)
+        return False
+
+    log.info("state_rm_start", tf_address=tf_address, workdir=workdir)
+    args = [config.TERRAFORM_PATH, "state", "rm", tf_address]
+    try:
+        _run_terraform(
+            args,
+            stage="state_rm",
+            timeout_s=_TIMEOUT_STATE_S,
+            check=True,
+            capture_output=True,
+            text=True,
+            cwd=workdir,
+        )
+        log.info("state_rm_complete", tf_address=tf_address)
+        return True
+    except subprocess.CalledProcessError as e:
+        error_output = e.stderr if hasattr(e, "stderr") and e.stderr else str(e)
+        log.error("state_rm_failed",
+                  tf_address=tf_address, error=error_output)
+        return False
+    except (FileNotFoundError, subprocess.TimeoutExpired) as e:
+        log.error("state_rm_subprocess_error",
+                  tf_address=tf_address, error_type=type(e).__name__,
+                  error=str(e))
+        return False
+
+
 def import_resource(mapping, force_refresh=False):
     """Runs 'terraform import', ensuring initialization first.
 

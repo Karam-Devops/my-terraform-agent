@@ -84,17 +84,25 @@ class WorkflowResultTests(unittest.TestCase):
 
         If a key is added/removed/renamed here, every Cloud Logging
         query keyed off ``jsonPayload.<field>`` breaks silently.
+
+        CG-7 (P4 hotfix) added ``needs_attention`` as the 7th key --
+        dashboards filtering on the previous 6 keys still work
+        unchanged; new dashboards filtering on quarantine activity
+        use the new key.
         """
         r = self._sample()
         fields = r.as_fields()
         self.assertEqual(
             set(fields.keys()),
             {"project_id", "selected", "imported", "failed",
-             "skipped", "duration_s"},
+             "skipped", "duration_s", "needs_attention"},
         )
         self.assertEqual(fields["project_id"], "poc-sa-dev")
         self.assertEqual(fields["selected"], 10)
         self.assertEqual(fields["duration_s"], 42.5)
+        # New field defaults to 0 when caller doesn't pass it
+        # (back-compat for the existing CLI flow).
+        self.assertEqual(fields["needs_attention"], 0)
 
     def test_equality_by_value(self):
         """Two results with the same counts compare equal — useful in tests."""
@@ -102,6 +110,48 @@ class WorkflowResultTests(unittest.TestCase):
         b = self._sample()
         self.assertEqual(a, b)
         self.assertNotEqual(a, self._sample(failed=99))
+
+
+class WorkflowResultNeedsAttentionTests(unittest.TestCase):
+    """CG-7 (P4 hotfix): the new ``needs_attention`` field tracks
+    quarantined resources -- the customer-facing 'Needs Attention'
+    bucket per CC-5."""
+
+    def _sample(self, **overrides):
+        base = dict(
+            project_id="dev-proj-470211",
+            selected=16,
+            imported=13,
+            failed=1,
+            skipped=0,
+            duration_s=42.0,
+            needs_attention=2,
+        )
+        base.update(overrides)
+        return WorkflowResult(**base)
+
+    def test_needs_attention_field_carries_count(self):
+        r = self._sample()
+        self.assertEqual(r.needs_attention, 2)
+
+    def test_needs_attention_defaults_to_zero(self):
+        # Back-compat: existing callers that don't pass needs_attention
+        # get the same 6-field shape they always had.
+        r = WorkflowResult(
+            project_id="x", selected=5, imported=5,
+            failed=0, skipped=0, duration_s=1.0,
+        )
+        self.assertEqual(r.needs_attention, 0)
+
+    def test_exit_code_nonzero_on_needs_attention_alone(self):
+        # Quarantined resources require operator review; exit 1 forces
+        # CI pipelines to gate, even when failed=0.
+        r = self._sample(failed=0, needs_attention=1)
+        self.assertEqual(r.exit_code, 1)
+
+    def test_exit_code_zero_when_clean(self):
+        r = self._sample(failed=0, needs_attention=0)
+        self.assertEqual(r.exit_code, 0)
 
 
 if __name__ == "__main__":
