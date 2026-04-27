@@ -626,47 +626,60 @@ def run_translation_batch(
 def _select_workdir() -> Optional[str]:
     """Discover importer workdirs + prompt operator to pick one.
 
-    Mirrors the importer's project-selection menu pattern. Returns the
-    chosen workdir absolute path, or None if no workdirs exist OR the
-    operator cancelled.
+    Uses the canonical resolver from ``common.workdir`` rather than
+    a CWD-relative path lookup. The resolver anchors the import base
+    to the repo root (or ``$MTAGENT_IMPORT_BASE`` if set), so this
+    works regardless of where the operator runs ``python -m`` from
+    -- the original P4-15 implementation broke when run from a
+    parent directory because it used ``os.path.abspath("imported")``
+    which is CWD-relative.
+
+    SaaS path: when ``MTAGENT_IMPORT_BASE`` is set (typical Cloud
+    Run pattern: ``/tmp/imported``), the resolver picks it up
+    automatically. Multi-tenant deployments will additionally pass
+    ``tenant_id=`` once the SaaS API layer lands; today the CLI
+    is single-tenant so tenant_id stays None.
+
+    Mirrors detector.run._select_project() pattern.
+
+    Returns the chosen workdir absolute path, or None if no workdirs
+    exist OR the operator cancelled.
     """
-    imported_root = os.path.abspath("imported")
-    if not os.path.isdir(imported_root):
-        print(f"\n❌ No imported/ directory found at {imported_root}")
-        print("   Run the importer (python -m my-terraform-agent.importer.run) "
-              "first.")
+    # Lazy import to keep the per-call surface minimal -- common.workdir
+    # has no heavy dependencies but importing only when needed is the
+    # convention for CLI-only helpers.
+    from common.workdir import resolve_project_workdir, list_project_workdirs
+
+    available = list_project_workdirs()
+    if not available:
+        print("\n❌ No per-project workdirs found under imported/.")
+        print("   Run the importer first: "
+              "python -m my-terraform-agent.importer.run")
         return None
 
-    candidates = sorted([
-        d for d in os.listdir(imported_root)
-        if os.path.isdir(os.path.join(imported_root, d))
-        and not d.startswith(".")
-    ])
-    if not candidates:
-        print(f"\n❌ No project workdirs found under {imported_root}")
-        return None
-
-    if len(candidates) == 1:
-        chosen = candidates[0]
+    if len(available) == 1:
+        chosen = available[0]
         print(f"\nUsing only available workdir: {chosen}")
-        return os.path.join(imported_root, chosen)
+        return resolve_project_workdir(chosen, create=False)
 
     print("\nAvailable project workdirs:")
-    for i, name in enumerate(candidates, start=1):
+    for i, name in enumerate(available, start=1):
         print(f"  [{i}] {name}")
     while True:
         raw = input(
-            f"\nPick a workdir [1-{len(candidates)}], or 0 to cancel: "
+            f"\nPick a workdir [1-{len(available)}], or 0 to cancel: "
         ).strip()
         if raw == "0":
             return None
         try:
             idx = int(raw)
-            if 1 <= idx <= len(candidates):
-                return os.path.join(imported_root, candidates[idx - 1])
+            if 1 <= idx <= len(available):
+                return resolve_project_workdir(
+                    available[idx - 1], create=False,
+                )
         except ValueError:
             pass
-        print(f"❌ Invalid choice. Enter 1-{len(candidates)} or 0.")
+        print(f"❌ Invalid choice. Enter 1-{len(available)} or 0.")
 
 
 def _select_files(entries: List[dict]) -> List[str]:
