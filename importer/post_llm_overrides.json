@@ -34,6 +34,11 @@
         "comment": "P2-8: v1 schema vestige. v1's `traffic` block accepted `latest_revision = true` to direct 100% of traffic to the latest revision. v2 redesigned the traffic block: instead of a boolean, it uses `type = \"TRAFFIC_TARGET_ALLOCATION_TYPE_LATEST\"`. The LLM emits the v1 boolean on v2 resources; provider rejects. Field has NO valid placement in v2 schema -> delete from anywhere. Surfaced by the Phase 2 SMOKE on poc-cloudrun.",
         "block_path": "",
         "field": "latest_revision"
+      },
+      {
+        "comment": "P4-11 (re-surfaced in SMOKE 4 on poc-cloudrun): `startup_cpu_boost` was a top-level template field in v1; v2 relocated the concept under `template.containers[].startup_probe` with a different shape. The cloud snapshot's `template.startupCpuBoost` survives gcloud describe and the LLM echoes it back. Provider rejects: 'argument named startup_cpu_boost is not expected here'. Same v1-vestige class as the two siblings above (P2-8, P2-12). The CC-9 golden example pointed at the right SHAPE but the LLM still emitted the field because the input JSON had it -- few-shot didn't override input data. Three-layer fix: snapshot_scrubber strips it pre-LLM (defense layer 1, see snapshot_scrubber.py), this entry strips it post-LLM (defense layer 2), golden example trimmed to remove the misleading 'NO startup_cpu_boost' comment (defense layer 3 -- absence is the signal, not prose).",
+        "block_path": "",
+        "field": "startup_cpu_boost"
       }
     ]
   }

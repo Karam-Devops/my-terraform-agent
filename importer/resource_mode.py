@@ -346,6 +346,68 @@ _MODES: Dict[str, Dict[str, Any]] = {
             "========================================================================\n"
         ),
     },
+    "cloud_run_v2_default": {
+        # P4-11: re-surfaced in SMOKE 4 on poc-cloudrun. The cloud snapshot
+        # carries v1-vestige fields (`startupCpuBoost`) at the template
+        # level that the v2 provider rejects ("argument is not expected
+        # here"). Same v1-vestige class as `container_concurrency`
+        # (P2-8) and `latest_revision` (P2-8) -- both already protected
+        # by post_llm_overrides. P4-11 adds the missing third entry +
+        # ALSO adds pre-LLM scrub here so the LLM never sees the field
+        # to copy from in the first place. Defense in depth.
+        #
+        # Detector is _always_true so the addendum + pruning apply to
+        # every cloud_run_v2_service snapshot. There's no v1 vs v2 mode
+        # split (v2 is always v2); the mode entry is the cleanest place
+        # in the existing infrastructure to hang per-tf_type "always
+        # strip these v1 vestiges" rules.
+        "applies_to": "google_cloud_run_v2_service",
+        "detect": _always_true,
+        "prune_top_level": [
+            # Top-level v1-vestige in some snapshots (rare; defensive).
+            "startupCpuBoost", "startup_cpu_boost",
+            # v1-only routing flag at top level (older snapshots).
+            "latestRevision", "latest_revision",
+            # v1's container_concurrency at top level (rare; usually
+            # nests inside template).
+            "containerConcurrency", "container_concurrency",
+        ],
+        "prune_paths": [
+            # Primary placement: nested under template in v2 cloud
+            # snapshots. The walker handles camelCase / snake_case both.
+            "template.startup_cpu_boost",
+            "template.container_concurrency",
+            "template.latest_revision",
+        ],
+        "prompt_addendum": (
+            "\n\n========================================================================\n"
+            "MODE OVERRIDE - CLOUD RUN v2 SERVICE\n"
+            "========================================================================\n"
+            "This is a google_cloud_run_v2_service (v2 schema). The legacy v1\n"
+            "resource (google_cloud_run_service) had several fields that v2\n"
+            "either renamed, relocated, or removed entirely. The cloud snapshot\n"
+            "may still carry the legacy field names; do NOT echo them back.\n"
+            "\n"
+            "FORBIDDEN in v2 -- DO NOT emit ANY of the following, at any nesting\n"
+            "level, regardless of what the input JSON contains:\n"
+            "  * `startup_cpu_boost`     -- v1 vestige; v2 relocated this concept\n"
+            "                              under `template.containers[].startup_probe`.\n"
+            "  * `container_concurrency` -- v1 placement; v2 uses\n"
+            "                              `template.max_instance_request_concurrency`.\n"
+            "  * `latest_revision = true`-- v1 routing flag; v2 traffic block uses\n"
+            "                              `type = \"TRAFFIC_TARGET_ALLOCATION_TYPE_LATEST\"`.\n"
+            "\n"
+            "REQUIRED v2 patterns:\n"
+            "  * `template.scaling.{min_instance_count, max_instance_count}` --\n"
+            "    explicit declaration documents intent (also satisfies our\n"
+            "    cloudrun_min_instances_documented policy rule).\n"
+            "  * `traffic { type = \"TRAFFIC_TARGET_ALLOCATION_TYPE_LATEST\", percent = 100 }`\n"
+            "    -- v2 string-typed allocation, NOT v1's boolean.\n"
+            "  * Health probes (startup_probe, liveness_probe) live INSIDE\n"
+            "    `template.containers[]`, NOT at template-level (v1's placement).\n"
+            "========================================================================\n"
+        ),
+    },
 }
 
 

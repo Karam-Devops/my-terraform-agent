@@ -1,25 +1,27 @@
-# Golden example: Cloud Run v2 Service (CC-9 P4-9a)
+# Golden example: Cloud Run v2 Service (CC-9 P4-9a; trimmed P4-11)
 #
-# Demonstrates the canonical v2 shape. KEY DIFFERENCES from the v1
-# google_cloud_run_service resource (do NOT include any of these on
-# v2 -- they're v1 vestiges that the v2 provider rejects):
-#   * NO container_concurrency at the top level (v1 placement;
-#     v2 uses template.scaling.max_instance_count + max_instance_request_concurrency).
-#   * NO latest_revision = true (v1-only routing field).
-#   * NO startup_cpu_boost at template level (P2-12: v2 relocated
-#     this to template.containers.startup_probe and renamed; safer
-#     to omit entirely until needed).
-#   * NO traffic block with `latest_revision = true` (use
-#     traffic { type = "TRAFFIC_TARGET_ALLOCATION_TYPE_LATEST" }).
+# Canonical v2 shape -- mirror what's BELOW.
+#
+# P4-11 lesson: forbidden v1-vestige fields (startup_cpu_boost,
+# container_concurrency, latest_revision) used to be enumerated
+# in prose comments here. SMOKE 4 proved comments-as-negative-
+# signal don't override input data -- the LLM still echoed
+# startup_cpu_boost from the cloud snapshot. Comments removed;
+# their ABSENCE from the example below is the signal. Belt-and-
+# braces: importer.resource_mode.cloud_run_v2_default mode strips
+# these fields from the snapshot pre-LLM, and post_llm_overrides.json
+# strips them post-LLM if the LLM still emits them.
 #
 # Required v2 shape:
 #   template.containers[].image
-#   template.scaling.{min_instance_count, max_instance_count} (CC-9
-#     also enforces explicit min via cloudrun_min_instances_documented
-#     policy rule -- declaring it satisfies that rule).
+#   template.scaling.{min_instance_count, max_instance_count}
+#     (also satisfies the cloudrun_min_instances_documented policy
+#     rule from P4-7).
 #
-# CRITICAL: v2 services use string type identifiers (e.g.
-# "TRAFFIC_TARGET_ALLOCATION_TYPE_LATEST") not v1's bare enums.
+# v2 traffic uses string-typed allocation:
+#   traffic { type = "TRAFFIC_TARGET_ALLOCATION_TYPE_LATEST" }
+# Health probes (startup_probe, liveness_probe) live INSIDE
+# template.containers[], NOT at template-level.
 
 resource "google_cloud_run_v2_service" "service_example" {
   name     = "poc-cloudrun-v2"
@@ -67,7 +69,6 @@ resource "google_cloud_run_v2_service" "service_example" {
     }
   }
 
-  # v2 traffic block uses string type, NOT v1's latest_revision = true.
   traffic {
     type    = "TRAFFIC_TARGET_ALLOCATION_TYPE_LATEST"
     percent = 100
