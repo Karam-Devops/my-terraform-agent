@@ -95,6 +95,62 @@ class FirewallNoOpenSshStructureTests(unittest.TestCase):
         self.assertIn("(CIS GCP 3.6)", self.contents)
 
 
+class FirewallNoOpenRdpStructureTests(unittest.TestCase):
+    """Sibling rule to no_open_ssh -- same shape, different port (3389)."""
+
+    RULE_FILE = "firewall_no_open_rdp.rego"
+
+    def setUp(self):
+        self.contents = _read_rule(self.RULE_FILE)
+
+    def test_declares_package_main(self):
+        self.assertIn("package main", self.contents)
+
+    def test_has_deny_rule(self):
+        self.assertIn("deny[msg]", self.contents)
+
+    def test_carries_provenance(self):
+        for label in ("Source:", "Standard:", "Default:"):
+            with self.subTest(label=label):
+                self.assertIn(label, self.contents)
+
+    def test_targets_port_3389(self):
+        # Sanity: must hit RDP, not SSH.
+        self.assertIn('"3389"', self.contents)
+
+    def test_cites_cis_3_7(self):
+        self.assertIn("CIS GCP 3.7", self.contents)
+
+    def test_uses_shared_helper(self):
+        # Sibling rules MUST use the shared allows_tcp_port_to_world
+        # helper rather than re-implementing the port-match logic.
+        # Otherwise we'd have two implementations to maintain.
+        self.assertIn("allows_tcp_port_to_world(", self.contents)
+
+
+class FirewallLogsEnabledStructureTests(unittest.TestCase):
+    RULE_FILE = "firewall_logs_enabled.rego"
+
+    def setUp(self):
+        self.contents = _read_rule(self.RULE_FILE)
+
+    def test_declares_package_main(self):
+        self.assertIn("package main", self.contents)
+
+    def test_has_deny_rule(self):
+        self.assertIn("deny[msg]", self.contents)
+
+    def test_carries_provenance(self):
+        for label in ("Source:", "Standard:", "Default:"):
+            with self.subTest(label=label):
+                self.assertIn(label, self.contents)
+
+    def test_checks_log_config_enable_field(self):
+        # Mined verbatim from gcp_network_enable_firewall_logs_v1.
+        self.assertIn("logConfig", self.contents)
+        self.assertIn('"enable"', self.contents)
+
+
 class FirewallHelpersTests(unittest.TestCase):
     """Shared helpers in _helpers.rego -- extracted P4-5 once the second
     sibling rule (no_open_rdp) made duplication concrete. Verifies the

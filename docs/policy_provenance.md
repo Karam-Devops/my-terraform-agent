@@ -41,7 +41,15 @@ Total rules: **16** (9 GCP + 7 AWS).
 | google_storage_bucket/bucket_public_access | gcp_storage_bucket_world_readable_v1 + gcp_storage_bucket_policy_only_v1 | CIS GCP 5.1, 5.2 | AC-3, SC-7 | mined: header + bucketPolicyOnly dual-check + IAM-binding direct check applied |
 | google_storage_bucket/bucket_retention | gcp_storage_bucket_retention_v1 | (NIST SI-12) | SI-12 | mined: header + max-retention future-work note |
 | google_storage_bucket/bucket_versioning | — (no GCP equivalent) | (industry consensus) | SI-12, CP-9 | header only — Google's library never wrote this |
-| google_compute_firewall/firewall_no_open_ssh | gcp_restricted_firewall_rules_v1 (derived) | CIS GCP 3.6 | SC-7 | **P4-5 NEW** — full rule, mining-derived |
+| google_compute_firewall/firewall_no_open_ssh | gcp_restricted_firewall_rules_v1 (derived) | CIS GCP 3.6 | SC-7 | **P4-5** — full rule, mining-derived |
+| google_compute_firewall/firewall_no_open_rdp | gcp_restricted_firewall_rules_v1 (derived) | CIS GCP 3.7 | SC-7 | **P4-5** — sibling of SSH, port 3389 |
+| google_compute_firewall/firewall_logs_enabled | gcp_network_enable_firewall_logs_v1 | CIS GCP 3.x | AU-12 | **P4-5** — logConfig.enable check |
+| google_compute_disk/disk_cmek_required | gcp_cmek_settings_v1 (proxy) | CIS GCP 4.7 | SC-28, SC-12 | **P4-5** — disk-side CMEK |
+| google_compute_disk/disk_snapshot_policy_attached | gcp_compute_disk_resource_policies_v1 (derived) | (industry consensus) | CP-9 | **P4-5** — non-empty resourcePolicies |
+| google_compute_network/network_no_default_vpc | gcp_network_restrict_default_v1 | CIS GCP 3.1 | SC-7 | **P4-5** — name == "default" deny |
+| google_compute_network/network_routing_mode_regional | gcp_network_routing_v1 (derived) | (industry consensus) | SC-7 | **P4-5** — REGIONAL stricter than Google's GLOBAL default |
+| google_compute_subnetwork/subnet_flow_logs_enabled | gcp_network_enable_flow_logs_v1 | CIS GCP 3.8 | AU-12 | **P4-5** — logConfig.enable + legacy enableFlowLogs, exempts proxy subnets |
+| google_compute_subnetwork/subnet_private_google_access | gcp_network_enable_private_google_access_v1 | (industry consensus) | SC-7 | **P4-5** — privateIpGoogleAccess required |
 | aws_instance/ec2_ebs_encryption | — (AWS) | CIS AWS 2.2.1 | SC-28 | header only |
 | aws_instance/ec2_imds_v2 | — (AWS) | CIS AWS 5.6 | AC-3 | header only |
 | aws_instance/ec2_no_public_ip | — (AWS) | (CIS Controls v8 12.x) | SC-7 | header only |
@@ -377,8 +385,71 @@ sibling). Cite "industry consensus / data-loss prevention".
 * **Helpers** in `_helpers.rego` (sibling): `default_list`,
   `firewall_enabled`, `sources_open_to_internet`, `permits_tcp`,
   `permits_port`, `allows_tcp_port_to_world` -- shared with
-  `firewall_no_open_rdp.rego` (CIS GCP 3.7) which ships in the
-  same P4-5 wave.
+  `firewall_no_open_rdp.rego` and any future port-specific rules.
+
+### 11. google_compute_firewall/firewall_no_open_rdp.rego (P4-5)
+
+* **Source:** same as #10 -- `gcp_restricted_firewall_rules_v1`.
+* Sibling of #10; reuses every helper. Port `"3389"` instead of
+  `"22"`. **CIS:** GCP 3.7. **NIST:** SC-7.
+
+### 12. google_compute_firewall/firewall_logs_enabled.rego (P4-5)
+
+* **Source:** `gcp_network_enable_firewall_logs_v1.yaml`.
+* **Mined field path:** `logConfig.enable` (defaults false). Deny
+  when not explicitly true. **CIS:** GCP 3.x (firewall logging).
+  **NIST:** AU-12 (Audit Generation).
+
+### 13. google_compute_disk/disk_cmek_required.rego (P4-5)
+
+* **Source:** `gcp_cmek_settings_v1.yaml` (proxy match: ours
+  targets the disk's `diskEncryptionKey.kmsKeyName`; Google's
+  targets the CryptoKey directly).
+* Helper `disk_kms_key_name` mirrors `bucket_encryption.rego`'s
+  `default_kms_key_name` pattern from P4-PRE. **CIS:** GCP 4.7.
+  **NIST:** SC-28, SC-12.
+
+### 14. google_compute_disk/disk_snapshot_policy_attached.rego (P4-5)
+
+* **Source:** `gcp_compute_disk_resource_policies_v1.yaml`
+  (derived). Google's template is parameterized
+  (allowlist/denylist of policy URLs); we hardcode the floor:
+  "non-empty `resourcePolicies` list".
+* **CIS:** No specific control. **NIST:** CP-9 (System Backup) --
+  the rule's intent (force scheduled snapshots).
+
+### 15. google_compute_network/network_no_default_vpc.rego (P4-5)
+
+* **Source:** `gcp_network_restrict_default_v1.yaml`.
+* **Mined sentinel:** `name == "default"` identifies the
+  auto-created default VPC (which carries permissive firewall
+  rules pre-applied). **CIS:** GCP 3.1. **NIST:** SC-7.
+
+### 16. google_compute_network/network_routing_mode_regional.rego (P4-5)
+
+* **Source:** `gcp_network_routing_v1.yaml`.
+* **Mined field path:** `routingConfig.routingMode`. Allowed
+  values: `"REGIONAL"`, `"GLOBAL"`. Google's archive default was
+  GLOBAL (or operator-parameterized); we choose REGIONAL for
+  tighter blast radius. Cite both in provenance.
+* **CIS:** No specific control. **NIST:** SC-7.
+
+### 17. google_compute_subnetwork/subnet_flow_logs_enabled.rego (P4-5)
+
+* **Source:** `gcp_network_enable_flow_logs_v1.yaml`.
+* **Mined field paths:** `logConfig.enable` (modern) AND
+  `enableFlowLogs` (legacy). Both checked because Google's
+  template does -- older subnetworks may carry the legacy field.
+* **Mined exemption:** `purpose` in
+  `{"REGIONAL_MANAGED_PROXY", "INTERNAL_HTTPS_LOAD_BALANCER"}`
+  -- control-plane subnets without traffic flow to log.
+* **CIS:** GCP 3.8. **NIST:** AU-12.
+
+### 18. google_compute_subnetwork/subnet_private_google_access.rego (P4-5)
+
+* **Source:** `gcp_network_enable_private_google_access_v1.yaml`.
+* **Mined field path:** `privateIpGoogleAccess` (bool). Deny when
+  false / absent. **NIST:** SC-7.
 
 ---
 
