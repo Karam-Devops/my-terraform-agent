@@ -6,6 +6,10 @@ from .. import llm_provider
 from . import config
 from . import post_llm_overrides
 from . import post_llm_validation
+from .golden_examples_loader import (
+    load_golden_example,
+    format_example_section,
+)
 from .schema_prompt import build_schema_summary
 
 _log = get_logger(__name__)
@@ -17,7 +21,7 @@ _log = get_logger(__name__)
 _DEBUG_HCL_TRUNCATE = 500
 
 
-def generate_hcl_from_json(resource_json_str, tf_type, hcl_name, attempt, schema=None, previous_error=None, expert_snippet=None, keys_to_omit=None, fields_to_ignore=None, mode_addendum=None):
+def generate_hcl_from_json(resource_json_str, tf_type, hcl_name, attempt, schema=None, previous_error=None, expert_snippet=None, keys_to_omit=None, fields_to_ignore=None, mode_addendum=None, modes=None):
     """Generates HCL using a strictly separated, additive prompt architecture."""
     _log.info(
         "llm_invoke_start",
@@ -202,9 +206,28 @@ def generate_hcl_from_json(resource_json_str, tf_type, hcl_name, attempt, schema
         if schema_block:
             system_prompt += schema_block
 
+    # 5b. CC-9 (P4-9a) Golden example injection.
+    # Goes AFTER the schema summary so the schema's required/computed
+    # flags are visible first, but BEFORE the mode_addendum (mode
+    # constraints are authoritative; the example is "shape-reference"
+    # only). When a mode-specialized example exists (e.g. cluster
+    # __gke_autopilot.tf vs __gke_standard.tf), the loader picks it
+    # via the `modes` arg derived from resource_mode.detect_modes().
+    golden_example = load_golden_example(tf_type, modes=modes)
+    if golden_example:
+        _log.info(
+            "golden_example_injected",
+            tf_type=tf_type,
+            hcl_name=hcl_name,
+            modes=list(modes) if modes else [],
+            example_size_chars=len(golden_example),
+        )
+        system_prompt += format_example_section(golden_example)
+
     # 6. Resource-mode addendum (PR-10: e.g. GKE Autopilot constraints)
-    # Goes AFTER the schema summary so it overrides the OPTIONAL BLOCKS
-    # listing — the LLM should treat mode constraints as authoritative.
+    # Goes AFTER the schema summary AND the golden example so the LLM
+    # treats mode constraints as authoritative -- example is
+    # shape-reference, mode_addendum is the override.
     if mode_addendum:
         system_prompt += mode_addendum
 

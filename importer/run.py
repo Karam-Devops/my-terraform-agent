@@ -657,10 +657,14 @@ def _generate_and_save_hcl(mapping, schema, heuristics_kb):
     expert_snippet_str = "\n".join(expert_instructions) if expert_instructions else None
 
     # --- 4. CALL LLM WITH ALL CONTEXT ---
+    # P4-9a CC-9: pass active_modes so the golden-example loader can
+    # pick the mode-specialized variant (cluster__gke_autopilot.tf vs
+    # cluster__gke_standard.tf, etc.).
     generated_hcl = hcl_generator.generate_hcl_from_json(
         resource_json, mapping['tf_type'], mapping['hcl_name'],
         attempt=1, schema=schema, expert_snippet=expert_snippet_str,
         keys_to_omit=keys_to_omit, mode_addendum=mode_addendum,
+        modes=active_modes,
     )
     
     if not generated_hcl: return (mapping, False, {"error": "LLM failed to generate HCL."})
@@ -773,6 +777,7 @@ def _attempt_correction(mapping, resource_json, previous_error, attempt_num, sch
     # PR-10: re-detect resource mode (the snapshot was already pruned upstream,
     # so detection still works — we just need the addendum back for the prompt).
     _correction_mode_addendum = ""
+    _modes = []  # P4-9a: needed by golden-example loader; init outside try
     try:
         _data = json.loads(resource_json)
         _modes = resource_mode.detect_modes(_data, mapping['tf_type'])
@@ -787,6 +792,7 @@ def _attempt_correction(mapping, resource_json, previous_error, attempt_num, sch
         expert_snippet=expert_snippet_str, # Pass the carefully formatted string
         keys_to_omit=keys_to_omit,
         mode_addendum=_correction_mode_addendum,
+        modes=_modes,  # P4-9a CC-9: golden-example loader uses mode for variant pick
     )
     
     if not corrected_hcl: return (mapping, "LLM failed to provide a correction.", False)
@@ -1117,6 +1123,7 @@ def run_workflow() -> WorkflowResult:
 
                     # PR-10: re-detect mode for the manual-snippet retry path too.
                     _manual_mode_addendum = ""
+                    _modes = []  # P4-9a: needed by golden-example loader
                     try:
                         _data = json.loads(resource_json)
                         _modes = resource_mode.detect_modes(_data, mapping['tf_type'])
@@ -1130,6 +1137,7 @@ def run_workflow() -> WorkflowResult:
                         expert_snippet=snippet_to_pass, # Pass the formatted instruction
                         keys_to_omit=keys_to_omit_immediate,
                         mode_addendum=_manual_mode_addendum,
+                        modes=_modes,  # P4-9a CC-9
                     )
 
                     if corrected_hcl:
