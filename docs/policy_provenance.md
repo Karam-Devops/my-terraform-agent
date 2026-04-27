@@ -60,6 +60,15 @@ Total rules: **16** (9 GCP + 7 AWS).
 | google_container_node_pool/node_pool_no_default_sa | gcp_gke_disable_default_service_account_v1 | CIS GCP 7.x | AC-6 | **P4-6** — config.serviceAccount != "default" |
 | google_kms_crypto_key/key_rotation_max_90_days | gcp_cmek_rotation_v1 | CIS GCP 1.10 | SC-12 | **P4-6** — STRICTER than Google's 1y default |
 | google_kms_crypto_key/key_protection_level_hsm | gcp_cmek_settings_v1 | (industry consensus) | SC-12, SC-13 | **P4-6** — versionTemplate.protectionLevel == HSM |
+| google_sql_database_instance/sql_no_public_ip | gcp_sql_public_ip_v1 | CIS GCP 6.5 | SC-7 | **P4-7** — settings.ipConfiguration.ipv4Enabled |
+| google_sql_database_instance/sql_ssl_required | gcp_sql_ssl_v1 | CIS GCP 6.4 | SC-8 | **P4-7** — settings.ipConfiguration.requireSsl |
+| google_sql_database_instance/sql_backup_enabled | gcp_sql_backup_v1 | CIS GCP 6.7 | CP-9 | **P4-7** — settings.backupConfiguration.enabled |
+| google_cloud_run_v2_service/cloudrun_no_public_invoker | NONE (Cloud Run not in archive) | CIS Controls v8 6.x | AC-3 | **P4-7** — roles/run.invoker not bound to allUsers |
+| google_cloud_run_v2_service/cloudrun_min_instances_documented | NONE (Cloud Run not in archive) | (industry consensus) | SA-3 | **P4-7** — template.scaling.minInstanceCount must be set |
+| google_pubsub_topic/pubsub_topic_cmek_required | NONE (Pub/Sub not in archive) | CIS Controls v8 3.11 | SC-28 | **P4-7** — kmsKeyName non-empty |
+| google_pubsub_topic/pubsub_topic_iam_no_allusers | NONE (Pub/Sub not in archive) | (industry consensus) | AC-3 | **P4-7** — no allUsers in iam_policy.bindings |
+| google_pubsub_subscription/pubsub_sub_dead_letter_configured | NONE (Pub/Sub not in archive) | (industry consensus) | SI-11 | **P4-7** — deadLetterPolicy.deadLetterTopic non-empty |
+| google_pubsub_subscription/pubsub_sub_iam_no_allusers | NONE (Pub/Sub not in archive) | (industry consensus) | AC-3 | **P4-7** — no allUsers in iam_policy.bindings |
 | aws_instance/ec2_ebs_encryption | — (AWS) | CIS AWS 2.2.1 | SC-28 | header only |
 | aws_instance/ec2_imds_v2 | — (AWS) | CIS AWS 5.6 | AC-3 | header only |
 | aws_instance/ec2_no_public_ip | — (AWS) | (CIS Controls v8 12.x) | SC-7 | header only |
