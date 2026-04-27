@@ -67,6 +67,20 @@ def _gke_is_standard(d: Any) -> bool:
     return not _gke_is_autopilot(d)
 
 
+def _always_true(d: Any) -> bool:
+    """Detector that fires for every snapshot of the registered tf_type.
+
+    Used by modes whose addendum / prune list applies universally to
+    all instances of a resource type, not conditionally on snapshot
+    content. P2-11 example: gke_node_pool mode's prompt addendum
+    applies to every node pool regardless of cluster mode (Autopilot
+    pools fail at describe so the addendum only effectively reaches
+    Standard pools, but we don't need to encode that condition --
+    the describe failure short-circuits before the mode applies).
+    """
+    return isinstance(d, dict)
+
+
 # ---------------------------------------------------------------------------
 # Mode registry
 # ---------------------------------------------------------------------------
@@ -210,10 +224,25 @@ _MODES: Dict[str, Dict[str, Any]] = {
     "gke_standard": {
         "applies_to": "google_container_cluster",
         "detect": _gke_is_standard,
-        # Standard clusters DON'T need snapshot pruning today -- their issues
-        # surface as LLM nesting hallucinations, not API/provider mismatches.
-        # When real Standard-only schema mismatches appear, add entries here.
-        "prune_top_level": [],
+        "prune_top_level": [
+            # P2-10: SMOKE 2 surfaced provider-rejection of poc-cluster-std
+            # because the LLM emitted BOTH `cluster_ipv4_cidr` (legacy
+            # top-level field) AND `ip_allocation_policy { ... }` (modern
+            # VPC-native block). Provider error: "cluster_ipv4_cidr
+            # conflicts with ip_allocation_policy". Modern Standard
+            # clusters ALWAYS have ip_allocation_policy (VPC-native is
+            # required for new clusters since 2022), so cluster_ipv4_cidr
+            # is universally redundant on real-world Standard snapshots.
+            #
+            # Caveat: very-old legacy non-VPC-native clusters (pre-2022,
+            # rare) DO need cluster_ipv4_cidr because they lack
+            # ip_allocation_policy. Stripping unconditionally loses
+            # config for those. Acceptable trade-off for now -- if a
+            # customer reports a legacy cluster import failure we'll
+            # add conditional logic (only prune when ip_allocation_policy
+            # is also present in the snapshot). Punchlist if it surfaces.
+            "clusterIpv4Cidr", "cluster_ipv4_cidr",
+        ],
         "prompt_addendum": (
             "\n\n========================================================================\n"
             "MODE OVERRIDE - GKE STANDARD CLUSTER\n"
@@ -259,6 +288,61 @@ _MODES: Dict[str, Dict[str, Any]] = {
             "  * `queued_provisioning { }`   -- enabled\n"
             "If a block name in your input JSON doesn't match one of the above,\n"
             "it belongs at the top-level cluster body, not inside node_pool.\n"
+            "========================================================================\n"
+        ),
+    },
+    "gke_node_pool": {
+        # P2-11: addresses LLM nesting hallucinations on
+        # google_container_node_pool. Surfaced by SMOKE 2 against
+        # poc-cluster-std/default-pool: LLM emitted `cgroup_mode =
+        # "CGROUP_MODE_V2"` directly inside `node_config { }` instead
+        # of inside `node_config.linux_node_config { }`. Provider
+        # rejects with "argument named cgroup_mode is not expected here".
+        # Same nesting-confusion pattern as P2-9 for clusters; this mode
+        # generalises the fix to the node pool resource type.
+        #
+        # Detector is _always_true so the addendum is injected for
+        # every node_pool snapshot. Autopilot node pools never reach
+        # this code path (their describe is blocked by Google API
+        # before mode detection) so the mode effectively applies only
+        # to Standard pool imports.
+        "applies_to": "google_container_node_pool",
+        "detect": _always_true,
+        # No snapshot pruning yet -- the bug is LLM mis-nesting, not an
+        # API/provider mismatch. Add prune entries here if a Standard
+        # pool field surfaces as universally-rejected.
+        "prune_top_level": [],
+        "prompt_addendum": (
+            "\n\n========================================================================\n"
+            "MODE OVERRIDE - GKE NODE POOL NESTING\n"
+            "========================================================================\n"
+            "node_config has TWO levels of inner blocks. Some fields go DIRECTLY\n"
+            "in node_config; others go inside its `linux_node_config` /\n"
+            "`windows_node_config` / `gvnic` / `kubelet_config` sub-blocks.\n"
+            "Putting a field at the wrong level produces 'Unsupported argument'.\n"
+            "\n"
+            "FIELDS THAT GO IN `node_config { linux_node_config { ... } }`:\n"
+            "  * `cgroup_mode = \"CGROUP_MODE_V2\"`  (Linux cgroup version)\n"
+            "  * `sysctls = { ... }`                (Linux kernel parameters)\n"
+            "  * `hugepages_config { }`             (Linux hugepages)\n"
+            "\n"
+            "FIELDS THAT GO IN `node_config { kubelet_config { ... } }`:\n"
+            "  * `cpu_manager_policy`\n"
+            "  * `cpu_cfs_quota`\n"
+            "  * `pod_pids_limit`\n"
+            "  * `insecure_kubelet_readonly_port_enabled`\n"
+            "\n"
+            "FIELDS THAT GO DIRECTLY IN `node_config { ... }`:\n"
+            "  * `machine_type`, `disk_size_gb`, `disk_type`, `image_type`\n"
+            "  * `service_account`, `oauth_scopes`, `metadata`\n"
+            "  * `labels`, `tags`, `taint`, `resource_labels`\n"
+            "  * `preemptible`, `spot`, `min_cpu_platform`\n"
+            "  * `boot_disk_kms_key`, `enable_confidential_storage`\n"
+            "\n"
+            "RULE OF THUMB: if the field name starts with a Linux-kernel concept\n"
+            "(cgroup, sysctl, hugepages) it goes in `linux_node_config`. If it's\n"
+            "a kubelet-tuning concept (cpu_manager, pod_pids, kubelet_*) it goes\n"
+            "in `kubelet_config`. Otherwise it goes directly in `node_config`.\n"
             "========================================================================\n"
         ),
     },

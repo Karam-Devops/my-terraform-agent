@@ -160,8 +160,8 @@ class P29PruneListTests(unittest.TestCase):
         self.assertIn("nodeLocations", dropped)
 
     def test_standard_does_not_strip_node_locations(self):
-        """Symmetric: Standard mode has empty prune_top_level, so
-        nodeLocations passes through untouched (the post-LLM rename
+        """Symmetric: Standard mode does NOT prune nodeLocations,
+        so it passes through untouched (the post-LLM rename
         from P2-2 then handles `locations` -> `node_locations`)."""
         snap = {
             "name": "std-cluster",
@@ -170,6 +170,84 @@ class P29PruneListTests(unittest.TestCase):
         cleaned, dropped = apply_modes(dict(snap), ["gke_standard"])
         self.assertIn("nodeLocations", cleaned)
         self.assertEqual(dropped, [])
+
+    def test_standard_strips_cluster_ipv4_cidr(self):
+        """P2-10: SMOKE 2 surfaced
+        `cluster_ipv4_cidr conflicts with ip_allocation_policy`.
+        Modern Standard clusters always have ip_allocation_policy
+        (VPC-native required since 2022), making cluster_ipv4_cidr
+        redundant at the top-level. Strip it from Standard snapshots
+        so the LLM never emits both mutually-exclusive fields."""
+        snap = {
+            "name": "std-cluster",
+            "clusterIpv4Cidr": "10.36.0.0/14",
+            "ipAllocationPolicy": {"useIpAliases": True},
+        }
+        cleaned, dropped = apply_modes(dict(snap), ["gke_standard"])
+        self.assertNotIn("clusterIpv4Cidr", cleaned)
+        self.assertIn("clusterIpv4Cidr", dropped)
+        # ipAllocationPolicy survives -- the modern equivalent that
+        # the LLM should write into HCL.
+        self.assertIn("ipAllocationPolicy", cleaned)
+
+
+class GkeNodePoolModeTests(unittest.TestCase):
+    """P2-11 regression coverage for the new gke_node_pool mode.
+
+    SMOKE 2 surfaced this:
+        Error: Unsupported argument
+        on google_container_node_pool_default_pool.tf line 39:
+        39:       cgroup_mode = "CGROUP_MODE_V2"
+        An argument named "cgroup_mode" is not expected here.
+
+    cgroup_mode lives at node_config.linux_node_config.cgroup_mode in
+    the schema, NOT directly in node_config. The LLM's nesting
+    confusion needed prompt-level guidance.
+    """
+
+    def test_node_pool_mode_fires_on_any_node_pool_snapshot(self):
+        """Detector is _always_true for the node pool resource type;
+        every node pool snapshot triggers the addendum regardless of
+        its content."""
+        for snap in (
+            {"name": "default-pool"},
+            {"name": "pool-1", "config": {"machineType": "e2-medium"}},
+            {},  # empty dict -- still a dict
+        ):
+            with self.subTest(snap=snap):
+                modes = detect_modes(snap, "google_container_node_pool")
+                self.assertEqual(modes, ["gke_node_pool"])
+
+    def test_node_pool_mode_does_not_fire_on_clusters(self):
+        """The mode is scoped via applies_to -- doesn't accidentally
+        fire on cluster snapshots."""
+        snap = {"name": "some-cluster"}
+        modes = detect_modes(snap, "google_container_cluster")
+        self.assertNotIn("gke_node_pool", modes)
+
+    def test_node_pool_addendum_mentions_cgroup_mode_correct_nesting(self):
+        """The specific SMOKE 2 failure case must be covered in the
+        addendum text: cgroup_mode + linux_node_config."""
+        addendum = mode_prompt_addendum(["gke_node_pool"])
+        self.assertIn("cgroup_mode", addendum)
+        self.assertIn("linux_node_config", addendum)
+
+
+class P211AlwaysTrueDetectorTests(unittest.TestCase):
+    """Pin the _always_true detector contract used by gke_node_pool."""
+
+    def test_returns_true_for_any_dict(self):
+        from importer.resource_mode import _always_true
+        self.assertTrue(_always_true({}))
+        self.assertTrue(_always_true({"name": "foo"}))
+        self.assertTrue(_always_true({"a": 1, "b": 2}))
+
+    def test_returns_false_for_non_dict(self):
+        """Defensive: protect against non-dict input regardless of type."""
+        from importer.resource_mode import _always_true
+        for bad in (None, [], "", 0, 42, "string"):
+            with self.subTest(value=bad):
+                self.assertFalse(_always_true(bad))
 
 
 class GkeStandardPromptAddendumTests(unittest.TestCase):
