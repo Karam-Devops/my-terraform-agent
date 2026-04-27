@@ -1,5 +1,6 @@
 # my-terraform-agent/translator/run.py
 
+import concurrent.futures
 import glob
 import os
 import time
@@ -381,6 +382,122 @@ def discover_translatable_files(workdir: str) -> List[dict]:
     return out
 
 
+def _translate_one_file(
+    *,
+    source_path: str,
+    target: str,
+    tenant_id: Optional[str],
+    project_id: Optional[str],
+    log,
+) -> FileOutcome:
+    """Per-file worker for run_translation_batch's parallel execution.
+
+    P4-15: extracted from the original run_translation_batch for-loop body
+    so it can be submitted to a ThreadPoolExecutor. Catches every
+    exception so the future returned by the executor never raises --
+    one bad file does NOT kill the batch.
+
+    Args:
+        source_path: absolute or relative path of the GCP .tf source.
+        target: "aws" or "azure" -- already validated by caller.
+        tenant_id / project_id: SaaS context plumbing (forwarded to
+            run_translation_pipeline; bound on the per-file logger).
+        log: the structlog logger pre-bound by the caller with
+            target_cloud + tenant_id + project_id + batch_size context.
+
+    Returns:
+        Always a FileOutcome (never raises). Status is one of
+        "translated" / "needs_attention" / "failed" per the rules
+        documented inline.
+    """
+    file_started = time.monotonic()
+    try:
+        is_valid, output_path = run_translation_pipeline(
+            target,
+            source_path,
+            tenant_id=tenant_id,
+            project_id=project_id,
+        )
+    except Exception as e:  # noqa: BLE001 -- isolate per-file failures
+        # Per-file failure -- one bad file does NOT kill the batch.
+        # This is the C5.1 Bug B equivalent for the translator: a
+        # single LLM exception or write error in file N must not
+        # propagate up and crash files N+1..len(source_paths).
+        file_duration = round(time.monotonic() - file_started, 2)
+        log.error(
+            "translation_file_outcome",
+            source_path=source_path,
+            status="failed",
+            error_type=type(e).__name__,
+            error=str(e),
+            duration_s=file_duration,
+        )
+        return FileOutcome(
+            source_path=source_path,
+            target_cloud=target,
+            status="failed",
+            output_path=None,
+            validation_error=f"{type(e).__name__}: {e}",
+            duration_s=file_duration,
+        )
+
+    file_duration = round(time.monotonic() - file_started, 2)
+    if output_path is None:
+        # Pipeline returned (False, None) -- couldn't even produce
+        # output (LLM empty, file read error, etc.). Counted as
+        # `failed`, not `needs_attention`.
+        log.warning(
+            "translation_file_outcome",
+            source_path=source_path,
+            status="failed",
+            duration_s=file_duration,
+        )
+        return FileOutcome(
+            source_path=source_path,
+            target_cloud=target,
+            status="failed",
+            output_path=None,
+            validation_error="pipeline returned no output path",
+            duration_s=file_duration,
+        )
+
+    if is_valid:
+        log.info(
+            "translation_file_outcome",
+            source_path=source_path,
+            status="translated",
+            output_path=output_path,
+            duration_s=file_duration,
+        )
+        return FileOutcome(
+            source_path=source_path,
+            target_cloud=target,
+            status="translated",
+            output_path=output_path,
+            validation_error="",
+            duration_s=file_duration,
+        )
+
+    # Output produced but failed validation -- the existing pipeline
+    # saves best-effort HCL anyway. UI renders this as "needs
+    # attention" per CC-5.
+    log.warning(
+        "translation_file_outcome",
+        source_path=source_path,
+        status="needs_attention",
+        output_path=output_path,
+        duration_s=file_duration,
+    )
+    return FileOutcome(
+        source_path=source_path,
+        target_cloud=target,
+        status="needs_attention",
+        output_path=output_path,
+        validation_error="output failed schema validation; saved for review",
+        duration_s=file_duration,
+    )
+
+
 def run_translation_batch(
     target_cloud: str,
     source_paths: List[str],
@@ -446,102 +563,47 @@ def run_translation_batch(
     log.info("translation_batch_start")
 
     started = time.monotonic()
-    files: List[FileOutcome] = []
-    translated = 0
-    needs_attention = 0
-    failed = 0
-
-    for source_path in source_paths:
-        file_started = time.monotonic()
-        try:
-            is_valid, output_path = run_translation_pipeline(
-                target,
-                source_path,
+    # P4-15: parallel batch translation. The pipeline is heavily I/O-bound
+    # (3 Vertex AI round-trips per file) so threading delivers near-linear
+    # speedup up to the LLM-quota wall. Bounded by
+    # config.MAX_TRANSLATION_WORKERS (default 4) to leave headroom under
+    # the typical 60 RPM Gemini Pro per-project quota -- 4 workers * 3
+    # calls / ~30s = ~24 RPM avg, well below the limit.
+    #
+    # Per-file failure isolation is preserved: _translate_one_file catches
+    # every exception and returns a FileOutcome with status="failed". One
+    # bad file never kills the batch.
+    #
+    # Input ordering is preserved in the returned `files` list via an
+    # index map so dashboards / UI render in selection order, not
+    # arrival-time order. Per the FileOutcome dataclass contract.
+    outcomes_by_index: dict = {}
+    with concurrent.futures.ThreadPoolExecutor(
+        max_workers=config.MAX_TRANSLATION_WORKERS,
+    ) as executor:
+        future_to_index = {
+            executor.submit(
+                _translate_one_file,
+                source_path=sp,
+                target=target,
                 tenant_id=tenant_id,
                 project_id=project_id,
-            )
-        except Exception as e:  # noqa: BLE001 -- isolate per-file failures
-            # Per-file failure -- one bad file does NOT kill the batch.
-            # This is the C5.1 Bug B equivalent for the translator: a
-            # single LLM exception or write error in file N must not
-            # propagate up and crash files N+1..len(source_paths).
-            file_duration = round(time.monotonic() - file_started, 2)
-            log.error(
-                "translation_file_outcome",
-                source_path=source_path,
-                status="failed",
-                error_type=type(e).__name__,
-                error=str(e),
-                duration_s=file_duration,
-            )
-            files.append(FileOutcome(
-                source_path=source_path,
-                target_cloud=target,
-                status="failed",
-                output_path=None,
-                validation_error=f"{type(e).__name__}: {e}",
-                duration_s=file_duration,
-            ))
-            failed += 1
-            continue
+                log=log,
+            ): i
+            for i, sp in enumerate(source_paths)
+        }
+        for future in concurrent.futures.as_completed(future_to_index):
+            idx = future_to_index[future]
+            # _translate_one_file catches every exception internally and
+            # always returns a FileOutcome -- future.result() never raises.
+            outcomes_by_index[idx] = future.result()
 
-        file_duration = round(time.monotonic() - file_started, 2)
-        if output_path is None:
-            # Pipeline returned (False, None) -- couldn't even produce
-            # output (LLM empty, file read error, etc.). Counted as
-            # `failed`, not `needs_attention`.
-            log.warning(
-                "translation_file_outcome",
-                source_path=source_path,
-                status="failed",
-                duration_s=file_duration,
-            )
-            files.append(FileOutcome(
-                source_path=source_path,
-                target_cloud=target,
-                status="failed",
-                output_path=None,
-                validation_error="pipeline returned no output path",
-                duration_s=file_duration,
-            ))
-            failed += 1
-        elif is_valid:
-            log.info(
-                "translation_file_outcome",
-                source_path=source_path,
-                status="translated",
-                output_path=output_path,
-                duration_s=file_duration,
-            )
-            files.append(FileOutcome(
-                source_path=source_path,
-                target_cloud=target,
-                status="translated",
-                output_path=output_path,
-                validation_error="",
-                duration_s=file_duration,
-            ))
-            translated += 1
-        else:
-            # Output produced but failed validation -- the existing
-            # pipeline saves best-effort HCL anyway. UI renders this
-            # as "needs attention" per CC-5.
-            log.warning(
-                "translation_file_outcome",
-                source_path=source_path,
-                status="needs_attention",
-                output_path=output_path,
-                duration_s=file_duration,
-            )
-            files.append(FileOutcome(
-                source_path=source_path,
-                target_cloud=target,
-                status="needs_attention",
-                output_path=output_path,
-                validation_error="output failed schema validation; saved for review",
-                duration_s=file_duration,
-            ))
-            needs_attention += 1
+    files: List[FileOutcome] = [
+        outcomes_by_index[i] for i in range(len(source_paths))
+    ]
+    translated = sum(1 for f in files if f.status == "translated")
+    needs_attention = sum(1 for f in files if f.status == "needs_attention")
+    failed = sum(1 for f in files if f.status == "failed")
 
     duration_s = round(time.monotonic() - started, 2)
     skipped = max(
@@ -561,13 +623,130 @@ def run_translation_batch(
     return result
 
 
+def _select_workdir() -> Optional[str]:
+    """Discover importer workdirs + prompt operator to pick one.
+
+    Mirrors the importer's project-selection menu pattern. Returns the
+    chosen workdir absolute path, or None if no workdirs exist OR the
+    operator cancelled.
+    """
+    imported_root = os.path.abspath("imported")
+    if not os.path.isdir(imported_root):
+        print(f"\n❌ No imported/ directory found at {imported_root}")
+        print("   Run the importer (python -m my-terraform-agent.importer.run) "
+              "first.")
+        return None
+
+    candidates = sorted([
+        d for d in os.listdir(imported_root)
+        if os.path.isdir(os.path.join(imported_root, d))
+        and not d.startswith(".")
+    ])
+    if not candidates:
+        print(f"\n❌ No project workdirs found under {imported_root}")
+        return None
+
+    if len(candidates) == 1:
+        chosen = candidates[0]
+        print(f"\nUsing only available workdir: {chosen}")
+        return os.path.join(imported_root, chosen)
+
+    print("\nAvailable project workdirs:")
+    for i, name in enumerate(candidates, start=1):
+        print(f"  [{i}] {name}")
+    while True:
+        raw = input(
+            f"\nPick a workdir [1-{len(candidates)}], or 0 to cancel: "
+        ).strip()
+        if raw == "0":
+            return None
+        try:
+            idx = int(raw)
+            if 1 <= idx <= len(candidates):
+                return os.path.join(imported_root, candidates[idx - 1])
+        except ValueError:
+            pass
+        print(f"❌ Invalid choice. Enter 1-{len(candidates)} or 0.")
+
+
+def _select_files(entries: List[dict]) -> List[str]:
+    """P4-15 multi-select menu over discover_translatable_files() output.
+
+    Mirrors the importer's checkbox-grid pattern (CSV indices). Returns
+    the list of source file paths the operator picked, or [] if they
+    cancelled.
+    """
+    if not entries:
+        print("\n❌ No translatable files found in this workdir.")
+        return []
+
+    print(f"\n--- Select Files to Translate ({len(entries)} discovered) ---")
+    for i, entry in enumerate(entries, start=1):
+        print(f"  [{i:>3}] {entry['display_label']:<50}  "
+              f"({entry['tf_type']})")
+
+    while True:
+        raw = input(
+            "\nEnter file numbers separated by commas (e.g. 1,3,5), "
+            "'all' for all files, or 0 to cancel: "
+        ).strip().lower()
+        if raw == "0":
+            return []
+        if raw in ("all", "*"):
+            return [e["file_path"] for e in entries]
+        try:
+            picks = [int(x.strip()) for x in raw.split(",") if x.strip()]
+        except ValueError:
+            print("❌ Invalid input. Use comma-separated numbers or 'all'.")
+            continue
+        if any(p < 1 or p > len(entries) for p in picks):
+            print(f"❌ Numbers must be in range 1-{len(entries)}.")
+            continue
+        return [entries[p - 1]["file_path"] for p in picks]
+
+
+def _print_batch_summary(result: TranslationResult) -> None:
+    """Render the customer-facing batch summary -- mirrors the CC-5 spec
+    for the SaaS UI's translator results panel."""
+    print("\n" + "=" * 70)
+    print(f"   TRANSLATION BATCH COMPLETE ({result.target_cloud.upper()})")
+    print("=" * 70)
+    print(f"  Selected:        {result.selected}")
+    print(f"  ✅ Translated:    {result.translated}")
+    if result.needs_attention:
+        print(f"  ⚠️  Needs review:  {result.needs_attention}")
+    if result.failed:
+        print(f"  ❌ Failed:        {result.failed}")
+    if result.skipped:
+        print(f"  ⏭  Skipped:       {result.skipped}")
+    print(f"  Duration:        {result.duration_s}s "
+          f"(parallel; up to {config.MAX_TRANSLATION_WORKERS} workers)")
+    print(f"  Exit code:       {result.exit_code}")
+
+    # Per-file detail (CC-5 needs_attention rendering at the CLI layer)
+    if result.needs_attention or result.failed:
+        print("\n--- Per-file outcomes (review needed) ---")
+        for f in result.files:
+            if f.status == "translated":
+                continue
+            badge = {"needs_attention": "⚠️ ", "failed": "❌"}.get(
+                f.status, "  ",
+            )
+            print(f"  {badge} {os.path.basename(f.source_path):<60}  "
+                  f"{f.status}  ({f.validation_error[:80]})")
+    print("=" * 70)
+
+
 def main():
     """Interactive CLI wrapper for local testing.
 
-    print() statements remain in this function -- they're interactive UI
-    prompts, not operational events. Operational events live in
-    run_translation_pipeline() above and now flow through the structured
-    logger. Same separation as importer/run.py's CLI vs operational logs.
+    P4-15: rebuilt around the P3-6 batch backend. Was single-file
+    (one path prompt -> one pipeline call); now is multi-select
+    (workdir prompt -> file picker over discover_translatable_files()
+    -> parallel run_translation_batch()).
+
+    print() statements remain interactive UI; operational events flow
+    through structured logging via the pipeline.
     """
     print("\n" + "=" * 70)
     print("   MULTI-CLOUD IaC TRANSLATION ENGINE")
@@ -575,24 +754,37 @@ def main():
 
     # 1. Choose Target Cloud
     while True:
-        target = input("\nTranslate GCP resource to [AWS] or [Azure]? (Enter 'aws' or 'azure'): ").strip().lower()
+        target = input(
+            "\nTranslate GCP resources to [AWS] or [Azure]? "
+            "(Enter 'aws' or 'azure'): "
+        ).strip().lower()
         if target in ['aws', 'azure']:
             break
         print("❌ Invalid choice. Please enter 'aws' or 'azure'.")
 
-    # 2. Get Source File
-    source_file = input("\nEnter the path to the GCP .tf file you want to translate: ").strip()
+    # 2. Pick the workdir.
+    workdir = _select_workdir()
+    if not workdir:
+        print("\nCancelled.")
+        return
 
-    # 3. Execute the headless pipeline.
-    # CLI invocations don't have a tenant context (the SaaS UI does -- see
-    # Phase 5 packaging where tenant_id flows in from the request envelope).
-    # The pipeline accepts None for both and renders structured logs with
-    # tenant_id="unknown" / project_id="unknown" so dashboards parse cleanly.
-    success, output_file = run_translation_pipeline(target, source_file)
+    # 3. Discover + multi-select files.
+    entries = discover_translatable_files(workdir)
+    source_paths = _select_files(entries)
+    if not source_paths:
+        print("\nCancelled (no files selected).")
+        return
 
-    print("\n" + "=" * 70)
-    print(f"TRANSLATION COMPLETE ({target.upper()})")
-    print("=" * 70)
+    # 4. Execute the parallel batch.
+    # CLI invocations don't have a tenant context (the SaaS UI does --
+    # see Phase 5 packaging where tenant_id flows in from the request
+    # envelope). The pipeline accepts None for both and renders
+    # structured logs with tenant_id="unknown" / project_id="unknown".
+    print(f"\n--- Translating {len(source_paths)} file(s) to {target.upper()} "
+          f"in parallel (max {config.MAX_TRANSLATION_WORKERS} workers) ---")
+    result = run_translation_batch(target, source_paths)
+
+    _print_batch_summary(result)
 
 
 if __name__ == "__main__":

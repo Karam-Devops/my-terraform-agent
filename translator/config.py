@@ -10,6 +10,25 @@ from common.terraform_path import resolve_terraform_path as _resolve_terraform
 # --- LLM Settings ---
 MAX_RETRIES = 3 # We'll keep retries lower for translation, as it's less prone to state-engine quirks
 
+# --- Concurrency (P4-15) ---
+# Bound on parallel translation workers when run_translation_batch fans
+# out across multiple source files. Each in-flight worker holds 3
+# Vertex AI requests in sequence (blueprint extract -> target HCL gen
+# -> validator-driven re-prompts), so the per-minute LLM-call rate is
+# roughly workers * 3 * (1 / per-file-duration-seconds). Default 4
+# leaves comfortable headroom under Vertex AI's typical 60 RPM Gemini
+# Pro per-project quota (4 workers * 3 calls / ~30s = ~24 RPM avg).
+#
+# Override via env var if you've raised the project quota OR want
+# stricter throttling on a smoke run:
+#     export MAX_TRANSLATION_WORKERS=8   # higher -- needs quota headroom
+#     export MAX_TRANSLATION_WORKERS=1   # serialize for predictable retros
+#
+# Setting to 1 is the safest fallback for any environment where the
+# Vertex AI quota is unknown -- the batch still runs, just sequentially.
+import os as _os
+MAX_TRANSLATION_WORKERS = int(_os.environ.get("MAX_TRANSLATION_WORKERS", "4"))
+
 # --- Translation Heuristics (The "Rosetta Stone") ---
 AWS_ARCHITECTURAL_RULES = """
 CRITICAL AWS ARCHITECTURAL RULES:
