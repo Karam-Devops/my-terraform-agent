@@ -51,19 +51,31 @@ import os
 # Resource types we evaluate. Mirrors detector/config.py IN_SCOPE_TF_TYPES;
 # kept independent so policy can be enabled per-type without coupling.
 #
-# P3-4: aws_instance + aws_s3_bucket added. Phase 4 CG-2 will widen this
-# further to match the importer's full type coverage (currently 17 GCP +
-# the 2 AWS types here). For Phase 3 we ship only the AWS analogues of
-# the existing GCP types so policy authoring is symmetric across clouds
-# at the shipped pair.
-IN_SCOPE_TF_TYPES = {
-    # GCP
-    "google_compute_instance",
-    "google_storage_bucket",
-    # AWS (P3-4)
-    "aws_instance",
-    "aws_s3_bucket",
-}
+# P4-4 (CG-2 part A): widened from 4 (compute_instance, storage_bucket,
+# aws_instance, aws_s3_bucket) to 17 GCP + 2 AWS = 19 total. The 17
+# GCP types are auto-derived from importer.config.TF_TYPE_TO_GCLOUD_INFO
+# so a new importer type flows into policy scope automatically.
+#
+# Per-type Rego rule files for the new GCP types ship in P4-5/6/7
+# (~25 new rules using the GCP-archive mining methodology from P4-PRE).
+# For now (P4-4), the new types get evaluated by ``common/`` rules
+# only -- the mandatory_labels rule fires on every GCP-shape resource,
+# so the policy enforcer reports labelling violations across the full
+# coverage immediately, even before per-type rules ship.
+#
+# AWS scope (aws_instance, aws_s3_bucket) deliberately stays at the 2
+# types we already have rules for. AWS coverage parity is a Phase 5+
+# concern (different SDK + IAM model + asset enumeration entirely).
+from importer import config as _importer_config
+
+IN_SCOPE_TF_TYPES: set[str] = (
+    set(_importer_config.TF_TYPE_TO_GCLOUD_INFO.keys())
+    | {
+        # AWS (P3-4)
+        "aws_instance",
+        "aws_s3_bucket",
+    }
+)
 
 # --- Policy bundle layout --------------------------------------------------
 

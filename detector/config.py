@@ -2,15 +2,76 @@
 """
 Drift-detection scope and normalization rules.
 
-For the POC we deliberately limit scope to two resource types so we can
-iterate fast on the diff semantics before scaling to ASSET_TO_TERRAFORM_MAP.
+P4-4 (CG-2 part A): scope expanded from 2 -> 17 GCP types to match
+the importer's full coverage (importer.config.TF_TYPE_TO_GCLOUD_INFO).
+A two-tier model lets us extend coverage WITHOUT producing massive
+false-positive drift on types that lack normalization rules:
+
+  IN_SCOPE_TF_TYPES     -- snapshot fetch + policy evaluation runs.
+                          17 GCP types, auto-derived from importer
+                          config so a new importer type flows in
+                          automatically without a separate edit.
+
+  DRIFT_AWARE_TF_TYPES  -- the deterministic diff_engine has full
+                          normalization rules (RESOURCE_IGNORE_FIELDS,
+                          COMPLEX_BLOCKS_TO_SKIP, FIELD_ALIASES, etc.)
+                          so per-resource drift output is reliable.
+                          Currently 2 types (compute_instance,
+                          storage_bucket); each new type promoted as
+                          its normalization rules ship.
+
+  drift-stub types      -- in IN_SCOPE_TF_TYPES but NOT in
+                          DRIFT_AWARE_TF_TYPES. detector.run.py's diff
+                          loop emits a `drift_stub=True` ResourceDrift
+                          entry for these (no items, no error) so the
+                          UI can render "we monitor this type, but the
+                          drift checker is conservative -- false
+                          negatives possible".
+
+The policy enforcer's IN_SCOPE_TF_TYPES is a separate set (in
+policy/config.py) -- both engines reach the same coverage but stay
+independently configurable.
 """
 
 import json
 import os
 
-# --- Scope: which resource types we will detect drift on (POC) ---
-IN_SCOPE_TF_TYPES = {
+from importer import config as _importer_config
+
+# --- Scope: which resource types we will detect drift on -----------------
+#
+# P4-4: auto-derived from importer.config.TF_TYPE_TO_GCLOUD_INFO so a
+# new importer type (added in a future Phase 4 wave or beyond) flows
+# into detector scope automatically without a separate edit -- the
+# detector and importer stay in sync by construction.
+#
+# Snapshot fetch (cloud_snapshot.fetch_snapshots) + policy evaluation
+# (policy/integration.py decoration) run for every type in this set.
+# Per-resource drift comparison is gated separately by
+# DRIFT_AWARE_TF_TYPES below; types in IN_SCOPE_TF_TYPES but not in
+# DRIFT_AWARE_TF_TYPES are tagged as drift-stub.
+IN_SCOPE_TF_TYPES = set(_importer_config.TF_TYPE_TO_GCLOUD_INFO.keys())
+
+# --- Drift-aware subset: types with full normalization rules ------------
+#
+# The deterministic diff_engine has per-type normalization rules
+# (RESOURCE_IGNORE_FIELDS, COMPLEX_BLOCKS_TO_SKIP, FIELD_ALIASES,
+# LEAF_ONLY_FIELDS, etc. defined below). Without them the diff would
+# emit massive noise on cloud-only computed fields, server-set IDs,
+# and TF/cloud naming differences.
+#
+# To promote a new tf_type from drift-stub to drift-aware:
+#   1. Land its RESOURCE_IGNORE_FIELDS / COMPLEX_BLOCKS_TO_SKIP /
+#      FIELD_ALIASES entries in this file.
+#   2. Add it to this set.
+#   3. Run a smoke against a real instance of the type to verify the
+#      diff is clean on a no-change baseline (no noise drift).
+#
+# Phase 4 P4-4 ships only the original 2 types as drift-aware; the
+# remaining 15 are drift-stub. CG-1's unmanaged-resource tracking
+# (rescan.py P4-3) works for ALL 17 types regardless of drift-aware
+# status -- it diffs sets, not field values.
+DRIFT_AWARE_TF_TYPES = {
     "google_compute_instance",
     "google_storage_bucket",
 }
@@ -242,7 +303,31 @@ _HEURISTICS_IGNORES = _load_heuristics_ignores()
 # --- Public accessors ----------------------------------------------------
 
 def is_in_scope(tf_type: str) -> bool:
+    """True if this type gets snapshot-fetched + policy-evaluated.
+
+    P4-4: now covers all 17 importer-supported types (auto-derived
+    from importer config). Per-resource drift comparison is gated
+    separately by ``is_drift_aware()`` -- callers running the
+    diff_engine should check both predicates.
+    """
     return tf_type in IN_SCOPE_TF_TYPES
+
+
+def is_drift_aware(tf_type: str) -> bool:
+    """True if the diff_engine has full normalization rules for this type.
+
+    P4-4 (CG-2 part A): types in IN_SCOPE_TF_TYPES but NOT
+    drift-aware are processed as drift-stub -- snapshots fetched +
+    policy evaluated, but per-field drift comparison skipped (would
+    produce massive false-positive noise without per-type
+    normalization rules).
+
+    UI surfaces drift-stub vs drift-aware so customers know the
+    drift checker is conservative on the stub set ("we monitor this
+    type but false negatives are possible -- promote when you need
+    field-level drift detection").
+    """
+    return tf_type in DRIFT_AWARE_TF_TYPES
 
 
 def fields_to_ignore_for(tf_type: str) -> set:

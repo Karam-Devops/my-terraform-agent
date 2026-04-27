@@ -206,9 +206,23 @@ class ResourceDrift:
     # detector.run after diff_resource() returns. Rendered as a bracketed
     # suffix on the resource header line by print_report.
     policy_tag: Optional[str] = None
+    # P4-4 (CG-2 part A): True when this entry represents a type that's in
+    # IN_SCOPE_TF_TYPES but NOT in DRIFT_AWARE_TF_TYPES -- snapshot was
+    # fetched and policy ran, but the deterministic per-field diff was
+    # SKIPPED because the type lacks normalization rules. UI surfaces
+    # this as "monitored, drift checker conservative -- false negatives
+    # possible". Counts as NOT drifted (so it doesn't trigger
+    # remediation prompts) but is recorded so the report shows the
+    # type was visited.
+    drift_stub: bool = False
 
     @property
     def has_drift(self) -> bool:
+        # P4-4: drift-stub entries explicitly DON'T count as drift even
+        # though items might be empty -- they're informational
+        # placeholders for not-yet-fully-supported types.
+        if self.drift_stub:
+            return False
         return bool(self.items) or self.error is not None
 
 

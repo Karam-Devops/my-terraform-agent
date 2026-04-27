@@ -131,6 +131,34 @@ def main() -> int:
     for r in resources:
         if not r.in_scope:
             continue
+
+        # P4-4 drift-stub gating: snapshots are fetched for ALL in-scope
+        # types (so the policy enforcer can evaluate them), but the
+        # deterministic diff_engine has full normalization rules only
+        # for the DRIFT_AWARE subset. For drift-stub types we record a
+        # placeholder ResourceDrift so the report acknowledges we
+        # visited the type, without running a noisy diff that would
+        # produce false-positive drift on every cloud-only computed
+        # field. UI surfaces drift_stub=True as "monitored but the
+        # drift checker is conservative -- false negatives possible".
+        if not config.is_drift_aware(r.tf_type):
+            drift = diff_engine.ResourceDrift(
+                tf_address=r.tf_address,
+                tf_type=r.tf_type,
+                drift_stub=True,
+            )
+            # Policy decoration still applies to drift-stub types --
+            # the policy enforcer doesn't depend on per-field drift.
+            if _POLICY_AVAILABLE:
+                impact = policy_integration.classify_drift(
+                    tf_address=drift.tf_address,
+                    tf_type=drift.tf_type,
+                    cloud_snapshot=snapshots.get(r.tf_address),
+                )
+                drift.policy_tag = impact.summary_tag
+            drifts.append(drift)
+            continue
+
         drift = diff_engine.diff_resource(
             tf_address=r.tf_address,
             tf_type=r.tf_type,
