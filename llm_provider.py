@@ -159,8 +159,8 @@ def get_llm_client():
                   mode="json",
                   model=config.GEMINI_MODEL,
                   max_retries=config.LLM_MAX_RETRIES,
-                  request_timeout_s=config.LLM_TIMEOUT_SECONDS)
-        # P3-5: request_timeout was defined in config.py but never wired
+                  timeout_s=config.LLM_TIMEOUT_SECONDS)
+        # P3-5: timeout was defined in config.py but never wired
         # to the LangChain client (Phase 0 audit WARN). Without it, the
         # client falls back to the SDK default (no per-request timeout
         # at all on some Vertex AI client versions), so a hung Vertex
@@ -168,11 +168,21 @@ def get_llm_client():
         # safe_invoke() wrapper below adds an outer retry loop that
         # converts persistent failures to typed UpstreamTimeout for
         # the caller to handle.
+        #
+        # P4-12: SMOKE 4 surfaced that the original kwarg name
+        # `request_timeout` was silently dropped into model_kwargs by
+        # newer langchain-google-vertexai (the LangChain layer renamed
+        # the parameter to `timeout`). The result: the timeout was
+        # NEVER actually applied -- a hung Vertex request would have
+        # hung indefinitely despite the apparent "wiring". UserWarning
+        # in SMOKE 4 stdout: "Unexpected argument 'request_timeout'
+        # provided to ChatVertexAI. Did you mean: 'timeout'?". Renamed
+        # to `timeout` per the LangChain warning's hint.
         _llm_json_client = ChatVertexAI(
             model_name=config.GEMINI_MODEL,
             temperature=0.0,
             max_retries=config.LLM_MAX_RETRIES,
-            request_timeout=config.LLM_TIMEOUT_SECONDS,
+            timeout=config.LLM_TIMEOUT_SECONDS,
             model_kwargs={
                 "response_format": {"type": "json_object"},
                 "convert_system_message_to_human": True,
@@ -201,14 +211,15 @@ def get_llm_text_client():
                   mode="text",
                   model=config.GEMINI_MODEL,
                   max_retries=config.LLM_MAX_RETRIES,
-                  request_timeout_s=config.LLM_TIMEOUT_SECONDS)
-        # P3-5: same request_timeout wiring as the JSON client. See
-        # get_llm_client() docstring for the rationale.
+                  timeout_s=config.LLM_TIMEOUT_SECONDS)
+        # P3-5 + P4-12: same `timeout` kwarg wiring as the JSON
+        # client. See get_llm_client() docstring for the rationale +
+        # the rename history.
         _llm_text_client = ChatVertexAI(
             model_name=config.GEMINI_MODEL,
             temperature=0.05,  # tiny temperature helps code-gen variety
             max_retries=config.LLM_MAX_RETRIES,
-            request_timeout=config.LLM_TIMEOUT_SECONDS,
+            timeout=config.LLM_TIMEOUT_SECONDS,
             # No response_format -> raw text output.
         )
         _log.info("llm_client_create_ok", mode="text")
