@@ -37,6 +37,29 @@ lets a deployment intentionally eager-init at boot:
 import time
 
 import vertexai
+# CC-7 / P3-7 (2026-04-27): ChatVertexAI emits a LangChainDeprecationWarning
+# on every invoke ("deprecated in LangChain 3.2.0, will be removed in 4.0.0;
+# use langchain-google-genai instead"). The warning's recommended fix is
+# WRONG for our architecture: langchain-google-genai is the Google AI
+# Studio API client (API-key auth), NOT a Vertex AI client. Our Phase 5
+# Cloud Run design relies on Vertex AI + ADC + cross-project SA
+# impersonation (host SA -> tenant SA), which Google AI Studio does not
+# support.
+#
+# The genuine migration target is one of:
+#   1. A successor class in langchain-google-vertexai itself (the
+#      package may have introduced one and the warning forgot to point
+#      at it).
+#   2. Drop LangChain for the LLM-call layer and use
+#      vertexai.generative_models.GenerativeModel directly. We already
+#      wrap retry/backoff ourselves (safe_invoke, P3-5); LangChain's
+#      value-add for our two-message prompts is marginal.
+#
+# Decision (P3-7): defer the migration to Phase 5 packaging when
+# requirements.txt pinning happens together. The warning is non-fatal
+# (LangChain 4.0 has no announced ship date), so we have runway. See
+# docs/saas_readiness_punchlist.md CC-7 for the full scope-correction
+# note.
 from langchain_google_vertexai import ChatVertexAI
 
 from .config import config

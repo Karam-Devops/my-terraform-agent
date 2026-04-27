@@ -406,7 +406,7 @@ guessing.
 
 ### CC-7. LangChain dependency migration before LangChain 4.0 ships
 
-**Today.** `llm_provider.py:35` uses `langchain_google_vertexai.ChatVertexAI`,
+**Today.** `llm_provider.py:40` uses `langchain_google_vertexai.ChatVertexAI`,
 which emits this deprecation warning on every translator
 invocation:
 
@@ -420,16 +420,64 @@ When LangChain ships 4.0 (no announced date but typically every
 6-12 months for a major), every LLM call breaks. Surfaced by the
 Phase 1 SMOKE Translator run.
 
-**Fix.** Migrate `llm_provider.py` from
-`langchain_google_vertexai.ChatVertexAI` to
-`langchain_google_genai.ChatGoogleGenerativeAI`. Verify the
-`temperature` / `max_tokens` / `model` arg shapes match (they
-should, per LangChain's published migration guide). Run the
-translator test suite + the Phase 1 SMOKE again to confirm
-output quality unchanged.
+**P3-7 scope correction (2026-04-27).** Initial punchlist entry
+treated this as a simple "switch one import, change one class
+name" job. It isn't. Investigation during P3-7:
 
-**Effort.** Half a day. **Phase 3** (rolls into Translator
-hardening — same module touch).
+  * `langchain-google-vertexai` (what we use today): Vertex AI
+    backend, ADC-based auth, supports cross-project Service
+    Account impersonation. This is what our Phase 5 Cloud Run
+    architecture relies on (host-project SA impersonates a
+    customer-tenant SA to read their assets).
+  * `langchain-google-genai` (what the deprecation warning
+    recommends): Google AI Studio API backend, API-key auth, no
+    SA impersonation. **Different service entirely.** The
+    deprecation warning is a misleading default for users with
+    a Google account who just want to call Gemini; it is the
+    wrong answer for our enterprise architecture.
+
+The actual migration path for Vertex AI users is unclear from
+the warning text alone. Likely options (need confirmation
+against the package maintainers' guidance, NOT just the
+deprecation message):
+
+  1. A non-deprecated class within `langchain-google-vertexai`
+     itself (the package may have introduced a successor class
+     that the warning forgot to point at).
+  2. A different package entirely (`langchain-google-vertex` or
+     similar that's emerged since the warning was written).
+  3. Drop LangChain for the LLM call layer and call
+     `vertexai.generative_models.GenerativeModel` directly --
+     LangChain's value-add for our two-message prompts is
+     marginal; we already wrap retry/backoff ourselves
+     (`safe_invoke`, P3-5). This is the lowest-risk option:
+     vertex SDK is the canonical Google-supported path and has
+     no LangChain-version-coupling.
+
+**Decision (P3-7).** Do NOT blindly flip the import to
+`langchain-google-genai` -- that would silently move us off
+Vertex AI and break Phase 5 SA impersonation. Instead, this
+commit:
+
+  * Documents the deprecation context + the correct
+    architecture-aware migration paths in `llm_provider.py`
+    so future maintainer doesn't fall into the same trap.
+  * Defers the actual code flip to **Phase 5 packaging** when
+    `requirements.txt` pinning + Cloud Run dependency-resolution
+    happens together. Coupling the migration with Phase 5 keeps
+    the dep-version bump in one diff and one verification cycle
+    rather than two (now + later).
+  * The deprecation warning is non-fatal -- LangChain 4.0 has no
+    announced ship date, so we have runway. P2 SMOKE evidence:
+    the warning prints on every invocation but does not
+    interfere with output quality or stability.
+
+**Effort.** Half a day for the **investigation + flip** when
+Phase 5 lands; ~zero for this docs-only commit.
+
+**Status.** **Phase 5** (deferred from Phase 3 -- scope was
+miscoded as "trivial dep flip" but is actually "service-layer
+migration with backend implications").
 
 ---
 
@@ -502,7 +550,7 @@ hardening — same module touch).
 | Importer engine-specific WARN cluster | Phase 1 | 0.5 day |
 | Translator cold-start + tenant params + collisions | Phase 3 | 1 day |
 | **CC-6 Translator multi-file batch selection** (backend) | **Phase 3** | **0.5 day** |
-| **CC-7 LangChain dep migration** | **Phase 3** | **0.5 day** |
+| **CC-7 LangChain dep migration** | **Phase 5** (deferred from P3, see scope-correction note) | **0.5 day** |
 | CC-2 subprocess timeouts (detector half) | Phase 4 | 0.5 day |
 | Detector engine-specific WARN cluster | Phase 4 | 0.5 day |
 | Policy violation cap | Phase 4 | 0.25 day |
