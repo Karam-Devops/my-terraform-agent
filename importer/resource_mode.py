@@ -114,18 +114,6 @@ _MODES: Dict[str, Dict[str, Any]] = {
             # keep the field and the rename converts the LLM's hallucinated
             # `locations` to the correct `node_locations` HCL form.
             "nodeLocations", "node_locations",
-            # P2-9: Autopilot manages observability internally. The API
-            # returns `advancedDatapathObservabilityConfig` with content
-            # the LLM faithfully reflects, but the provider rejects any
-            # config in this block on Autopilot ("argument enable_relay
-            # is required" -- unfixable from the cloud snapshot because
-            # Autopilot owns the value). Strip the entire block from the
-            # snapshot so the LLM never emits it for Autopilot clusters.
-            # Standard clusters keep the block; if their LLM emission has
-            # the partial-empty issue, that's a separate Standard-mode
-            # concern handled by the gke_standard prompt addendum below.
-            "advancedDatapathObservabilityConfig",
-            "advanced_datapath_observability_config",
         ],
         # Nested paths to strip (dotted, snake_case; walker handles
         # camelCase automatically). Addons Autopilot manages and the
@@ -144,6 +132,24 @@ _MODES: Dict[str, Dict[str, Any]] = {
             "addons_config.stateful_ha_config",
             "addons_config.config_connector_config",
             "addons_config.gke_backup_agent_config",
+            # P2-9.1 hotfix: P2-9 placed this in `prune_top_level` but the
+            # field actually lives at `monitoring_config.advanced_datapath_observability_config`
+            # in the GCP API response (NOT at the cluster's top level). The
+            # original placement was a no-op against any real Autopilot
+            # snapshot because the field never appeared at the top level
+            # to be matched. Surfaced by Phase 2 SMOKE 2 against poc-cluster:
+            # the partial-empty `advanced_datapath_observability_config { }`
+            # error STILL fired post-P2-9, indicating the prune didn't
+            # touch anything. Moved to prune_paths (nested-dotted-path
+            # mechanism via _strip_one_path) where it actually matches.
+            #
+            # Autopilot manages observability internally; the API returns
+            # this nested block with content the LLM faithfully reflects
+            # but the provider rejects with "argument enable_relay is
+            # required" -- unfixable post-LLM because Autopilot owns the
+            # value. Stripping at snapshot stage means the LLM never sees
+            # it and never emits the partial-empty block.
+            "monitoring_config.advanced_datapath_observability_config",
         ],
         "prompt_addendum": (
             "\n\n========================================================================\n"

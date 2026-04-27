@@ -113,14 +113,40 @@ class P29PruneListTests(unittest.TestCase):
     """
 
     def test_autopilot_strips_advanced_datapath_observability_config(self):
+        """P2-9.1 hotfix: this field is NESTED at
+        monitoring_config.advanced_datapath_observability_config in the
+        actual API response, NOT at the cluster's top level. The
+        original P2-9 placement in `prune_top_level` was a no-op against
+        real Autopilot snapshots; surfaced by SMOKE 2. Hotfix moved the
+        entry to `prune_paths` where _strip_one_path actually matches it.
+        """
         snap = {
             "name": "ap-cluster",
             "autopilotConfig": {"enabled": True},
-            "advancedDatapathObservabilityConfig": {"enableMetrics": True},
+            "monitoringConfig": {
+                "componentConfig": {"enableComponents": ["SYSTEM_COMPONENTS"]},
+                "advancedDatapathObservabilityConfig": {
+                    "enableMetrics": True,
+                    "relayMode": "INTERNAL_VPC_LB",
+                },
+            },
         }
         cleaned, dropped = apply_modes(dict(snap), ["gke_autopilot"])
-        self.assertNotIn("advancedDatapathObservabilityConfig", cleaned)
-        self.assertIn("advancedDatapathObservabilityConfig", dropped)
+        # The nested block is gone; the parent (monitoringConfig) survives
+        # with its OTHER content intact.
+        self.assertNotIn(
+            "advancedDatapathObservabilityConfig",
+            cleaned.get("monitoringConfig", {}),
+        )
+        # Sibling content under monitoringConfig is preserved -- we only
+        # pruned the one nested path, not the parent.
+        self.assertIn("componentConfig", cleaned.get("monitoringConfig", {}))
+        # `dropped` reports the actual cloud-JSON path that was removed
+        # (camelCase, since that's how it appeared in the snapshot).
+        self.assertIn(
+            "monitoringConfig.advancedDatapathObservabilityConfig",
+            dropped,
+        )
 
     def test_autopilot_strips_node_locations(self):
         """P2-2 addition; pinned here as the prune list grows."""
