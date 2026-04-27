@@ -254,6 +254,101 @@ Translator should mirror it.
 **Effort.** 0.5 day backend + Phase 6 UI rendering. Backend lands
 **Phase 3** (rolls into Translator hardening); UI lands **Phase 6**.
 
+### CC-8. URN-as-displayName normalisation — surfaced + shipped in Phase 2 SMOKE 1 (CLOSED)
+
+**Today (closed by P2-6 commit `70bf9c0`).** Cloud Asset Inventory
+returns the full URN as `displayName` for several project-scoped
+resource types whose canonical name IS the URN (KMS keyring + crypto
+key, Pub/Sub topic + subscription, possibly other future types like
+Secret Manager). Pre-P2-6 the importer used the URN verbatim as
+`resource_name` (gcloud describe arg) AND `hcl_name_base` (HCL
+resource label + filename). Three downstream failures:
+
+  1. Resource line `resource "tf_type" "projects/.../keyRings/k"`
+     is invalid HCL syntax (slashes not allowed in identifiers) ->
+     `hcl_validation_failed reason=missing_resource_line`. Hit on
+     keyring + topic + subscription in SMOKE 1.
+  2. Filename `tf_type_projects/.../keyRings/k.tf` fails file write
+     on Windows (slashes interpreted as directory separators). Hit
+     on crypto_key in SMOKE 1.
+  3. gcloud describe call uses the URN where a short name would do
+     -- redundant, ugly, but functionally correct.
+
+**Fix (shipped P2-6).** New `gcp_client.friendly_name_from_display(raw)`
+helper: when raw contains "/", returns only the last path segment;
+otherwise returns unchanged. Pure function, fail-safe on None /
+empty. Used in `run.py _map_asset_to_terraform` for the non-SA
+branch. Verified end-to-end in SMOKE 2: all 4 URN-style assets
+imported successfully.
+
+**Status.** CLOSED. Listed here for punchlist completeness +
+provenance for future readers wondering why
+`friendly_name_from_display` exists.
+
+### CC-9. Few-shot golden examples for top 10 resource types
+
+**Today.** LLM HCL generation relies on:
+  * Pre-LLM: snapshot scrubbing (snapshot_scrubber, resource_mode,
+    P2-7 nested empty blocks)
+  * Schema oracle: per-attribute writability/required/computed flags
+    fed into the prompt
+  * Post-LLM: deterministic correction (post_llm_overrides for renames /
+    deletions, post_llm_validation for empty-block scrubbing)
+  * Self-correction loop: LLM regenerates with terraform error context
+    on failures, up to MAX_LLM_RETRIES
+
+This catches a LOT, but the LLM has no concrete reference shape for
+the resource type it's generating -- it works from the schema +
+input JSON alone. Smoke evidence (Phase 2 SMOKE 2) shows the LLM
+still hallucinates field names (cluster_ipv4_cidr conflict),
+nesting (cgroup_mode in wrong block), and v1-vs-v2 schema
+confusion (Cloud Run container_concurrency).
+
+The world-class enterprise approach to this exact problem is
+**few-shot prompting with golden examples**: include 1-2
+known-good HCL examples for the resource type in the system
+prompt. The LLM pattern-matches against the golden output instead
+of working from schema-spec alone. Per published industry results
+(GitHub Copilot, Cursor, Anthropic's own research), this typically
+lifts first-attempt accuracy from ~70% to ~90%+ on the covered types.
+
+**Spec.** New `importer/golden_examples/<tf_type>.tf` directory
+with one hand-written, plan-clean HCL file per type. Top 10 types
+to cover (by smoke evidence + customer relevance):
+  1. google_container_cluster (Standard mode)
+  2. google_container_cluster (Autopilot mode)
+  3. google_container_node_pool
+  4. google_compute_instance
+  5. google_storage_bucket
+  6. google_kms_crypto_key
+  7. google_cloud_run_v2_service
+  8. google_pubsub_subscription
+  9. google_compute_subnetwork
+  10. google_service_account
+
+New helper in `hcl_generator.py` that loads the example for the
+target tf_type (if present) and prepends it to the system prompt
+in a clearly-marked "REFERENCE EXAMPLE" section. Per-mode
+specialisation (Autopilot vs Standard cluster) handled via
+`<tf_type>__<mode>.tf` filename convention.
+
+**Effort.** ~0.5 day per golden example × 10 types = ~5 days.
+Half spent writing the example (verify it plan-clean against a
+canonical instance), half on the prompt-builder + tests.
+
+**Phase.** Phase 4 (per-engine quality wave alongside Detector +
+Policy hygiene). Earlier doesn't make sense -- we need 2-3 more
+SMOKE iterations to know which types actually have the worst
+hallucination rates and prioritize accordingly.
+
+**Why this matters for the demo.** Cluster + node_pool LLM
+hallucinations are the dominant remaining failure mode after
+P2-1..P2-11. Few-shot examples are the established way to close
+that gap without architectural changes (constrained generation /
+function calling) that would take weeks. Direct ROI: every
+additional resource type that imports clean first-try is one less
+"⚠ needs attention" card the customer sees in the SaaS UI.
+
 ### CC-7. LangChain dependency migration before LangChain 4.0 ships
 
 **Today.** `llm_provider.py:35` uses `langchain_google_vertexai.ChatVertexAI`,
@@ -358,15 +453,18 @@ hardening — same module touch).
 | Policy violation cap | Phase 4 | 0.25 day |
 | **CG-1 unmanaged-resource tracking (Drift engine)** | **Phase 4** | **1.5 days** |
 | **CG-2 Detector + Policy coverage parity** | **Phase 4** | **2 days** |
+| **CC-9 Few-shot golden examples (top 10 types)** | **Phase 4** | **5 days** |
 | CC-3 cold-start preflight | Phase 5 | 1 day |
 | **CC-5 ResourceOutcome backend** | **Phase 5** | **1 day** |
 | **CC-5 + CC-6 UI rendering** | **Phase 6** | **(folded into Phase 6 UI work)** |
+| **CC-8 URN-as-displayName normalisation** | **CLOSED** (Phase 2 P2-6 / `70bf9c0`) | shipped |
 
-**Total additional effort folded in:** ~10.5 days (5 days original
+**Total additional effort folded in:** ~15.5 days (5 days original
 hygiene + 1.5 days CG-1 + 4 days surfaced by Phase 1 SMOKE: CC-5
-backend, CC-6 backend, CC-7 dep migration, CG-2 coverage parity),
-distributed across phases that were already going to touch each
-engine. No standalone "fix the audit findings" phase.
+backend, CC-6 backend, CC-7 dep migration, CG-2 coverage parity +
+5 days surfaced by Phase 2 SMOKEs: CC-9 few-shot examples). No
+standalone "fix the audit findings" phase; every item folds into a
+phase that was already going to touch the relevant engine.
 
 **Items surfaced by Phase 1 SMOKE (2026-04-26):** CC-5, CC-6, CC-7,
 CG-2. The smoke against `dev-proj-470211` exercised all 4 engines
@@ -375,6 +473,25 @@ customer-facing failure rendering needs structure (CC-5), Translator's
 single-file CLI doesn't translate to a SaaS UX (CC-6), LangChain
 deprecation will break us when 4.0 ships (CC-7), Detector + Policy
 cover only 2/11 resource types vs the importer (CG-2).
+
+**Items surfaced by Phase 2 SMOKEs (2026-04-27):**
+  * **CC-8 URN-as-displayName** -- found + fixed in same iteration
+    (P2-6 commit `70bf9c0`). KMS / Pub/Sub asset types return URN
+    rather than short name as displayName; broke HCL labels +
+    filenames. Now CLOSED.
+  * **CC-9 Few-shot golden examples** -- the strategic enterprise
+    answer to LLM HCL-quality variance, surfaced as the dominant
+    remaining failure mode after P2-1..P2-11. Cluster cascade +
+    nesting confusion = ~3 of 16 resources fail per smoke. Few-shot
+    examples are the industry-standard fix that closes 70% -> 90%+
+    first-attempt accuracy without architectural changes. Phase 4.
+
+The Phase 2 smokes also exposed the per-resource UX vocabulary
+that CC-5 needs to render: 9 distinct `failure_reason` enum values
+mapped to customer-facing actions (auto_fix, skip, import_anyway,
+why_link, retry, show_what_to_grant, open_quota_request,
+tell_us_about_use_case, show_details). See CC-5 spec for the full
+table.
 
 ---
 
