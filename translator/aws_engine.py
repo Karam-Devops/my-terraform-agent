@@ -162,7 +162,8 @@ def generate_aws_hcl(
                 HumanMessage(content=correction_human),
             ])
         
-        response = llm_client.invoke(messages)
+        # P3-5: see yaml_engine.py for safe_invoke rationale.
+        response = llm_provider.safe_invoke(llm_client, messages)
         aws_hcl_output = response.content.strip()
 
         if not aws_hcl_output:

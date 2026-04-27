@@ -105,7 +105,8 @@ def generate_azure_hcl(
                 HumanMessage(content=correction_human),
             ])
 
-        response = llm_client.invoke(messages)
+        # P3-5: see yaml_engine.py for safe_invoke rationale.
+        response = llm_provider.safe_invoke(llm_client, messages)
         hcl_output = response.content.strip()
 
         if not hcl_output:

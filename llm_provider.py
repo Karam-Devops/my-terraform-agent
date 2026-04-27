@@ -34,14 +34,34 @@ lets a deployment intentionally eager-init at boot:
     behaviour from the user's perspective, just shifted by one call site.
 """
 
+import time
+
 import vertexai
 from langchain_google_vertexai import ChatVertexAI
 
 from .config import config
-from .common.errors import PreflightError
+from .common.errors import PreflightError, UpstreamTimeout
 from .common.logging import get_logger
 
 _log = get_logger(__name__)
+
+# P3-5: tokens that, when present in the str() of a raised exception,
+# mark it as "transient -- worth retrying" rather than a permanent
+# bug. Heuristic-based (LangChain's exception types vary across
+# package versions and we don't want to lock to a specific version's
+# internal exception hierarchy). Conservative list -- if a token
+# appears here it's well-known industry shorthand for a backoff-able
+# condition.
+_TRANSIENT_ERROR_TOKENS = (
+    "429",                  # HTTP 429 Too Many Requests / quota
+    "ResourceExhausted",    # gRPC RESOURCE_EXHAUSTED (Google API style)
+    "DeadlineExceeded",     # gRPC DEADLINE_EXCEEDED (timeout)
+    "timeout",              # generic timeout in error message
+    "timed out",            # generic timeout in error message (verb form)
+    "503",                  # HTTP 503 Service Unavailable
+    "502",                  # HTTP 502 Bad Gateway (proxy/load balancer hiccup)
+    "Unavailable",          # gRPC UNAVAILABLE
+)
 
 
 # ---------------------------------------------------------------------------
@@ -115,11 +135,21 @@ def get_llm_client():
         _log.info("llm_client_create_start",
                   mode="json",
                   model=config.GEMINI_MODEL,
-                  max_retries=config.LLM_MAX_RETRIES)
+                  max_retries=config.LLM_MAX_RETRIES,
+                  request_timeout_s=config.LLM_TIMEOUT_SECONDS)
+        # P3-5: request_timeout was defined in config.py but never wired
+        # to the LangChain client (Phase 0 audit WARN). Without it, the
+        # client falls back to the SDK default (no per-request timeout
+        # at all on some Vertex AI client versions), so a hung Vertex
+        # request could wedge the calling worker indefinitely. The
+        # safe_invoke() wrapper below adds an outer retry loop that
+        # converts persistent failures to typed UpstreamTimeout for
+        # the caller to handle.
         _llm_json_client = ChatVertexAI(
             model_name=config.GEMINI_MODEL,
             temperature=0.0,
             max_retries=config.LLM_MAX_RETRIES,
+            request_timeout=config.LLM_TIMEOUT_SECONDS,
             model_kwargs={
                 "response_format": {"type": "json_object"},
                 "convert_system_message_to_human": True,
@@ -147,15 +177,151 @@ def get_llm_text_client():
         _log.info("llm_client_create_start",
                   mode="text",
                   model=config.GEMINI_MODEL,
-                  max_retries=config.LLM_MAX_RETRIES)
+                  max_retries=config.LLM_MAX_RETRIES,
+                  request_timeout_s=config.LLM_TIMEOUT_SECONDS)
+        # P3-5: same request_timeout wiring as the JSON client. See
+        # get_llm_client() docstring for the rationale.
         _llm_text_client = ChatVertexAI(
             model_name=config.GEMINI_MODEL,
             temperature=0.05,  # tiny temperature helps code-gen variety
             max_retries=config.LLM_MAX_RETRIES,
+            request_timeout=config.LLM_TIMEOUT_SECONDS,
             # No response_format -> raw text output.
         )
         _log.info("llm_client_create_ok", mode="text")
     return _llm_text_client
+
+
+def _is_transient_error(exc: Exception) -> bool:
+    """Heuristic-classify an exception as worth retrying.
+
+    Rather than coupling to a specific LangChain version's exception
+    hierarchy (which has changed across the 0.x / 1.x / 2.x / 3.x line),
+    we string-match the exception text against a conservative list of
+    well-known industry shorthand for transient backoff-able conditions.
+    Pure function so it's unit-testable without mocking the LLM client.
+
+    Returns:
+        True if the exception's str() representation contains any token
+        from _TRANSIENT_ERROR_TOKENS. False otherwise.
+    """
+    text = str(exc)
+    return any(token in text for token in _TRANSIENT_ERROR_TOKENS)
+
+
+def safe_invoke(client, messages, *, max_attempts: int = None,
+                base_delay_s: float = 2.0):
+    """Invoke an LLM with exponential backoff on transient failures.
+
+    Wraps ``client.invoke(messages)`` with a retry loop targeting:
+
+      * HTTP 429 / RESOURCE_EXHAUSTED  (quota / rate limit)
+      * Timeout / DEADLINE_EXCEEDED    (request didn't return in time)
+      * HTTP 502 / 503 / UNAVAILABLE   (upstream / proxy hiccup)
+
+    Non-transient errors (auth failures, malformed input, unknown
+    model, bad SDK config) are NOT retried -- they propagate
+    immediately so the caller sees the real bug instead of waiting
+    for backoff to give up.
+
+    Backoff schedule: ``base_delay_s * (2 ** attempt)`` -- so with the
+    default ``base_delay_s=2.0`` the delays are 2s, 4s, 8s, 16s before
+    each successive retry attempt. Capped at ``max_attempts`` total
+    invocations.
+
+    Args:
+        client:        a ChatVertexAI (or compatible) instance with
+            an ``.invoke(messages)`` method that returns an object
+            with a ``.content`` attribute on success.
+        messages:      list of LangChain ``BaseMessage`` instances
+            (System + Human + ...) describing the prompt.
+        max_attempts:  total invocation count (initial + retries).
+            Defaults to ``config.LLM_MAX_RETRIES + 1`` so we get the
+            same effective retry budget as ChatVertexAI's built-in
+            ``max_retries``, just at our outer layer instead of theirs.
+            We re-do the budget at the outer layer because LangChain's
+            internal retry doesn't always classify 429 as retryable
+            depending on package version (P3-7 migration replaces
+            this with a more predictable surface).
+        base_delay_s:  base for exponential backoff. Default 2.0s
+            chosen to align with the recommended Vertex AI quota
+            cool-down on 429 responses.
+
+    Returns:
+        The ``client.invoke(messages)`` return value on success.
+
+    Raises:
+        UpstreamTimeout: when ``max_attempts`` retries all surface
+            transient errors. The original final exception is preserved
+            in ``__cause__`` for debug. ``elapsed_s`` and ``timeout_s``
+            fields on the raised UpstreamTimeout reflect the wall-clock
+            spent across ALL retry attempts (including backoff sleeps),
+            so log filters keying off `timeout_s` see the real total
+            blast radius rather than just the last attempt's slice.
+        Exception: any non-transient exception raised by the underlying
+            ``client.invoke()`` propagates unchanged. Caller decides how
+            to surface (translator engines today catch broadly).
+    """
+    if max_attempts is None:
+        max_attempts = config.LLM_MAX_RETRIES + 1
+    started = time.monotonic()
+    last_exc = None
+    for attempt in range(1, max_attempts + 1):
+        try:
+            return client.invoke(messages)
+        except Exception as e:  # noqa: BLE001 -- classified below
+            last_exc = e
+            if not _is_transient_error(e):
+                # Permanent error -- don't waste retries / backoff on
+                # something that will never succeed.
+                _log.warning(
+                    "llm_invoke_permanent_error",
+                    attempt=attempt,
+                    error_type=type(e).__name__,
+                    error=str(e),
+                )
+                raise
+            if attempt >= max_attempts:
+                # All retries exhausted on transient errors -- caller
+                # gets a typed UpstreamTimeout with the real total
+                # elapsed time so dashboards filter correctly.
+                elapsed = time.monotonic() - started
+                _log.error(
+                    "llm_invoke_retries_exhausted",
+                    attempts=attempt,
+                    elapsed_s=round(elapsed, 2),
+                    error_type=type(e).__name__,
+                    error=str(e),
+                )
+                raise UpstreamTimeout(
+                    f"LLM invoke failed after {attempt} attempts: {e}",
+                    binary="vertex_ai",
+                    stage="llm_invoke",
+                    elapsed_s=round(elapsed, 2),
+                    timeout_s=float(config.LLM_TIMEOUT_SECONDS),
+                    cmd="llm.invoke",
+                ) from e
+            # Transient and budget remaining -- backoff and retry.
+            sleep_s = base_delay_s * (2 ** (attempt - 1))
+            _log.warning(
+                "llm_invoke_transient_retry",
+                attempt=attempt,
+                max_attempts=max_attempts,
+                sleep_s=sleep_s,
+                error_type=type(e).__name__,
+                error=str(e),
+            )
+            time.sleep(sleep_s)
+    # Defensive: should be unreachable -- the loop either returns or
+    # raises. Keeps mypy / static analysers happy.
+    raise UpstreamTimeout(
+        f"LLM invoke unexpectedly fell through retry loop: {last_exc}",
+        binary="vertex_ai",
+        stage="llm_invoke",
+        elapsed_s=round(time.monotonic() - started, 2),
+        timeout_s=float(config.LLM_TIMEOUT_SECONDS),
+        cmd="llm.invoke",
+    ) from last_exc
 
 
 def preflight() -> dict:

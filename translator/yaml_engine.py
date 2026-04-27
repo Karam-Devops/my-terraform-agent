@@ -110,7 +110,12 @@ def extract_yaml_blueprint(source_hcl: str, source_filename: str) -> Optional[st
             HumanMessage(content=human_instruction)
         ]
         
-        response = llm_client.invoke(messages)
+        # P3-5: safe_invoke wraps client.invoke with exponential backoff
+        # on 429 / timeout / 502 / 503 / Unavailable transients, and
+        # raises UpstreamTimeout when retries exhaust. Lets the
+        # translator's outer validation-feedback loop see typed failures
+        # instead of opaque LangChain exceptions.
+        response = llm_provider.safe_invoke(llm_client, messages)
         yaml_output = response.content.strip()
 
         if not yaml_output:
