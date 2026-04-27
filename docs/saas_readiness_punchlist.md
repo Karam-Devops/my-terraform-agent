@@ -561,6 +561,7 @@ migration with backend implications").
 | **CG-5 Flags column parity (Policy + Git + Relationships)** | **Phase 5/6 split** | **2 days** (0.5d backend P5 + 1.5d UI P6) |
 | **CG-6 Inventory tab as primary UI surface** | **Phase 6** | folded into existing Phase 6 UI budget |
 | **CG-7 Failure isolation via quarantine pattern** | **Phase 4 hotfix (SHIPPED)** | **0.5 day** -- shipped same wave as P4-11/P4-12 SMOKE-4 hotfixes |
+| **CG-8 Round-1 Cloud Run deployment (NO persistent storage)** | **Phase 5A** | **1.5-2 days** -- container + Cloud Run config + auth + customer onboarding doc; explicitly DEFERS GCS to Phase 5B/6 |
 | **CC-9 Few-shot golden examples (top 10 types)** | **Phase 4** | **5 days** |
 | CC-3 cold-start preflight | Phase 5 | 1 day |
 | **CC-5 ResourceOutcome backend** | **Phase 5** | **1 day** |
@@ -635,6 +636,16 @@ cover only 2/11 resource types vs the importer (CG-2).
   Sources for the taxonomy + flag definitions:
   <https://docs.firefly.ai/introduction/terminology>,
   <https://docs.firefly.ai/detailed-guides/cloud-asset-inventory>.
+
+**Items surfaced by SMOKE 4 v2 + customer-deployment scoping (2026-04-27):**
+  * **CG-8 Round-1 Cloud Run deployment** -- minimum viable SaaS
+    deployment for 1-3 friendly customers. Cloud Run only (no
+    GCS / Firestore yet); deploy-data-loss mitigated socially via
+    "re-import after each deploy" customer agreement. Build first,
+    let Round-1 retro tell us what to add. Phase 5A.
+  * **CG-9 Phase 5B persistent storage stack** -- the GCS sync
+    layer + Firestore + multi-instance scaling that CG-8
+    explicitly defers. Ship after Round-1 surfaces the friction.
 
 The Phase 2 smokes also exposed the per-resource UX vocabulary
 that CC-5 needs to render: 9 distinct `failure_reason` enum values
@@ -1211,6 +1222,160 @@ hotfix wave -- all three landed before the user's SMOKE 4 re-run.
 **Future work (Phase 5):** replace the env-var gate with an
 explicit ``run_workflow(headless=True)`` kwarg once the call
 surface gets a Phase 5 refresh. Same logic; cleaner contract.
+
+### CG-8. Round-1 Cloud Run deployment (NO persistent storage) — surfaced 2026-04-27
+
+**Today.** Engines run locally via CLI. No SaaS deployment exists.
+For Phase 5 we need a Cloud Run deployment customers can hit, but
+the FULL multi-tier storage architecture (Cloud Run + GCS + Firestore +
+multi-region failover) is ~3-5 days of build + verify. Round-1 client
+testing has 1-3 friendly customers in a controlled window; the full
+architecture is overkill for that scope.
+
+**CG-8 ships the minimum viable SaaS deployment** sufficient for
+Round-1 testing, explicitly deferring GCS / Firestore / multi-region
+to Phase 5B (CG-9) once Round-1 surfaces what customers actually
+need. Round-1 deploy-data-loss is mitigated socially: when we deploy
+fixes, customers re-import from scratch. Acceptable for short test
+windows; not acceptable for production (Phase 5B addresses).
+
+**Spec.** Single Cloud Run service running the full engine stack:
+
+  * **Container image** built from a Dockerfile that bakes in:
+    - Python 3.x + project deps (pip install requirements.txt)
+    - Terraform binary (1.x; pinned to match local dev)
+    - gcloud CLI (with components: kubectl optional; alpha optional)
+    - Provider plugins pre-cached (avoids 30-60s download on cold
+      start) -- canonical lock from
+      ``provider_versions/.terraform.lock.hcl`` already supports this
+    - The application code (importer/translator/detector/policy)
+
+  * **Cloud Run service config:**
+    - ``min_instances=1`` (always-on, no cold starts)
+    - ``max_instances=1`` (single container; serializes requests for
+      the few simultaneous Round-1 customers; no terraform-state
+      corruption from concurrent same-project imports)
+    - ``concurrency=1`` (one HTTP request at a time per container --
+      because terraform is NOT thread-safe per-workdir; lock files
+      + state files would corrupt under concurrent same-project
+      operations)
+    - ``timeout=3600`` (60 min, the Cloud Run max -- the default
+      300s would kill long imports)
+    - ``memory=4Gi`` (generous; provides 4GB tmpfs for /tmp)
+    - ``cpu=2`` (parallel translator workers + LLM concurrency)
+    - ``execution-environment=gen2`` (better tmpfs + concurrency
+      semantics than gen1)
+    - ``session-affinity=true`` (UI session keeps hitting same
+      container -- not strictly needed at max=1 but cheap to enable
+      for forward-compat when max>1 in Phase 5B)
+
+  * **Auth: Identity-Aware Proxy (IAP)** in front of Cloud Run:
+    - Customer's Google account added to IAP-secured Web App User
+      role
+    - Cloud Run set to "require authentication" + IAP allows their
+      account
+    - Zero application-side auth code (Google handles login flow)
+    - Suitable for friendly Round-1 customers; NOT suitable for
+      self-service signups (Phase 6+ would need a real auth layer)
+
+  * **Cross-project Service Account impersonation:**
+    - Cloud Run host SA (``mtagent-runtime@<host-proj>.iam``) needs
+      ``roles/iam.serviceAccountTokenCreator`` on the customer's SA
+    - Customer creates an SA in their project (e.g.
+      ``mtagent-reader@<customer-proj>.iam``) with the read-only
+      roles: ``roles/cloudasset.viewer``, ``roles/iam.securityReviewer``,
+      and resource-specific reader roles
+    - Customer grants impersonation to our host SA via:
+      ``gcloud iam service-accounts add-iam-policy-binding ...``
+    - Engines call gcloud with
+      ``--impersonate-service-account=mtagent-reader@<customer-proj>``
+    - Onboarding doc walks the customer through the 3 commands
+
+  * **Vertex AI quota:** request raised quota (60 -> 120 RPM
+    Gemini Pro) on the host project before Round-1. Even with
+    ``max_workers=4`` in P4-15, parallel batches across simultaneous
+    customers can spike. Better to have headroom than thrash on 429
+    retries.
+
+  * **Streamlit UI** (Phase 6 work, separate item but co-deployed):
+    The same Cloud Run container serves the Streamlit app on the
+    front. UI hits engine code in-process (no separate API layer
+    for Round-1; refactor to API + worker is Phase 6/7).
+
+  * **Customer onboarding doc** (~3 pages):
+    - "How to grant our SA access to your project" (3 commands)
+    - "Expected behavior on deploys" ("your session will be reset
+      when we ship a fix; please re-import")
+    - "What to do if it breaks" (paste the error, Slack us)
+
+**Explicitly DEFERRED to Phase 5B / CG-9 (not in this commit's
+scope):**
+
+  * **GCS sync layer** for cross-deploy persistence -- Round-1
+    customers re-import after each deploy
+  * **Firestore for per-resource metadata** -- Round-1 reads metadata
+    from in-memory results
+  * **Multi-instance scaling** (``max_instances > 1``) -- Round-1
+    has 1-3 customers, max=1 is sufficient
+  * **Multi-region failover** -- Round-1 can tolerate single-region
+    outages
+  * **Pub/Sub / Cloud Tasks for async work** -- Round-1 uses
+    long-polling from Streamlit
+  * **Real auth (not IAP-allowlist)** -- Round-1 has 1-3 friendly
+    customers
+
+**Estimate.** 1.5-2 days:
+  * 0.5 day Dockerfile + provider-plugin baking + smoke-test image
+    locally
+  * 0.25 day Cloud Run service config + IAP setup
+  * 0.25 day cross-project SA impersonation wiring + test against
+    a second GCP project
+  * 0.5 day customer onboarding doc + grant-script template
+  * 0.25 day Vertex AI quota request + verification
+  * Bumps to 2 days if any layer surfaces unexpected issues
+    (Cloud Run gen2 quirks, Streamlit + Cloud Run integration
+    rough edges, etc.)
+
+**Why this matters for the demo.** A working SaaS-shaped surface --
+even one that loses state on deploy -- is what gets the customer
+to commit budget. Round-1 isn't a production launch; it's a
+"does this address my problem" validation. Build the smallest
+thing that gives the customer that signal.
+
+**Phase mapping update.** Phase 5 is now Phase 5A (CG-8 + the
+Phase-5 hygiene/CC items currently scheduled there) followed by
+Phase 5B (the deferred GCS/Firestore stack from CG-9). The
+existing "Phase 5" line items in the table above remain in 5A
+unless explicitly moved to 5B during retros.
+
+### CG-9. Phase 5B persistent storage stack (deferred from CG-8) — surfaced 2026-04-27
+
+**When to ship.** After Round-1 customer feedback identifies that
+deploy-data-loss is a real friction point (almost certainly will,
+but let the customer surface it -- avoids us building before we
+know the priority).
+
+**Spec.** Add the layers CG-8 explicitly skipped:
+
+  * **GCS bucket per tenant** + ``common/storage.py`` with
+    ``hydrate_workdir(tenant, project)`` (GCS -> /tmp at request
+    start) and ``persist_workdir(tenant, project)`` (/tmp -> GCS at
+    request end). ~50 lines using ``gcloud storage rsync``
+    underneath; no full real-time GCS-backed FS.
+  * **Firestore for per-resource metadata** -- drives the CG-6
+    Inventory tab's IaC Status + Flags column rendering across
+    container restarts
+  * **Multi-instance scaling**: ``max_instances > 1`` + per-tenant
+    request routing via Cloud Run session affinity OR
+    ``terraform { backend "gcs" { ... } }`` declared in the .tf
+    files (terraform handles its own state locking via GCS
+    object lock; no app-side coordination needed)
+  * **Multi-region failover** (optional; depends on Round-1 SLA
+    asks)
+
+**Estimate.** 3-5 days depending on how much of multi-region
++ async work the customers actually want. Defer scoping until
+Round-1 retro.
 
 ---
 
