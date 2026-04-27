@@ -416,6 +416,59 @@ attribution block.
 
 ---
 
+## Coverage gap: importer types without Rego rules
+
+**Added 2026-04-27.** Importer supports 17 GCP resource types
+(`importer/config.py:TF_TYPE_TO_GCLOUD_INFO`). Only 2 currently
+have Rego rules. The 15-type gap is the work item under CG-2
+(Detector + Policy coverage parity); the per-type breakdown
+including which GCP-archive templates to mine for each lives in
+`docs/saas_readiness_punchlist.md` CG-2 spec.
+
+| Importer tf_type | Rules today | GCP-archive templates available |
+|---|---|---|
+| google_compute_instance | 3 | mined P4-PRE; more available |
+| google_compute_disk | 0 | 2 (cmek_settings + disk_resource_policies) |
+| google_compute_firewall | 0 | 2 (restricted_firewall_rules + firewall_logs) |
+| google_compute_address | 0 | 0 (industry consensus only) |
+| google_compute_network | 0 | 2 (network_routing + network_restrict_default) |
+| google_compute_subnetwork | 0 | 2 (network_enable_flow_logs + private_google_access) |
+| google_compute_instance_template | 0 | inherits instance |
+| google_container_cluster | 0 | **14** (richest archived coverage in the library) |
+| google_container_node_pool | 0 | 4 (node_auto_repair + auto_upgrade + allowed_node_sa + container_optimized_os) |
+| google_service_account | 0 | 3 (sa_creation + sa_key_age + sa_key_type) |
+| google_storage_bucket | 4 | mined P4-PRE; 2 more available (logging + location) |
+| google_sql_database_instance | 0 | **7** (backup, maintenance_window, public_ip, ssl, world_readable, allowed_authorized_networks, instance_type) |
+| google_kms_key_ring | 0 | inherits crypto_key |
+| google_kms_crypto_key | 0 | 2 (cmek_rotation default 1y vs CIS 90d; cmek_settings) |
+| google_cloud_run_v2_service | 0 | **NONE** (Cloud Run not covered in archived library) |
+| google_pubsub_topic | 0 | **NONE** |
+| google_pubsub_subscription | 0 | **NONE** |
+
+**Mining methodology** for each new rule (when the type has
+archive templates available): apply the same 4-step approach used
+in P4-PRE for the existing 9 GCP rules:
+
+  1. Fetch the YAML template's embedded `rego: |` block.
+  2. Identify reusable properties: helper functions, defensive
+     defaulting patterns (`object.get` / `lib.get_default`),
+     numeric defaults, sentinel values, canonical strings,
+     asset-field paths.
+  3. Convert the asset-field paths from CAI shape
+     (`input.asset.resource.data.*`) to our snapshot shape
+     (`input.*`) since we evaluate against snapshots, not CAI
+     proto.
+  4. Add three-source provenance header: Google-archive template
+     + last-published default, CIS GCP / Controls section, NIST
+     SP 800-53 family.
+
+**For types with no archived template** (Cloud Run, Pub/Sub):
+source defaults from CIS Controls v8 + industry consensus +
+Google's CURRENT public Best Practices documentation (which is
+maintained even though the policy-library was archived).
+
+---
+
 ## Maintaining this matrix
 
 Update this doc whenever:

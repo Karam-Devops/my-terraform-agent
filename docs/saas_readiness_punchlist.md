@@ -555,22 +555,23 @@ migration with backend implications").
 | Detector engine-specific WARN cluster | Phase 4 | 0.5 day |
 | Policy violation cap | Phase 4 | 0.25 day |
 | **CG-1 unmanaged-resource tracking (Drift engine)** | **Phase 4** | **1.5 days** |
-| **CG-2 Detector + Policy coverage parity** | **Phase 4** | **2 days** |
-| **CG-3 Public-benchmark + Google-archive control mapping** | **Phase 4** | **2.5 days** (1 day overlaps CG-2's new-rule budget) |
+| **CG-2 Detector + Policy coverage parity** | **Phase 4** | **4 days** (revised 2026-04-27 with per-type table; ~25 new rules vs original 8-10 estimate) |
+| **CG-3 Public-benchmark + Google-archive control mapping** | **Phase 4** | **2.5 days** (1 day overlaps CG-2's new-rule budget; CG-3 metadata baked into CG-2 rules at creation time) |
 | **CC-9 Few-shot golden examples (top 10 types)** | **Phase 4** | **5 days** |
 | CC-3 cold-start preflight | Phase 5 | 1 day |
 | **CC-5 ResourceOutcome backend** | **Phase 5** | **1 day** |
 | **CC-5 + CC-6 UI rendering** | **Phase 6** | **(folded into Phase 6 UI work)** |
 | **CC-8 URN-as-displayName normalisation** | **CLOSED** (Phase 2 P2-6 / `70bf9c0`) | shipped |
 
-**Total additional effort folded in:** ~17 days (5 days original
-hygiene + 1.5 days CG-1 + 4 days surfaced by Phase 1 SMOKE: CC-5
-backend, CC-6 backend, CC-7 dep migration, CG-2 coverage parity +
-5 days surfaced by Phase 2 SMOKEs: CC-9 few-shot examples + 1.5
-days net new from Phase 3-end strategic review: CG-3 control
-mapping minus the 1-day CG-2 overlap). No standalone "fix the
-audit findings" phase; every item folds into a phase that was
-already going to touch the relevant engine.
+**Total additional effort folded in:** ~19 days (5 days original
+hygiene + 1.5 days CG-1 + 6 days surfaced by Phase 1 SMOKE: CC-5
+backend, CC-6 backend, CC-7 dep migration, CG-2 coverage parity
+[bumped to 4 days post-P4-PRE per-type enumeration] + 5 days
+surfaced by Phase 2 SMOKEs: CC-9 few-shot examples + 1.5 days net
+new from Phase 3-end strategic review: CG-3 control mapping minus
+the 1-day CG-2 overlap). No standalone "fix the audit findings"
+phase; every item folds into a phase that was already going to
+touch the relevant engine.
 
 **Items surfaced by Phase 1 SMOKE (2026-04-26):** CC-5, CC-6, CC-7,
 CG-2. The smoke against `dev-proj-470211` exercised all 4 engines
@@ -713,7 +714,10 @@ invisible.
        type) plus 1-2 type-specific rules where the security
        community has a strong recommendation
        (e.g. `gke_cluster_private_nodes`, `compute_disk_encryption`,
-       `firewall_no_open_ssh`).
+       `firewall_no_open_ssh`). For each rule, follow CG-3's
+       three-source methodology (Google-archive + CIS + NIST) --
+       the table below pre-identifies which GCP-archive templates
+       to mine for each importer type.
 
   3. For types where drift detection requires extra logic
      (composite resources like `google_container_cluster` with
@@ -721,18 +725,67 @@ invisible.
      "drift-stub" so the UI can show "we monitor this type, but
      the drift checker is conservative — false negatives possible".
 
+**Concrete coverage gap (added 2026-04-27).** Importer supports 17
+types; only 2 (`google_compute_instance`, `google_storage_bucket`)
+have Rego rules today. Per-type extension table below; `Mine from`
+column lists matching templates in the archived
+GoogleCloudPlatform/policy-library so CG-3's methodology applies
+verbatim.
+
+| Importer tf_type | Today | Mine from (GCP-archive templates) | Suggested rule(s) |
+|---|---|---|---|
+| google_compute_instance | 3 rules | (already mined P4-PRE) | (extend with `gcp_compute_block_ssh_keys_v1`, `gcp_compute_enable_oslogin_project_v1`, `gcp_compute_ip_forward`) |
+| google_compute_disk | — | `gcp_compute_disk_resource_policies_v1` + `gcp_cmek_settings_v1` (proxy) | `disk_cmek_required` (CIS GCP 4.7), `disk_snapshot_policy_attached` |
+| google_compute_firewall | — | `gcp_restricted_firewall_rules_v1`, `gcp_network_enable_firewall_logs_v1` | `firewall_no_open_ssh` (CIS GCP 3.6), `firewall_no_open_rdp` (CIS GCP 3.7), `firewall_logs_enabled` |
+| google_compute_address | — | (none directly; relates to `gcp_compute_external_ip_address`) | `address_purpose_documented` (industry consensus) |
+| google_compute_network | — | `gcp_network_routing_v1`, `gcp_network_restrict_default_v1` | `network_no_default_vpc` (CIS GCP 3.1), `network_routing_mode_regional` |
+| google_compute_subnetwork | — | `gcp_network_enable_flow_logs_v1`, `gcp_network_enable_private_google_access_v1` | `subnet_flow_logs_enabled` (CIS GCP 3.8), `subnet_private_google_access` |
+| google_compute_instance_template | — | (inherits `gcp_compute_external_ip_address` semantics) | inherit applicable instance rules via shared package |
+| google_container_cluster | — | 14 archived templates: `gke_enable_workload_identity_v1`, `gke_enable_shielded_nodes_v1`, `gke_enable_binauthz_v1`, `gke_private_cluster_v1`, `gke_master_authorized_networks_enabled_v1`, `gke_legacy_abac_v1`, `gke_disable_legacy_endpoints_v1`, `gke_disable_default_service_account_v1`, `gke_cluster_version_v1`, `gke_enable_alias_ip_ranges`, `gke_enable_stackdriver_logging_v1`, `gke_enable_stackdriver_kubernetes_engine_monitoring_v1`, `gke_restrict_pod_traffic_v2`, `gke_restrict_client_auth_methods_v1` | richest coverage in the archived library; pick top 4 for Phase 4: `cluster_workload_identity` (CIS GCP 7.x), `cluster_private_endpoint`, `cluster_legacy_abac_disabled`, `cluster_master_authorized_networks` |
+| google_container_node_pool | — | `gke_node_auto_repair_v1`, `gke_node_auto_upgrade_v1`, `gke_allowed_node_sa_v1`, `gke_container_optimized_os` | `node_pool_auto_upgrade` (CIS GCP 7.x), `node_pool_auto_repair`, `node_pool_uses_cos` |
+| google_service_account | — | `gcp_iam_restrict_service_account_creation_v1`, `gcp_iam_restrict_service_account_key_age_v1` (default 90d), `gcp_iam_restrict_service_account_key_type_v1` | `sa_key_age_max_90_days` (CIS GCP 1.7), `sa_no_user_managed_keys` (CIS GCP 1.4) |
+| google_storage_bucket | 4 rules | (already mined P4-PRE) | (extend with `gcp_storage_logging_v1`, `gcp_storage_location_v1`) |
+| google_sql_database_instance | — | 7 archived templates: `gcp_sql_backup_v1`, `gcp_sql_maintenance_window_v1`, `gcp_sql_public_ip_v1`, `gcp_sql_ssl_v1`, `gcp_sql_world_readable_v1`, `gcp_sql_allowed_authorized_networks_v1`, `gcp_sql_instance_type_v1` | pick top 3: `sql_no_public_ip` (CIS GCP 6.5), `sql_ssl_required` (CIS GCP 6.4), `sql_backup_enabled` (CIS GCP 6.7) |
+| google_kms_key_ring | — | (covered via crypto_key) | inherit |
+| google_kms_crypto_key | — | `gcp_cmek_rotation_v1` (default 1y; CIS = 90d), `gcp_cmek_settings_v1` (protection_level / algorithm / purpose) | `key_rotation_max_90_days` (CIS GCP 1.10), `key_protection_level_hsm_for_critical`, `key_algorithm_allowlist` |
+| google_cloud_run_v2_service | — | **NONE in archived library** — Cloud Run wasn't covered | source from industry consensus + CIS Controls v8: `cloudrun_no_public_invoker`, `cloudrun_min_instances_documented` |
+| google_pubsub_topic | — | **NONE in archived library** | `pubsub_topic_cmek_required` (CIS Controls v8 3.11), `pubsub_topic_iam_no_allusers` |
+| google_pubsub_subscription | — | **NONE in archived library** | `pubsub_sub_dead_letter_configured`, `pubsub_sub_iam_no_allusers` |
+
+**Coverage scoring of the gap:**
+  * 15 of 17 importer types have NO Rego rule today.
+  * 12 of 15 uncovered types have at least one GCP-archive template
+    to mine from (apply CG-3 methodology).
+  * 3 of 15 uncovered types (`google_cloud_run_v2_service`,
+    `google_pubsub_topic`, `google_pubsub_subscription`) have NO
+    archived template — Google never wrote policies for these
+    services. Must source from CIS Controls v8 + industry
+    consensus alone for these.
+
+Total new rules to write: ~25 (the table's "Suggested rule(s)"
+column tallies to roughly 23-28 depending on how compositely some
+are bundled).
+
 **Why this is Phase 4, not earlier.** Detector hygiene fixes (CC-2
 detector half, broad-except tighten, _state_path fallback) and CG-1
 unmanaged tracking should land first. CG-2 sits on top of a clean
 detector — adding more scope to a buggy engine multiplies the bug
 surface.
 
-**Estimate.** 2 days:
+**Estimate (revised 2026-04-27 with concrete table).** ~4 days:
 
   - 0.5 day — extend IN_SCOPE_TF_TYPES + audit each type's
     cloud_snapshot reachability
   - 0.5 day — fill gaps with thin reuse-from-importer wrappers
-  - 1 day — write 1-2 Rego rules per type (8-10 new rules), test
+  - 3 days — write ~25 Rego rules per the table above, applying
+    CG-3's three-source provenance methodology to each. Mining
+    each archived template adds ~5-10 minutes per rule (much less
+    than writing from scratch); the 3-day budget reflects that
+    leverage.
+
+(Previously estimated 2 days for "8-10 new rules"; the
+post-P4-PRE table shows the real surface is ~25 rules. Doubling
+the budget to match.)
 
 **Why this matters for the demo.** Coupled with CG-1 (unmanaged
 tracking), CG-2 is what makes the Drift + Policy engines actually
