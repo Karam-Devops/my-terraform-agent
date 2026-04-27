@@ -17,6 +17,22 @@
 #   Tags[].Key                                       (look for "internet-facing")
 #
 # Severity: HIGH -- directly exposes the instance to internet scanning.
+#
+# --- Provenance (P4-PRE 2026-04-27) ----------------------------------
+# Source:   GoogleCloudPlatform/policy-library has no AWS templates.
+#           Cross-reference: GCP sibling rule lives at
+#           policy/policies/google_compute_instance/gce_no_public_ip.rego
+#           (same hardcoded "internet-facing" tag exception pattern).
+# Standard: CIS Controls v8 12.X (Network Infrastructure Management).
+#           No direct CIS AWS rule numbered for "no public IP" (the
+#           AWS Foundations Benchmark covers security groups + NACLs
+#           but not instance-level public IP).
+# NIST:     SP 800-53 SC-7 (Boundary Protection).
+# Default:  Deny presence of PublicIpAddress (top-level OR per-ENI
+#           Association.PublicIp) unless instance carries the
+#           "internet-facing" tag (Tags list entry with Key=
+#           "internet-facing").
+# ---------------------------------------------------------------------
 
 package main
 

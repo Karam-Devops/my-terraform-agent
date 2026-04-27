@@ -26,6 +26,22 @@
 #
 # Severity: HIGH -- the canonical "data breach in the morning paper"
 # misconfiguration. Treat any deviation as a P0.
+#
+# --- Provenance (P4-PRE 2026-04-27) ----------------------------------
+# Source:   GoogleCloudPlatform/policy-library has no AWS templates.
+#           Cross-reference: GCP sibling rule lives at
+#           policy/policies/google_storage_bucket/bucket_public_access.rego.
+# Standard: CIS AWS Foundations Benchmark 2.1.5 -- "Ensure that S3
+#           Buckets are configured with 'Block public access (bucket
+#           settings)'" (covers all four PublicAccessBlock flags).
+# NIST:     SP 800-53 AC-3 (Access Enforcement) +
+#           SC-7 (Boundary Protection).
+# Default:  Require all four PublicAccessBlockConfiguration flags
+#           true (BlockPublicAcls, IgnorePublicAcls,
+#           BlockPublicPolicy, RestrictPublicBuckets). Missing any
+#           one leaves a hole that flag was specifically designed
+#           to close -- 4-of-4 is the intended posture.
+# ---------------------------------------------------------------------
 
 package main
 

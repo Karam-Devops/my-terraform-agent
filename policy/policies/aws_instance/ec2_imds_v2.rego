@@ -21,6 +21,20 @@
 # the blast radius when it IS exploited (full instance role compromise)
 # is severe. MED keeps it visible without blocking on every legacy VM
 # during initial codification.
+#
+# --- Provenance (P4-PRE 2026-04-27) ----------------------------------
+# Source:   GoogleCloudPlatform/policy-library has no AWS templates.
+#           No direct GCP sibling either -- IMDS is an AWS-specific
+#           concept (GCP's metadata server has different attack
+#           surface; closest GCP rule is gce_shielded_vm.rego for
+#           generic platform hardening).
+# Standard: CIS AWS Foundations Benchmark 5.6 -- "Ensure that EC2
+#           Metadata Service only allows IMDSv2".
+# NIST:     SP 800-53 AC-3 (Access Enforcement) -- token-based
+#           access control for the metadata endpoint.
+# Default:  Require MetadataOptions.HttpTokens == "required" (matches
+#           AWS's post-2022 default; absent or "optional" both deny).
+# ---------------------------------------------------------------------
 
 package main
 

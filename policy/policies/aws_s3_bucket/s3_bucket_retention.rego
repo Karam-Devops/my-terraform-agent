@@ -22,6 +22,23 @@
 #   VersioningConfiguration.MFADelete                  ("Enabled" or absent)
 #
 # Severity: MED -- protective control gap, not an immediate exposure.
+#
+# --- Provenance (P4-PRE 2026-04-27) ----------------------------------
+# Source:   GoogleCloudPlatform/policy-library has no AWS templates.
+#           Cross-reference: GCP sibling rule lives at
+#           policy/policies/google_storage_bucket/bucket_retention.rego
+#           (which checks GCS softDeletePolicy.retentionDurationSeconds
+#           -- a different control axis from AWS Object Lock /
+#           MFA Delete; AWS has no direct soft-delete equivalent).
+# Standard: No specific CIS AWS rule for this combined control axis.
+#           NIST SI-12 covers "Information Management and Retention"
+#           generally.
+# NIST:     SP 800-53 SI-12 (Information Management and Retention).
+# Default:  Require EITHER ObjectLockConfiguration.ObjectLockEnabled
+#           == "Enabled" OR VersioningConfiguration.MFADelete ==
+#           "Enabled" (either provides the "you can't lose this on
+#           a bad day" guarantee).
+# ---------------------------------------------------------------------
 
 package main
 

@@ -23,6 +23,20 @@
 #
 # Severity: HIGH -- audit-failing on every workload subject to
 # data-residency or data-protection regulations.
+#
+# --- Provenance (P4-PRE 2026-04-27) ----------------------------------
+# Source:   GoogleCloudPlatform/policy-library has no AWS templates.
+#           Cross-reference: GCP sibling rule lives at
+#           policy/policies/google_compute_instance/gce_disk_encryption.rego.
+# Standard: CIS AWS Foundations Benchmark 2.2.1 -- "Ensure EBS
+#           Volume Encryption is Enabled in all Regions".
+# NIST:     SP 800-53 SC-28 (Protection of Information at Rest).
+# Default:  Require Ebs.Encrypted == true on every BlockDeviceMapping.
+#           Note: this baseline accepts AWS-managed (SSE-S3-style)
+#           encryption; for the strictest controls, a future sibling
+#           rule should require Ebs.KmsKeyId reference a customer-
+#           managed CMK (parallel to GCP's CMEK requirement).
+# ---------------------------------------------------------------------
 
 package main
 

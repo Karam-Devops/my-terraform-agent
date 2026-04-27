@@ -20,6 +20,16 @@
 #         {"Key": "team", "Value": "platform"},
 #         {"Key": "env",  "Value": "prod"}
 #     ]
+#
+# --- Provenance (P4-PRE 2026-04-27) ----------------------------------
+# Source:   GoogleCloudPlatform/policy-library has no AWS templates.
+#           See docs/policy_provenance.md for cross-reference to GCP
+#           sibling (common/mandatory_labels.rego).
+# Standard: Industry consensus (FinOps + IR baseline). CIS AWS
+#           Foundations Benchmark does not number a tagging rule.
+# NIST:     SP 800-53 CM-8 (System Component Inventory).
+# Default:  ["team", "env"] required (matches GCP sibling semantic).
+# ---------------------------------------------------------------------
 
 package main
 

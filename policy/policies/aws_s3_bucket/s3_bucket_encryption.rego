@@ -16,6 +16,22 @@
 #       .ApplyServerSideEncryptionByDefault.KMSMasterKeyID (must be set)
 #
 # Severity: HIGH -- audit-failing on every bucket holding regulated data.
+#
+# --- Provenance (P4-PRE 2026-04-27) ----------------------------------
+# Source:   GoogleCloudPlatform/policy-library has no AWS templates.
+#           Cross-reference: GCP sibling rule lives at
+#           policy/policies/google_storage_bucket/bucket_encryption.rego.
+# Standard: CIS AWS Foundations Benchmark 2.1.1 -- "Ensure all S3
+#           buckets employ encryption-at-rest" (the canonical CIS
+#           rule for this control).
+# NIST:     SP 800-53 SC-28 (Protection of Information at Rest).
+# Default:  Require ServerSideEncryptionConfiguration with at least
+#           one rule where SSEAlgorithm == "aws:kms" AND
+#           KMSMasterKeyID is non-empty (CMEK / customer-managed).
+#           STRICTER than CIS AWS 2.1.1's baseline (which accepts
+#           SSE-S3 / AES256), matching our GCP CMEK posture for
+#           regulated-data parity.
+# ---------------------------------------------------------------------
 
 package main
 
