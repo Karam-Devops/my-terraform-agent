@@ -349,6 +349,61 @@ function calling) that would take weeks. Direct ROI: every
 additional resource type that imports clean first-try is one less
 "⚠ needs attention" card the customer sees in the SaaS UI.
 
+#### Concrete failure-pattern inputs from Phase 2 SMOKEs
+
+Three SMOKE iterations on dev-proj-470211 produced a corpus of
+LLM hallucinations that golden examples must explicitly cover.
+Each item below is a documented bug case CC-9 absorbs as a "do
+NOT do this" annotation in the relevant golden example. Future
+maintainer writing golden examples should grep for these
+identifiers and confirm each is unrepresentable in the example
+output.
+
+**P2-12 — Cloud Run v2 `startup_cpu_boost` (v1 vestige)**
+Surfaced: SMOKE 3, poc-cloudrun. Symptom:
+`startup_cpu_boost = true` Unsupported argument. v2 schema
+relocated this concept (it's now a sub-field of
+`template.containers.startup_probe`, NOT a top-level template
+field). Same class as P2-8's `container_concurrency` /
+`latest_revision` (also v1-vestiges on v2). Golden
+`google_cloud_run_v2_service.tf` must explicitly NOT contain
+`startup_cpu_boost` at any nesting level the LLM might confuse.
+Could fix per-symptom via post_llm_overrides
+deletions (1 hour) but the cleaner fix is to give the LLM a
+known-good v2 example.
+
+**P2-13 — GKE Autopilot `ray_operator_config` (Autopilot-managed)**
+Surfaced: SMOKE 3, poc-cluster (Autopilot). Symptom:
+`ray_operator_config` Unsupported block type. Ray Operator is an
+addon Autopilot manages internally; the provider rejects manual
+config. Same pattern as P2-9.1's
+`advanced_datapath_observability_config`. Could fix per-symptom
+by adding `addons_config.ray_operator_config` to gke_autopilot's
+`prune_paths` (literally one line) -- but P2-13 surfaced AFTER
+P2-9.1 shipped, so we'd be re-opening the prune list every
+SMOKE. Golden Autopilot cluster example with explicit "addons
+not supported on Autopilot" comments is the structural fix.
+
+**P2-14 — `insecure_kubelet_readonly_port_enabled` boolean-vs-enum**
+Surfaced: SMOKE 3, poc-cluster-std + default-pool. Symptom:
+`expected ... to be one of ["FALSE" "TRUE"], got false`.
+Terraform schema represents this as a quoted-string enum (legal
+values literally "TRUE" / "FALSE"), not a bare boolean. The LLM
+emitted `insecure_kubelet_readonly_port_enabled = false`
+(boolean), provider rejects. Different class from P2-12 / P2-13:
+this is a value-type coercion, not a field-name or block-presence
+issue. Could add a post_llm_overrides "type-coerce" mechanism
+(new functionality, ~half day) -- but again, the LLM picks new
+fields to mistype every smoke. Golden example showing the
+correct quoted-enum syntax is the structural fix.
+
+These three (plus dozens of similar long-tail cases not yet
+surfaced) are the per-resource-type "negative example" content
+each golden example needs to embody. The example doesn't
+explicitly say "don't do X"; instead it shows the right way so
+clearly that the LLM pattern-matches against it instead of
+guessing.
+
 ### CC-7. LangChain dependency migration before LangChain 4.0 ships
 
 **Today.** `llm_provider.py:35` uses `langchain_google_vertexai.ChatVertexAI`,
