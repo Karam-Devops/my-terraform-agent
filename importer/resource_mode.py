@@ -52,6 +52,21 @@ def _gke_is_autopilot(d: Any) -> bool:
     return False
 
 
+def _gke_is_standard(d: Any) -> bool:
+    """True iff the cluster snapshot is GKE Standard (NOT Autopilot).
+
+    P2-9: Standard-mode clusters have their own LLM-hallucination
+    patterns that justify a separate mode addendum. The detector is
+    deliberately the inverse of `_gke_is_autopilot` -- they're
+    mutually exclusive on `google_container_cluster`. Both can be
+    registered against the same `applies_to` because exactly one
+    will match per snapshot.
+    """
+    if not isinstance(d, dict):
+        return False
+    return not _gke_is_autopilot(d)
+
+
 # ---------------------------------------------------------------------------
 # Mode registry
 # ---------------------------------------------------------------------------
@@ -99,6 +114,18 @@ _MODES: Dict[str, Dict[str, Any]] = {
             # keep the field and the rename converts the LLM's hallucinated
             # `locations` to the correct `node_locations` HCL form.
             "nodeLocations", "node_locations",
+            # P2-9: Autopilot manages observability internally. The API
+            # returns `advancedDatapathObservabilityConfig` with content
+            # the LLM faithfully reflects, but the provider rejects any
+            # config in this block on Autopilot ("argument enable_relay
+            # is required" -- unfixable from the cloud snapshot because
+            # Autopilot owns the value). Strip the entire block from the
+            # snapshot so the LLM never emits it for Autopilot clusters.
+            # Standard clusters keep the block; if their LLM emission has
+            # the partial-empty issue, that's a separate Standard-mode
+            # concern handled by the gke_standard prompt addendum below.
+            "advancedDatapathObservabilityConfig",
+            "advanced_datapath_observability_config",
         ],
         # Nested paths to strip (dotted, snake_case; walker handles
         # camelCase automatically). Addons Autopilot manages and the
@@ -171,6 +198,61 @@ _MODES: Dict[str, Dict[str, Any]] = {
             "The ROUND-TRIP FIDELITY rule from the schema block is OVERRIDDEN\n"
             "by the FORBIDDEN list above — if a field is forbidden here, do NOT\n"
             "write it even though the JSON has a value for it.\n"
+            "========================================================================\n"
+        ),
+    },
+    "gke_standard": {
+        "applies_to": "google_container_cluster",
+        "detect": _gke_is_standard,
+        # Standard clusters DON'T need snapshot pruning today -- their issues
+        # surface as LLM nesting hallucinations, not API/provider mismatches.
+        # When real Standard-only schema mismatches appear, add entries here.
+        "prune_top_level": [],
+        "prompt_addendum": (
+            "\n\n========================================================================\n"
+            "MODE OVERRIDE - GKE STANDARD CLUSTER\n"
+            "========================================================================\n"
+            "This cluster is Standard mode (NOT Autopilot). The following block-\n"
+            "nesting rules are commonly mis-applied by LLMs trained on mixed\n"
+            "v1/v2 / Autopilot/Standard docs. Respect them strictly:\n"
+            "\n"
+            "TOP-LEVEL CLUSTER BLOCKS (place at the resource body root, NOT\n"
+            "inside `node_pool { }` or `node_config { }`):\n"
+            "  * `logging_config { ... }`\n"
+            "  * `monitoring_config { ... }`\n"
+            "  * `addons_config { ... }`\n"
+            "  * `release_channel { ... }`\n"
+            "  * `master_auth { ... }`\n"
+            "  * `master_authorized_networks_config { ... }`\n"
+            "  * `network_policy { ... }`\n"
+            "  * `private_cluster_config { ... }`\n"
+            "  * `vertical_pod_autoscaling { ... }`\n"
+            "  * `workload_identity_config { ... }`\n"
+            "  * `notification_config { ... }`\n"
+            "  * `database_encryption { ... }`\n"
+            "  * `binary_authorization { ... }`\n"
+            "  * `mesh_certificates { ... }`\n"
+            "  * `cost_management_config { ... }`\n"
+            "\n"
+            "BLOCKS THAT DO NOT EXIST in the cluster schema (LLM hallucinations\n"
+            "from mixing field names) -- DO NOT EMIT under any name:\n"
+            "  * `node_kubelet_config { ... }` -- there is no such block.\n"
+            "    Kubelet config goes inside `node_pool { node_config {\n"
+            "    kubelet_config { ... } } }`.\n"
+            "  * `pod_security_policy_config { ... }` -- removed in Kubernetes\n"
+            "    1.25; the field is no longer in the cluster schema.\n"
+            "\n"
+            "VALID NESTED BLOCKS inside `node_pool { }`:\n"
+            "  * `node_config { }`           -- machine_type, disk_size_gb,\n"
+            "                                    oauth_scopes, kubelet_config, etc.\n"
+            "  * `autoscaling { }`           -- enabled, min_node_count, max_node_count\n"
+            "  * `management { }`            -- auto_repair, auto_upgrade\n"
+            "  * `network_config { }`        -- create_pod_range, pod_range\n"
+            "  * `upgrade_settings { }`      -- max_surge, max_unavailable\n"
+            "  * `placement_policy { }`      -- type, tpu_topology\n"
+            "  * `queued_provisioning { }`   -- enabled\n"
+            "If a block name in your input JSON doesn't match one of the above,\n"
+            "it belongs at the top-level cluster body, not inside node_pool.\n"
             "========================================================================\n"
         ),
     },
