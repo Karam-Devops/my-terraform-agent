@@ -121,14 +121,23 @@ class FormatSectionTests(unittest.TestCase):
 
 
 class GoldenFilesPresenceTests(unittest.TestCase):
-    """P4-9a ships exactly 3 golden examples per the punchlist
-    priority-3 list. Pin the floor so they can't be silently
+    """P4-9a + P4-9b ship 10 golden examples per the punchlist CC-9
+    top-10-types list. Pin the floor so they can't be silently
     removed."""
 
     EXPECTED_FILES = (
+        # P4-9a priority three:
         "google_container_cluster__gke_autopilot.tf",
         "google_container_cluster__gke_standard.tf",
         "google_cloud_run_v2_service.tf",
+        # P4-9b remaining seven:
+        "google_container_node_pool.tf",
+        "google_compute_instance.tf",
+        "google_storage_bucket.tf",
+        "google_kms_crypto_key.tf",
+        "google_pubsub_subscription.tf",
+        "google_compute_subnetwork.tf",
+        "google_service_account.tf",
     )
 
     def test_all_priority_examples_exist(self):
