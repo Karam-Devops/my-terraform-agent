@@ -419,7 +419,19 @@ def _map_asset_to_terraform(selected_asset, project_id, workdir):
         resource_name = sa_email
         hcl_name_base = sa_email.split('@', 1)[0]  # local part, always HCL-safe
     else:
-        resource_name = selected_asset.get('displayName') or selected_asset['name'].split('/')[-1]
+        # P2-6 (CC-8): some asset types (KMS, Pub/Sub, anything where the
+        # canonical name IS the URN) return the FULL URN as displayName
+        # (e.g. "projects/p/locations/l/keyRings/k"). Pre-P2-6 the importer
+        # used the URN verbatim as resource_name + hcl_name_base, breaking
+        # HCL validation (slashes not allowed in resource labels) and file
+        # writes (slashes interpreted as directory separators on the
+        # filename). gcp_client.friendly_name_from_display() normalises
+        # URN-style displayNames to their last path segment.
+        raw_display = (
+            gcp_client.friendly_name_from_display(selected_asset.get('displayName'))
+            or selected_asset['name'].split('/')[-1]
+        )
+        resource_name = raw_display
         hcl_name_base = resource_name
 
     info = config.TF_TYPE_TO_GCLOUD_INFO.get(tf_type)

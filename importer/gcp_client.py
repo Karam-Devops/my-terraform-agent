@@ -109,6 +109,45 @@ def extract_path_segment(asset_path: str, segment_name: str):
     return parts[idx + 1]
 
 
+def friendly_name_from_display(raw_display):
+    """Normalise a GCP asset's `displayName` to a short HCL-safe label.
+
+    Most asset types return a short name (e.g. `poc-vm`, `poc-keyring`)
+    in `displayName` -- safe to use directly as a Terraform resource
+    label after the standard hyphen->underscore swap. But several
+    project-scoped types (KMS, Pub/Sub, anything where the canonical
+    name IS the URN) return the FULL path:
+
+        projects/<P>/locations/<L>/keyRings/<K>
+        projects/<P>/topics/<T>
+        projects/<P>/subscriptions/<S>
+
+    Pre-P2-6 the importer used these URNs verbatim as resource_name +
+    hcl_name_base. Three downstream failures resulted:
+      1. Resource line `resource "tf_type" "projects/.../keyRings/k"`
+         is invalid HCL syntax (slashes not allowed in identifiers)
+         -> hcl_validation_failed.
+      2. Filename `tf_type_projects/.../keyRings/k.tf` fails file
+         write (slashes interpreted as directory separators).
+      3. gcloud describe call uses the URN where a short name would
+         do -- redundant, ugly, but still functionally correct.
+
+    Fix: when `raw_display` looks URN-like (contains `/`), return only
+    the last path segment. Otherwise return unchanged.
+
+    Pure function; no I/O. Suitable for unit tests without gcloud.
+
+    Returns:
+        Last path segment if `raw_display` contains `/`; the input
+        unchanged if it does not; the input as-is (None or "") if
+        falsy. Caller is responsible for further normalisation
+        (typically `.replace('-', '_')` for HCL identifier safety).
+    """
+    if raw_display and "/" in raw_display:
+        return raw_display.rsplit("/", 1)[-1]
+    return raw_display
+
+
 def discover_resources_of_type(project_id, asset_type):
     log.info("discover_start", project_id=project_id, asset_type=asset_type)
     command_args = (

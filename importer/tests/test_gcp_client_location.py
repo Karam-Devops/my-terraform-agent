@@ -19,6 +19,7 @@ from importer.gcp_client import (
     _is_zonal_location,
     _resolve_location_flag,
     extract_path_segment,
+    friendly_name_from_display,
 )
 
 
@@ -199,6 +200,57 @@ class ExtractPathSegmentTests(unittest.TestCase):
         path = "//cloudkms.googleapis.com/projects/p1/locations/us/keyRings/k/cryptoKeys/x"
         self.assertEqual(extract_path_segment(path, "keyRings"), "k")
         self.assertIsNone(extract_path_segment(path, "keyrings"))
+
+
+class FriendlyNameFromDisplayTests(unittest.TestCase):
+    """Pin the URN-to-friendly-name normaliser added in P2-6 (CC-8).
+
+    Three distinct asset shapes exercised, plus the no-op cases.
+    Every one corresponds to a real failure observed in the Phase 2
+    SMOKE against dev-proj-470211: keyring + topic + subscription
+    HCL gen failed with `missing_resource_line` because the URN
+    flowed through as an HCL resource label.
+    """
+
+    def test_kms_keyring_urn_to_short_name(self):
+        """The canonical Phase 2 SMOKE failure case: KMS keyring."""
+        urn = "projects/dev-proj-470211/locations/us-central1/keyRings/poc-keyring"
+        self.assertEqual(friendly_name_from_display(urn), "poc-keyring")
+
+    def test_kms_crypto_key_urn_to_short_name(self):
+        """Nested URN: crypto_key under a key ring. Last segment wins."""
+        urn = "projects/p/locations/l/keyRings/k/cryptoKeys/poc-key"
+        self.assertEqual(friendly_name_from_display(urn), "poc-key")
+
+    def test_pubsub_topic_urn_to_short_name(self):
+        urn = "projects/dev-proj-470211/topics/poc-topic"
+        self.assertEqual(friendly_name_from_display(urn), "poc-topic")
+
+    def test_pubsub_subscription_urn_to_short_name(self):
+        urn = "projects/dev-proj-470211/subscriptions/poc-subscription"
+        self.assertEqual(friendly_name_from_display(urn), "poc-subscription")
+
+    def test_short_name_returned_unchanged(self):
+        """Most asset types (compute_instance, storage_bucket, etc.)
+        have a short displayName like `poc-vm` -- the helper must be
+        a no-op for those, otherwise we'd silently change correct
+        names."""
+        for name in ("poc-vm", "poc-disk", "poc-smoke-bucket-...", "POC Smoke SA"):
+            with self.subTest(name=name):
+                self.assertEqual(friendly_name_from_display(name), name)
+
+    def test_falsy_inputs_returned_unchanged(self):
+        """None / empty string -> caller falls back to `name.split('/')[-1]`
+        for the asset name; helper must not transform falsy inputs."""
+        self.assertIsNone(friendly_name_from_display(None))
+        self.assertEqual(friendly_name_from_display(""), "")
+
+    def test_trailing_slash_yields_empty_segment(self):
+        """Defensive: malformed display ending in `/` returns the empty
+        last segment -- caller's `or selected_asset['name'].split('/')[-1]`
+        fallback then kicks in. Helper itself stays predictable rather
+        than introducing None-vs-empty-string ambiguity."""
+        self.assertEqual(friendly_name_from_display("projects/p/topics/"), "")
 
 
 if __name__ == "__main__":
