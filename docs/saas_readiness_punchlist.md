@@ -563,6 +563,7 @@ migration with backend implications").
 | **CG-7 Failure isolation via quarantine pattern** | **Phase 4 hotfix (SHIPPED)** | **0.5 day** -- shipped same wave as P4-11/P4-12 SMOKE-4 hotfixes |
 | **CG-8 Round-1 Cloud Run deployment (NO persistent storage)** | **Phase 5A — superseded** | **1.5-2 days** -- minimum viable; superseded by user's pivot to high-perf variant CG-8H (2026-04-27) |
 | **CG-8H Round-1 Cloud Run + GCS high-perf variant** | **Phase 5A (CHOSEN)** | **2.5-3 days** -- CG-8 base + GCS rsync layer + max>1 + customer download UX. Solves 14 of 18 forecasted pitfalls vs 6 for vanilla CG-8. Customer commits to "no live hotfixes during test" so deploy-data-loss isn't the driver; high-perf + cross-session persistence is. |
+| **CG-10 Auto-created defaults filter (Inventory noise suppression)** | **Phase 6** | **0.5 day** -- folds into Phase 6 Inventory tab; surfaced by SMOKE 4 Stage 4 (43 default-VPC subnets + 6 GKE-internal firewalls dominated unmanaged_count=69, masked the ~7 customer-actionable unmanaged resources). Mirrors Firefly's "Hidden Assets" feature. |
 | **CC-9 Few-shot golden examples (top 10 types)** | **Phase 4** | **5 days** |
 | CC-3 cold-start preflight | Phase 5 | 1 day |
 | **CC-5 ResourceOutcome backend** | **Phase 5** | **1 day** |
@@ -1619,6 +1620,65 @@ Phase 5B/6 retro.
 "the Phase 6+ scaling layer": Firestore + multi-region + Cloud
 Tasks + real auth. Effort estimate unchanged; phase moves from
 5B to 6+ pending Round-1 retro signal.
+
+### CG-10. Auto-created defaults filter (Inventory noise suppression) — surfaced 2026-04-28 by SMOKE 4 Stage 4
+
+**Problem.** SMOKE 4 Stage 4 rescan returned `unmanaged_count = 69`
+against 80 cloud resources of 17 known asset types. Of those 69, the
+breakdown was:
+  * ~3 deliberately quarantined (poc-cloudrun, poc-vm disk, poc-vm)
+  * ~6 GKE-managed children (cluster-internal firewalls, node-pool VMs,
+    attached disks)
+  * ~10 GCP auto-created defaults (`default-allow-icmp`,
+    `default-allow-internal`, `default-allow-rdp`)
+  * **~43 default-VPC per-region subnetworks** (the dominant source of
+    noise; one per GCP region, all auto-created with the default VPC)
+  * ~7 customer-actionable unmanaged resources
+
+The customer-actionable signal is **~10% of the surfaced count**.
+Rendering the raw 69 in the Phase 6 Inventory tab buries the real
+finding under defaults the customer didn't create and shouldn't have to
+triage.
+
+**Spec.** Add an `auto_created` heuristic + a default-on filter to the
+Inventory tab (Phase 6), with a single-click toggle to show
+everything (operator debugging mode). Mirrors Firefly's "Hidden
+Assets" feature, which solves the identical UX problem for them.
+
+**Heuristic v1** (cheap, no extra cloud calls — derive from the
+existing `CloudResource` payload):
+
+  * `cloud_name.startswith("default-allow-")` →
+    GCP-auto-created firewall (icmp/internal/rdp/ssh defaults)
+  * `cloud_name.startswith("gke-") and contains a UUID-shaped suffix` →
+    GKE-internal firewall / disk / node-VM
+  * `tf_type == "google_compute_subnetwork" and parent_network ==
+    "default"` → default-VPC auto-subnet (need to thread parent network
+    through `CloudResource` — small importer addition)
+  * `tf_type == "google_compute_disk" and source_image starts with
+    "projects/cos-cloud/global/images/"` → GKE node disk
+
+**Heuristic v2 (deferred)** — query
+`compute.googleapis.com/Network/default` and exclude all subnetworks
+whose `network` self-link points to it. More accurate but adds one
+gcloud call per rescan; defer until v1 customer-tested.
+
+**Where it lives.** `detector/rescan.py` returns the same 69-item
+list; the Inventory tab in Phase 6 applies the filter at render time
+and shows a chip like `Hiding 60 auto-created resources (click to
+show)`. The CLI `detector/run.py` rescan path stays unfiltered for
+operator parity.
+
+**Cost.** 0.5 day, folds into Phase 6 Inventory tab work. No extra
+cloud calls (heuristic v1).
+
+**Why Phase 6 not Phase 5A.** This is purely a UI rendering layer; the
+Round-1 customer demo without the filter is still valuable (it
+demonstrates the underlying CG-1 capability). Filter is a polish layer
+for the demo conversation, not a correctness gap. Add when the UI is
+under construction.
+
+---
 
 ### CG-9. Phase 5B persistent storage stack (deferred from CG-8) — surfaced 2026-04-27
 
