@@ -1543,13 +1543,46 @@ layer + max-instances bump.
       UI without removing it from the engine. Operator CLI sees
       both targets unless this env is set; the SaaS deployment
       sets it explicitly so the customer never sees Azure.)
+    - Env: ``MTAGENT_PERSIST_BLUEPRINTS=0`` (P4-15.3 opt-out --
+      disables diagnostic YAML blueprint persistence in
+      ``<workdir>/_diagnostics/blueprints/``. Default ON for
+      local dev / SMOKE diagnosis; OFF for SaaS Round-1 to
+      reduce ephemeral /tmp churn. If a customer reports a
+      translation failure, operator can flip this OFF for the
+      next deploy + run, OR (cheaper) use
+      ``gcloud run services proxy`` to inspect the live
+      ``/tmp/imported/<request>/_diagnostics/blueprints/`` while
+      the failing request is still in-flight.)
+    - Env: ``IMPORTER_AUTO_QUARANTINE=1`` (CG-7 -- skip the
+      interactive HITL menu; quarantine self-broken resources
+      to ``_quarantine/`` automatically and surface them as
+      "Needs Attention" in the UI per CC-5 spec)
+    - Env: ``MAX_TRANSLATION_WORKERS=8`` (P4-15 -- bounded by
+      the 300 RPM Vertex AI quota; 3 instances × 8 workers ×
+      3 calls/file ÷ 30s = ~72 RPM peak avg)
+    - Env: ``MTAGENT_IMPORT_BASE=/tmp/imported`` (resolves the
+      common.workdir base to the Cloud Run tmpfs root)
 
   * **UI affordances** (Phase 6 work folded forward):
     - ``st.download_button`` per .tf file in the workdir
+      (filtered to TOP-LEVEL .tf files only; ``_diagnostics/``
+      and ``_quarantine/`` directories not surfaced to the
+      customer per P4-15.3)
     - "Cross-session reopen" -- on Streamlit page load, hydrate
       from GCS so customer sees yesterday's imports
     - Per-resource audit trail: list of GCS object versions for
       a given .tf
+
+  * **GCS rsync exclusions** (CG-8H storage layer specifics):
+    - ``--exclude=_diagnostics/**`` so ephemeral diagnostic
+      artifacts don't pollute the durable bucket. Diagnostics
+      live in /tmp only; lost when container recycles -- which
+      is fine because they're operator-debug only, not
+      customer deliverables.
+    - ``--exclude=*.backup`` so terraform's auto-backup files
+      don't accumulate in the bucket (the bucket's Object
+      Versioning already provides recovery; backup files are
+      redundant).
 
 **Pitfall coverage delta** (CG-8 vanilla -> CG-8H):
 
