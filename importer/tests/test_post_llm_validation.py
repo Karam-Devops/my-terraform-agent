@@ -241,5 +241,104 @@ class DropRequiredFieldEmptyBlocksTests(unittest.TestCase):
         self.assertIn("pubsub {}", hcl_out)
 
 
+class NestedEmptyBlockTests(unittest.TestCase):
+    """P2-7 regression coverage for nested empty blocks.
+
+    The Phase 2 SMOKE on dev-proj-470211 surfaced this case:
+    `pubsub {}` emitted INSIDE `notification_config { ... }`. The
+    pre-P2-7 scrubber only looked for `pubsub.<*>` paths in the
+    schema (top-level pubsub block) and missed
+    `notification_config.pubsub.enabled` -- so the empty block
+    survived to terraform plan-verify, which rejected it.
+
+    These tests pin the two-step lookup: prefer top-level matches
+    when they exist, fall back to nested matches when they don't.
+    """
+
+    def test_drops_nested_block_with_required_inner_field(self):
+        """The canonical P2-7 case: pubsub only nested in notification_config."""
+        oracle = _FakeOracle({
+            "google_container_cluster": {
+                "notification_config.pubsub.enabled":
+                    _FakeAttrInfo("notification_config.pubsub.enabled", required=True),
+            },
+        })
+        hcl_in = (
+            'resource "google_container_cluster" "x" {\n'
+            '  notification_config {\n'
+            '    pubsub {}\n'
+            '  }\n'
+            '}\n'
+        )
+        hcl_out, dropped = drop_required_field_empty_blocks(
+            hcl_in, "google_container_cluster", oracle=oracle,
+        )
+        self.assertEqual(dropped, ["pubsub"])
+        self.assertNotIn("pubsub {}", hcl_out)
+
+    def test_keeps_nested_block_with_only_optional_fields(self):
+        """Symmetric to the top-level case: nested block with only
+        optional inner fields is a legitimate presence-only signal."""
+        oracle = _FakeOracle({
+            "google_container_cluster": {
+                "addons_config.network_policy_config.disabled":
+                    _FakeAttrInfo("addons_config.network_policy_config.disabled",
+                                  optional=True),
+            },
+        })
+        hcl_in = (
+            'resource "google_container_cluster" "x" {\n'
+            '  addons_config {\n'
+            '    network_policy_config {}\n'
+            '  }\n'
+            '}\n'
+        )
+        hcl_out, dropped = drop_required_field_empty_blocks(
+            hcl_in, "google_container_cluster", oracle=oracle,
+        )
+        self.assertEqual(dropped, [])
+        self.assertIn("network_policy_config {}", hcl_out)
+
+    def test_top_level_takes_priority_over_nested(self):
+        """When both top-level and nested same-name paths exist, only
+        top-level is consulted -- prevents cross-pollution false-positives.
+
+        Schema declares BOTH:
+          * top-level `master_auth.*` (all optional) -- legit presence-only
+          * nested `<other_block>.master_auth.<required>` (hypothetical)
+
+        Empty `master_auth {}` at any indent should be KEPT because the
+        top-level paths declare all-optional inner fields. The nested
+        path is irrelevant because top-level exists.
+        """
+        oracle = _FakeOracle({
+            "google_container_cluster": {
+                "master_auth.client_certificate_config":
+                    _FakeAttrInfo("master_auth.client_certificate_config",
+                                  optional=True),
+                # Hypothetical cross-pollution: another block contains
+                # a `master_auth` sub-key with a required field. Without
+                # the two-step priority, a naive `.master_auth.` substring
+                # match would drop a legit empty top-level master_auth {}.
+                "some_other_block.master_auth.required_field":
+                    _FakeAttrInfo("some_other_block.master_auth.required_field",
+                                  required=True),
+            },
+        })
+        hcl_in = (
+            'resource "google_container_cluster" "x" {\n'
+            '  master_auth {}\n'
+            '}\n'
+        )
+        hcl_out, dropped = drop_required_field_empty_blocks(
+            hcl_in, "google_container_cluster", oracle=oracle,
+        )
+        # Top-level exists with all-optional fields -> KEEP.
+        # The nested `some_other_block.master_auth.required_field`
+        # is correctly ignored because top-level paths exist.
+        self.assertEqual(dropped, [])
+        self.assertIn("master_auth {}", hcl_out)
+
+
 if __name__ == "__main__":
     unittest.main()

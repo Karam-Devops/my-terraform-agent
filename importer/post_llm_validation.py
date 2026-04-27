@@ -114,26 +114,65 @@ def _block_has_required_inner_field(
     """Return True iff the schema for `tf_type` says block `block_name`
     has at least one required inner attribute.
 
-    Walks the oracle's flat path index, looking for entries that match
-    the prefix `<block_name>.` and have `required=True`. We check
-    attribute paths only -- nested-block "required" is encoded via
-    min_items >= 1, which is a different concern (a missing nested
-    block at the parent level, not an empty block emitted at this
-    level).
+    Walks the oracle's flat path index. Two-step lookup so nested
+    blocks (P2-7) are caught without false-positives across
+    same-named-but-different blocks:
 
-    Fail-safe: any oracle error returns False (don't drop). The downstream
-    self-correction loop will surface anything we miss.
+      1. PREFER top-level matches: any path starting with
+         `<block_name>.` -- if at least one such path exists, use
+         ONLY those for the required check. (A top-level block in
+         the schema means the LLM-emitted `<block_name> {}` most
+         likely refers to it, not a nested same-named cousin.)
+
+      2. FALLBACK to nested matches: if no top-level paths exist,
+         look for paths containing `.<block_name>.` -- e.g., when
+         `pubsub` is only present in the schema as
+         `notification_config.pubsub.enabled`, the LLM-emitted
+         `pubsub {}` is unambiguously the nested one.
+
+    The two-step approach handles real schemas correctly:
+      * `master_auth {}` (top-level, all-optional inner fields)
+        -> top-level paths exist, all optional -> KEEP (presence-only signal)
+      * `pubsub {}` (no top-level pubsub; only nested in
+        notification_config; pubsub.enabled is required)
+        -> nested fallback fires, finds notification_config.pubsub.enabled
+        with required=True -> DROP (hallucinated empty block)
+
+    We check attribute paths only -- nested-block "required" is
+    encoded via min_items >= 1, which is a different concern (a
+    missing nested block at the parent level, not an empty block
+    emitted at this level).
+
+    Fail-safe: any oracle error returns False (don't drop). The
+    downstream self-correction loop will surface anything we miss.
     """
     try:
         if not oracle.has(tf_type):
             return False
+        paths = oracle.list_paths(tf_type, kind="attribute")
+
+        # Step 1: prefer top-level matches.
         prefix = f"{block_name}."
-        for path in oracle.list_paths(tf_type, kind="attribute"):
-            if not path.startswith(prefix):
-                continue
-            info = oracle.get(tf_type, path)
-            if info is not None and info.required:
-                return True
+        top_level = [p for p in paths if p.startswith(prefix)]
+        if top_level:
+            for path in top_level:
+                info = oracle.get(tf_type, path)
+                if info is not None and info.required:
+                    return True
+            # Top-level block exists in schema but has no required
+            # inner field -> presence-only signal, keep the empty.
+            return False
+
+        # Step 2: fall back to nested matches (P2-7). Only fires when
+        # no top-level path exists -- avoids false positives when
+        # the same name appears at both nesting levels in distinct
+        # blocks.
+        nested_pattern = f".{block_name}."
+        for path in paths:
+            if nested_pattern in path:
+                info = oracle.get(tf_type, path)
+                if info is not None and info.required:
+                    return True
         return False
     except Exception:  # noqa: BLE001 - fail open: leave the block alone
         return False
