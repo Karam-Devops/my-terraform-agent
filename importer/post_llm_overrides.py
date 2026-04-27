@@ -210,6 +210,41 @@ def _delete_in_block(hcl: str, block_path: str, field: str) -> Tuple[str, int]:
     return hcl, total
 
 
+def _delete_at_top_level(hcl: str, field: str) -> Tuple[str, int]:
+    """Delete every `field = value` line from the entire HCL text.
+
+    Counterpart to `_delete_in_block` for the case where a hallucinated
+    field can appear at multiple block-path locations within the same
+    resource body and the field has NO valid placement anywhere in the
+    target schema (so deleting all occurrences is strictly safe).
+
+    USE WITH CARE. This is the right call when:
+      * The field is a v1-schema vestige the LLM mis-emitted on a v2
+        resource (e.g. `container_concurrency` on
+        `google_cloud_run_v2_service` -- v1 had it on
+        `template.spec.container_concurrency`; v2 uses
+        `template.max_instance_request_concurrency`. The legacy name
+        is invalid ANYWHERE in the v2 schema.)
+      * The field is a deprecated/removed identifier that the LLM
+        learned from older training data.
+
+    DO NOT use this when:
+      * The field is valid in some block-path locations and invalid
+        in others -- use _delete_in_block with the specific
+        block_path instead.
+
+    Dispatched in `apply_overrides` when a deletion entry has an
+    empty / missing `block_path` (P2-8 -- mirror of P2-2's
+    top-level rename dispatch).
+    """
+    line_pattern = re.compile(
+        rf'^[ \t]*{re.escape(field)}\s*=\s*[^\n]*\n',
+        re.MULTILINE,
+    )
+    new_text, n = line_pattern.subn('', hcl)
+    return new_text, n
+
+
 def apply_overrides(tf_type: str, hcl_text: str) -> Tuple[str, List[str]]:
     """Apply known LLM hallucination corrections to generated HCL.
 
@@ -257,7 +292,11 @@ def apply_overrides(tf_type: str, hcl_text: str) -> Tuple[str, List[str]]:
 
     for deletion in rules.get("deletions", []):
         try:
-            block_path = deletion["block_path"]
+            # block_path is OPTIONAL since P2-8: empty/missing means the
+            # field is deleted from anywhere in the resource body (use
+            # only when the field has NO valid placement in the schema).
+            # `field` is required.
+            block_path = deletion.get("block_path", "")
             field = deletion["field"]
         except (KeyError, TypeError) as e:
             _log.warning(
@@ -267,9 +306,14 @@ def apply_overrides(tf_type: str, hcl_text: str) -> Tuple[str, List[str]]:
                 missing_key=str(e),
             )
             continue
-        hcl_text, n = _delete_in_block(hcl_text, block_path, field)
+        if block_path:
+            hcl_text, n = _delete_in_block(hcl_text, block_path, field)
+            scope_label = f"{block_path}."
+        else:
+            hcl_text, n = _delete_at_top_level(hcl_text, field)
+            scope_label = "<root>."
         if n > 0:
-            corrections.append(f"deleted '{block_path}.{field}' ({n}x)")
+            corrections.append(f"deleted '{scope_label}{field}' ({n}x)")
 
     return hcl_text, corrections
 

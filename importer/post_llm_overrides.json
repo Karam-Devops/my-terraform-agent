@@ -21,5 +21,20 @@
         "to": "node_locations"
       }
     ]
+  },
+
+  "google_cloud_run_v2_service": {
+    "deletions": [
+      {
+        "comment": "P2-8: v1 schema vestige. google_cloud_run_service (v1) had `container_concurrency` on `template.spec.container_concurrency`. v2 renamed and relocated this to `template.max_instance_request_concurrency` with a different semantic. The LLM, trained on v1 docs, frequently emits the legacy name on a v2 resource. Provider rejects with 'argument named container_concurrency is not expected here'. Field has NO valid placement in the v2 schema -> safe to delete from anywhere (block_path empty -> _delete_at_top_level). Surfaced by the Phase 2 SMOKE on poc-cloudrun.",
+        "block_path": "",
+        "field": "container_concurrency"
+      },
+      {
+        "comment": "P2-8: v1 schema vestige. v1's `traffic` block accepted `latest_revision = true` to direct 100% of traffic to the latest revision. v2 redesigned the traffic block: instead of a boolean, it uses `type = \"TRAFFIC_TARGET_ALLOCATION_TYPE_LATEST\"`. The LLM emits the v1 boolean on v2 resources; provider rejects. Field has NO valid placement in v2 schema -> delete from anywhere. Surfaced by the Phase 2 SMOKE on poc-cloudrun.",
+        "block_path": "",
+        "field": "latest_revision"
+      }
+    ]
   }
 }
