@@ -1,11 +1,15 @@
 # my-terraform-agent/translator/run.py
 
+import glob
 import os
-from typing import Optional, Tuple
+import time
+from typing import List, Optional, Tuple
 
 from common.logging import get_logger
 
 from . import config, yaml_engine, aws_engine, azure_engine, tf_validator
+from ..importer.config import TF_TYPE_TO_GCLOUD_INFO
+from .results import FileOutcome, TranslationResult
 
 # Module-level logger used by the CLI main(). Every call into
 # run_translation_pipeline() rebinds tenant context onto a per-call
@@ -221,6 +225,340 @@ def run_translation_pipeline(
         log.exception("translate_output_write_failed",
                       output_path=output_path, error=str(e))
         return False, None
+
+
+# ---------------------------------------------------------------------------
+# CC-6 (P3-6): batch translation -- discovery + multi-file pipeline
+# ---------------------------------------------------------------------------
+
+# Importer writes files named `<tf_type>_<hcl_name>.tf` into the
+# per-project workdir. To split that filename back into (tf_type,
+# hcl_name) we can't use a naive regex -- both halves contain
+# underscores, so a greedy match would mis-split (e.g.
+# `google_compute_instance_poc_vm.tf` would parse as tf_type=
+# `google_compute_instance_poc`, hcl_name=`vm`).
+#
+# Instead we use the importer's TF_TYPE_TO_GCLOUD_INFO as the
+# allowlist of valid tf_type prefixes. Files whose prefix matches a
+# known tf_type are translatable; files whose prefix doesn't match
+# (custom modules, operator-edited artifacts, README backups) are
+# silently skipped at discovery time. Sorted longest-first so prefix
+# matching picks the most specific tf_type when multiple known types
+# share a common prefix (defensive -- doesn't actually happen in the
+# current type set, but cheap insurance for future additions).
+_KNOWN_TF_TYPE_PREFIXES = sorted(
+    TF_TYPE_TO_GCLOUD_INFO.keys(),
+    key=len,
+    reverse=True,
+)
+
+
+def _parse_imported_filename(filename: str) -> Optional[Tuple[str, str]]:
+    """Split `<tf_type>_<hcl_name>.tf` into a (tf_type, hcl_name) pair.
+
+    Returns None when the filename doesn't match the importer's output
+    convention OR when the tf_type isn't recognised in the importer's
+    map. None signals "skip this file at discovery" -- we only translate
+    files whose tf_type the importer explicitly supports.
+
+    Pure function, no I/O. Safe to unit-test directly.
+    """
+    if not filename.endswith(".tf"):
+        return None
+    base = filename[:-3]  # strip .tf
+    for tf_type in _KNOWN_TF_TYPE_PREFIXES:
+        prefix = f"{tf_type}_"
+        if base.startswith(prefix):
+            hcl_name = base[len(prefix):]
+            if hcl_name:  # non-empty hcl_name required
+                return (tf_type, hcl_name)
+    return None
+
+
+def _human_friendly_type(tf_type: str) -> str:
+    """Convert a Terraform resource type to a customer-facing label.
+
+    google_compute_instance -> "VM"
+    google_storage_bucket   -> "Bucket"
+    google_kms_crypto_key   -> "KMS Key"
+    ...
+
+    Used by the SaaS UI's checkbox grid (Phase 6) so customers see
+    "VM · poc-vm" instead of "google_compute_instance · poc_vm".
+    Mirrors the punchlist's CC-6 spec (display_label vs. file_path).
+
+    Falls back to the raw tf_type when there's no curated mapping --
+    new types added to the importer don't break the translator's
+    discovery; they just appear with their raw provider name.
+    """
+    return _TF_TYPE_DISPLAY_LABELS.get(tf_type, tf_type)
+
+
+_TF_TYPE_DISPLAY_LABELS = {
+    "google_compute_instance": "VM",
+    "google_compute_disk": "Disk",
+    "google_compute_subnetwork": "Subnet",
+    "google_compute_network": "Network",
+    "google_compute_firewall": "Firewall",
+    "google_compute_address": "Address",
+    "google_compute_instance_template": "Instance Template",
+    "google_container_cluster": "GKE Cluster",
+    "google_container_node_pool": "GKE Node Pool",
+    "google_service_account": "Service Account",
+    "google_storage_bucket": "Bucket",
+    "google_sql_database_instance": "Cloud SQL",
+    "google_kms_key_ring": "KMS Key Ring",
+    "google_kms_crypto_key": "KMS Key",
+    "google_cloud_run_v2_service": "Cloud Run Service",
+    "google_pubsub_topic": "Pub/Sub Topic",
+    "google_pubsub_subscription": "Pub/Sub Subscription",
+}
+
+
+def discover_translatable_files(workdir: str) -> List[dict]:
+    """Walk a per-project importer workdir; return the translatable file list.
+
+    Returned shape (one dict per discovered .tf file):
+
+        {
+            "file_path": str,         # absolute path under workdir
+            "tf_type":   str,         # "google_compute_instance"
+            "hcl_name":  str,         # "poc_vm"
+            "display_label": str,     # "VM · poc-vm"  (customer-facing)
+        }
+
+    The list is sorted by display_label for stable presentation in the
+    Phase 6 UI checkbox grid. Files that don't match the importer's
+    naming convention are silently skipped (they're operator-edited
+    artifacts, not importer-generated and not safely translatable).
+
+    Used by:
+      * Phase 6 Streamlit Translator tab -- renders one checkbox per
+        entry (with `display_label` as the visible text and `file_path`
+        as the hidden value).
+      * Phase 5 Cloud Run API endpoint -- exposes the same list as
+        JSON for any HTTP client.
+      * CLI smoke testing -- the existing single-file CLI doesn't use
+        this; the new `run_translation_batch` does.
+
+    Args:
+        workdir: Absolute path to a per-project importer workdir
+            (e.g. ``imported/dev-proj-470211/``). Non-existent / empty
+            workdirs return an empty list rather than raising; callers
+            distinguish "no files to translate" from "bad workdir" via
+            ``os.path.isdir(workdir)`` if they need to.
+
+    Returns:
+        Sorted list of dicts as described above. Empty list when no
+        translatable files are present.
+    """
+    if not workdir or not os.path.isdir(workdir):
+        return []
+    out: List[dict] = []
+    for path in glob.glob(os.path.join(workdir, "*.tf")):
+        base = os.path.basename(path)
+        parsed = _parse_imported_filename(base)
+        if parsed is None:
+            # Skip files whose tf_type isn't in the importer's known
+            # set (operator-edited artifacts, custom modules, custom
+            # backends, etc.). The importer's output is the only
+            # thing we know how to translate safely; arbitrary HCL
+            # would just break the LLM with novel input shapes.
+            continue
+        tf_type, hcl_name = parsed
+        # Re-humanise the hcl_name for display (importer underscored
+        # hyphens to make HCL labels valid; the customer originally
+        # named the resource with hyphens).
+        display_name = hcl_name.replace("_", "-")
+        out.append({
+            "file_path": path,
+            "tf_type": tf_type,
+            "hcl_name": hcl_name,
+            "display_label": f"{_human_friendly_type(tf_type)} · {display_name}",
+        })
+    # Stable order for UI rendering.
+    out.sort(key=lambda e: e["display_label"])
+    return out
+
+
+def run_translation_batch(
+    target_cloud: str,
+    source_paths: List[str],
+    *,
+    tenant_id: Optional[str] = None,
+    project_id: Optional[str] = None,
+) -> TranslationResult:
+    """Translate multiple source files to the same target cloud.
+
+    Phase 6 Streamlit Translator tab calls this with the operator's
+    checkbox selection (a list of file_paths from
+    `discover_translatable_files`). Per-file failures land in the
+    returned TranslationResult.files list with status="failed" /
+    "needs_attention"; the batch as a whole completes regardless.
+
+    Same A+D contract as importer.run_workflow:
+      * RAISES on inputs/environment problems (invalid target_cloud,
+        empty source_paths). Caller catches; UI renders the
+        PreflightError's user_hint.
+      * RETURNS a TranslationResult on every successful batch run,
+        regardless of per-file outcomes.
+
+    Per-file failure isolation: each file's translation is wrapped
+    in try/except so one file's LLM error / validator failure / write
+    error doesn't kill the batch (mirror of C5.1 Bug B fix in the
+    importer).
+
+    Args:
+        target_cloud: "aws" or "azure" (case-insensitive). Same value
+            applies to every file in the batch.
+        source_paths: List of source ``.tf`` paths to translate.
+            Empty list raises ValueError -- empty batches are a caller
+            bug, not a runtime case to handle silently.
+        tenant_id / project_id: Same SaaS context plumbing as
+            run_translation_pipeline. Bound onto the batch logger so
+            every per-file event carries tenant context.
+
+    Returns:
+        TranslationResult with per-file outcomes + counts + duration.
+
+    Raises:
+        ValueError: empty source_paths or invalid target_cloud.
+            Both are caller bugs that warrant fast-failing rather
+            than producing a misleading "batch translated 0 of 0
+            files" result.
+    """
+    target = target_cloud.strip().lower()
+    if target not in ("aws", "azure"):
+        raise ValueError(
+            f"target_cloud must be 'aws' or 'azure'; got {target_cloud!r}"
+        )
+    if not source_paths:
+        raise ValueError(
+            "run_translation_batch requires a non-empty source_paths list"
+        )
+
+    log = _log.bind(
+        target_cloud=target,
+        tenant_id=tenant_id or "unknown",
+        project_id=project_id or "unknown",
+        batch_size=len(source_paths),
+    )
+    log.info("translation_batch_start")
+
+    started = time.monotonic()
+    files: List[FileOutcome] = []
+    translated = 0
+    needs_attention = 0
+    failed = 0
+
+    for source_path in source_paths:
+        file_started = time.monotonic()
+        try:
+            is_valid, output_path = run_translation_pipeline(
+                target,
+                source_path,
+                tenant_id=tenant_id,
+                project_id=project_id,
+            )
+        except Exception as e:  # noqa: BLE001 -- isolate per-file failures
+            # Per-file failure -- one bad file does NOT kill the batch.
+            # This is the C5.1 Bug B equivalent for the translator: a
+            # single LLM exception or write error in file N must not
+            # propagate up and crash files N+1..len(source_paths).
+            file_duration = round(time.monotonic() - file_started, 2)
+            log.error(
+                "translation_file_outcome",
+                source_path=source_path,
+                status="failed",
+                error_type=type(e).__name__,
+                error=str(e),
+                duration_s=file_duration,
+            )
+            files.append(FileOutcome(
+                source_path=source_path,
+                target_cloud=target,
+                status="failed",
+                output_path=None,
+                validation_error=f"{type(e).__name__}: {e}",
+                duration_s=file_duration,
+            ))
+            failed += 1
+            continue
+
+        file_duration = round(time.monotonic() - file_started, 2)
+        if output_path is None:
+            # Pipeline returned (False, None) -- couldn't even produce
+            # output (LLM empty, file read error, etc.). Counted as
+            # `failed`, not `needs_attention`.
+            log.warning(
+                "translation_file_outcome",
+                source_path=source_path,
+                status="failed",
+                duration_s=file_duration,
+            )
+            files.append(FileOutcome(
+                source_path=source_path,
+                target_cloud=target,
+                status="failed",
+                output_path=None,
+                validation_error="pipeline returned no output path",
+                duration_s=file_duration,
+            ))
+            failed += 1
+        elif is_valid:
+            log.info(
+                "translation_file_outcome",
+                source_path=source_path,
+                status="translated",
+                output_path=output_path,
+                duration_s=file_duration,
+            )
+            files.append(FileOutcome(
+                source_path=source_path,
+                target_cloud=target,
+                status="translated",
+                output_path=output_path,
+                validation_error="",
+                duration_s=file_duration,
+            ))
+            translated += 1
+        else:
+            # Output produced but failed validation -- the existing
+            # pipeline saves best-effort HCL anyway. UI renders this
+            # as "needs attention" per CC-5.
+            log.warning(
+                "translation_file_outcome",
+                source_path=source_path,
+                status="needs_attention",
+                output_path=output_path,
+                duration_s=file_duration,
+            )
+            files.append(FileOutcome(
+                source_path=source_path,
+                target_cloud=target,
+                status="needs_attention",
+                output_path=output_path,
+                validation_error="output failed schema validation; saved for review",
+                duration_s=file_duration,
+            ))
+            needs_attention += 1
+
+    duration_s = round(time.monotonic() - started, 2)
+    skipped = max(
+        0, len(source_paths) - translated - needs_attention - failed,
+    )
+    result = TranslationResult(
+        target_cloud=target,
+        selected=len(source_paths),
+        translated=translated,
+        needs_attention=needs_attention,
+        failed=failed,
+        skipped=skipped,
+        duration_s=duration_s,
+        files=files,
+    )
+    log.info("translation_batch_complete", **result.as_fields())
+    return result
 
 
 def main():

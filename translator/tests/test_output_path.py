@@ -21,33 +21,106 @@ import unittest
 PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
 
 
+# P3-6 update: translator/run.py now does
+# `from ..importer.config import TF_TYPE_TO_GCLOUD_INFO`. This loader
+# previously set `translator` up as a top-level package (`__package__
+# = "translator"`); the relative-up import would then fail with
+# "attempted relative import beyond top-level package" because there's
+# no parent. Synthetic parent package (`_top_path_parent`) holds both
+# `translator` and `importer` as sub-packages so the relative import
+# resolves. Distinct package name from the other test files'
+# synthetic-parent names (`_p33_parent`, `_p35_parent`, `_p36_parent`)
+# to avoid cross-test sys.modules pollution.
+_PARENT_PKG = "_top_path_parent"
+_TRANSLATOR_PKG = f"{_PARENT_PKG}.translator"
+_IMPORTER_PKG = f"{_PARENT_PKG}.importer"
+_RUN_MOD = f"{_TRANSLATOR_PKG}.run"
+
+
 def _load_translator_run():
     """Load translator.run without dragging in the full package's heavy
     deps (yaml_engine pulls in litellm, etc.). We only need the pure
-    `resolve_output_path` helper which has no runtime dependencies."""
-    if "translator.run" in sys.modules:
-        return sys.modules["translator.run"]
+    `resolve_output_path` helper which has no runtime dependencies.
 
-    if "translator" not in sys.modules:
-        pkg = types.ModuleType("translator")
-        pkg.__path__ = [os.path.join(PROJECT_ROOT, "translator")]
-        sys.modules["translator"] = pkg
+    P3-6 added a `from ..importer.config import` to run.py, so the
+    loader now also stubs a synthetic parent + real importer.config
+    (pure dicts, no I/O, safe to load) so the relative import resolves.
+    """
+    cached = sys.modules.get(_RUN_MOD)
+    if cached is not None and hasattr(cached, "resolve_output_path"):
+        return cached
 
-    # Stub out heavy submodules that translator/run.py imports at module
-    # load time. The helper under test doesn't touch any of them, so
-    # plain ModuleType placeholders are enough to keep the import line
-    # from failing.
-    for stub_name in ("config", "yaml_engine", "aws_engine", "azure_engine", "tf_validator"):
-        full = f"translator.{stub_name}"
+    # Synthetic parent package.
+    if _PARENT_PKG not in sys.modules:
+        parent = types.ModuleType(_PARENT_PKG)
+        parent.__path__ = [PROJECT_ROOT]
+        sys.modules[_PARENT_PKG] = parent
+
+    # Synthetic translator sub-package (run.py loads into here).
+    if _TRANSLATOR_PKG not in sys.modules:
+        sub = types.ModuleType(_TRANSLATOR_PKG)
+        sub.__path__ = [os.path.join(PROJECT_ROOT, "translator")]
+        sub.__package__ = _PARENT_PKG
+        sys.modules[_TRANSLATOR_PKG] = sub
+
+    # Synthetic importer sub-package (so `..importer.config` resolves).
+    if _IMPORTER_PKG not in sys.modules:
+        imp_pkg = types.ModuleType(_IMPORTER_PKG)
+        imp_pkg.__path__ = [os.path.join(PROJECT_ROOT, "importer")]
+        imp_pkg.__package__ = _PARENT_PKG
+        sys.modules[_IMPORTER_PKG] = imp_pkg
+
+    # Real importer.config -- pure dicts, no I/O.
+    importer_config_name = f"{_IMPORTER_PKG}.config"
+    if importer_config_name not in sys.modules:
+        spec = importlib.util.spec_from_file_location(
+            importer_config_name,
+            os.path.join(PROJECT_ROOT, "importer", "config.py"),
+        )
+        mod = importlib.util.module_from_spec(spec)
+        sys.modules[importer_config_name] = mod
+        spec.loader.exec_module(mod)
+
+    # Stub heavy translator submodules. The helper under test doesn't
+    # touch any of them, so ModuleType placeholders suffice.
+    for stub_name in ("config", "yaml_engine", "aws_engine", "azure_engine",
+                      "tf_validator"):
+        full = f"{_TRANSLATOR_PKG}.{stub_name}"
         if full not in sys.modules:
             sys.modules[full] = types.ModuleType(full)
 
+    # Real results.py -- dependency-free dataclasses; needed for the
+    # `from .results import FileOutcome, TranslationResult` in run.py.
+    results_name = f"{_TRANSLATOR_PKG}.results"
+    if results_name not in sys.modules:
+        spec = importlib.util.spec_from_file_location(
+            results_name,
+            os.path.join(PROJECT_ROOT, "translator", "results.py"),
+        )
+        mod = importlib.util.module_from_spec(spec)
+        sys.modules[results_name] = mod
+        spec.loader.exec_module(mod)
+
+    # common.logging -- real, dependency-free.
+    if "common.logging" not in sys.modules:
+        if "common" not in sys.modules:
+            common_pkg = types.ModuleType("common")
+            common_pkg.__path__ = [os.path.join(PROJECT_ROOT, "common")]
+            sys.modules["common"] = common_pkg
+        spec = importlib.util.spec_from_file_location(
+            "common.logging",
+            os.path.join(PROJECT_ROOT, "common", "logging.py"),
+        )
+        mod = importlib.util.module_from_spec(spec)
+        sys.modules["common.logging"] = mod
+        spec.loader.exec_module(mod)
+
     spec = importlib.util.spec_from_file_location(
-        "translator.run",
+        _RUN_MOD,
         os.path.join(PROJECT_ROOT, "translator", "run.py"),
     )
     mod = importlib.util.module_from_spec(spec)
-    sys.modules["translator.run"] = mod
+    sys.modules[_RUN_MOD] = mod
     spec.loader.exec_module(mod)
     return mod
 
