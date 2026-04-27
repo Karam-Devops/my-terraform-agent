@@ -12,6 +12,7 @@ import re
 from . import (
     config, gcp_client, terraform_client, hcl_generator, knowledge_base,
     heuristics, snapshot_scrubber, lifecycle_planner, resource_mode,
+    inventory as _inventory,
 )
 # Root-level app config — distinct from `importer/config.py`. The root holds
 # the project-ID concepts (HOST/TARGET/DEMO) and the resolver that enforces
@@ -894,14 +895,17 @@ def run_workflow() -> WorkflowResult:
             )
 
     print("\n--- Stage 1: Discovering All Supported Resources in Parallel ---")
-    all_discovered_resources = []
-    with concurrent.futures.ThreadPoolExecutor(max_workers=config.MAX_DISCOVERY_WORKERS) as executor:
-        future_to_asset_type = {executor.submit(gcp_client.discover_resources_of_type, project_id, at): at for at in config.ASSET_TO_TERRAFORM_MAP}
-        for future in concurrent.futures.as_completed(future_to_asset_type):
-            try:
-                resources = future.result()
-                if resources: all_discovered_resources.extend(resources)
-            except Exception as exc: print(f"❌ Error during discovery: {exc}")
+    # P4-2: Stage 1 enumeration extracted into importer.inventory.inventory()
+    # so the Detector (P4-3) can reuse the same parallel-discovery logic for
+    # CG-1 unmanaged-resource tracking. inventory() returns a list of
+    # CloudResource (frozen dataclass) -- we adapt back to the legacy
+    # list-of-dicts shape via .raw_asset for downstream stages
+    # (_present_selection_menu, _map_asset_to_terraform) that still expect
+    # the raw gcloud JSON. raise_on_error=False matches the importer's
+    # historical best-effort behavior (one failed asset_type shouldn't
+    # break the whole import).
+    inventory_result = _inventory.inventory(project_id, raise_on_error=False)
+    all_discovered_resources = [r.raw_asset for r in inventory_result]
 
     if not all_discovered_resources:
         # Workflow COMPLETED -- project just has no supported resources.
@@ -910,6 +914,10 @@ def run_workflow() -> WorkflowResult:
         return _build_empty_result(
             project_id=project_id, selected=0, started=started,
         )
+    # Re-sort by displayName for the human-friendly selection menu order.
+    # inventory() returns sorted by (tf_type, cloud_name); for the menu
+    # we want the historical alphabetical-by-displayName order so the
+    # operator's muscle memory still works.
     all_discovered_resources.sort(key=lambda r: r.get('displayName', r.get('name')))
 
     selected_assets = _present_selection_menu(all_discovered_resources)
