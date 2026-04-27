@@ -50,6 +50,16 @@ Total rules: **16** (9 GCP + 7 AWS).
 | google_compute_network/network_routing_mode_regional | gcp_network_routing_v1 (derived) | (industry consensus) | SC-7 | **P4-5** — REGIONAL stricter than Google's GLOBAL default |
 | google_compute_subnetwork/subnet_flow_logs_enabled | gcp_network_enable_flow_logs_v1 | CIS GCP 3.8 | AU-12 | **P4-5** — logConfig.enable + legacy enableFlowLogs, exempts proxy subnets |
 | google_compute_subnetwork/subnet_private_google_access | gcp_network_enable_private_google_access_v1 | (industry consensus) | SC-7 | **P4-5** — privateIpGoogleAccess required |
+| google_container_cluster/cluster_workload_identity | gcp_gke_enable_workload_identity_v1 | CIS GCP 7.x | IA-5 | **P4-6** — workloadPool OR identityNamespace |
+| google_container_cluster/cluster_private_endpoint | gcp_gke_private_cluster_v1 | CIS GCP 7.x | SC-7 | **P4-6** — both enablePrivateNodes + enablePrivateEndpoint |
+| google_container_cluster/cluster_legacy_abac_disabled | gcp_gke_legacy_abac_v1 | CIS GCP 7.x | AC-3 | **P4-6** — RBAC over ABAC |
+| google_container_cluster/cluster_master_authorized_networks | gcp_gke_master_authorized_networks_enabled_v1 | CIS GCP 7.x | SC-7 | **P4-6** — masterAuthorizedNetworksConfig.enabled |
+| google_container_node_pool/node_pool_auto_upgrade | gcp_gke_node_auto_upgrade_v1 | CIS GCP 7.x | SI-2 | **P4-6** — management.autoUpgrade |
+| google_container_node_pool/node_pool_auto_repair | gcp_gke_node_auto_repair_v1 | CIS GCP 7.x | SI-2 | **P4-6** — management.autoRepair |
+| google_container_node_pool/node_pool_uses_cos | gcp_gke_container_optimized_os | (industry consensus) | CM-7 | **P4-6** — imageType in {COS, COS_CONTAINERD} |
+| google_container_node_pool/node_pool_no_default_sa | gcp_gke_disable_default_service_account_v1 | CIS GCP 7.x | AC-6 | **P4-6** — config.serviceAccount != "default" |
+| google_kms_crypto_key/key_rotation_max_90_days | gcp_cmek_rotation_v1 | CIS GCP 1.10 | SC-12 | **P4-6** — STRICTER than Google's 1y default |
+| google_kms_crypto_key/key_protection_level_hsm | gcp_cmek_settings_v1 | (industry consensus) | SC-12, SC-13 | **P4-6** — versionTemplate.protectionLevel == HSM |
 | aws_instance/ec2_ebs_encryption | — (AWS) | CIS AWS 2.2.1 | SC-28 | header only |
 | aws_instance/ec2_imds_v2 | — (AWS) | CIS AWS 5.6 | AC-3 | header only |
 | aws_instance/ec2_no_public_ip | — (AWS) | (CIS Controls v8 12.x) | SC-7 | header only |
@@ -450,6 +460,87 @@ sibling). Cite "industry consensus / data-loss prevention".
 * **Source:** `gcp_network_enable_private_google_access_v1.yaml`.
 * **Mined field path:** `privateIpGoogleAccess` (bool). Deny when
   false / absent. **NIST:** SC-7.
+
+### 19. google_container_cluster/cluster_workload_identity.rego (P4-6)
+
+* **Source:** `gcp_gke_enable_workload_identity_v1.yaml`.
+* **Mined field paths:** `workloadIdentityConfig.workloadPool` (current
+  API) AND `identityNamespace` (legacy beta). Both checked because
+  Google's template does. **CIS:** GCP 7.x. **NIST:** IA-5.
+
+### 20. google_container_cluster/cluster_private_endpoint.rego (P4-6)
+
+* **Source:** `gcp_gke_private_cluster_v1.yaml`.
+* **Mined field paths:** `privateClusterConfig.enablePrivateNodes` +
+  `enablePrivateEndpoint`. Two-tier deny: HIGH severity if nodes are
+  public; MED if nodes private but master endpoint exposed.
+  **CIS:** GCP 7.x. **NIST:** SC-7.
+
+### 21. google_container_cluster/cluster_legacy_abac_disabled.rego (P4-6)
+
+* **Source:** `gcp_gke_legacy_abac_v1.yaml`.
+* **Mined field path:** `legacyAbac.enabled`. Deny when true (RBAC
+  is the modern replacement). **CIS:** GCP 7.x. **NIST:** AC-3.
+
+### 22. google_container_cluster/cluster_master_authorized_networks.rego (P4-6)
+
+* **Source:** `gcp_gke_master_authorized_networks_enabled_v1.yaml`.
+* **Mined field path:** `masterAuthorizedNetworksConfig.enabled`
+  must be true (else API server reachable from 0.0.0.0/0).
+  **CIS:** GCP 7.x. **NIST:** SC-7.
+
+### 23. google_container_node_pool/node_pool_auto_upgrade.rego (P4-6)
+
+* **Source:** `gcp_gke_node_auto_upgrade_v1.yaml`.
+* **Mined field path:** `management.autoUpgrade`. Per-node-pool shape
+  (our snapshot fetches each node pool individually; Google's template
+  iterates `nodePools[]` from the cluster asset). **CIS:** GCP 7.x.
+  **NIST:** SI-2.
+
+### 24. google_container_node_pool/node_pool_auto_repair.rego (P4-6)
+
+* **Source:** `gcp_gke_node_auto_repair_v1.yaml`.
+* **Mined field path:** `management.autoRepair`. Same per-node-pool
+  shape as #23. **CIS:** GCP 7.x. **NIST:** SI-2.
+
+### 25. google_container_node_pool/node_pool_uses_cos.rego (P4-6)
+
+* **Source:** `gcp_gke_container_optimized_os.yaml`.
+* **Mined allowed values:** `{"COS", "COS_CONTAINERD"}` for
+  `config.imageType`. COS = Container-Optimized OS (read-only root,
+  no package manager). **NIST:** CM-7 (Least Functionality).
+
+### 26. google_container_node_pool/node_pool_no_default_sa.rego (P4-6)
+
+* **Source:** `gcp_gke_disable_default_service_account_v1.yaml`.
+* **Mined sentinel:** `config.serviceAccount == "default"` flags use
+  of the default Compute SA (broad project-Editor scopes by default).
+  **CIS:** GCP 7.x. **NIST:** AC-6.
+* **Scope-mapping note:** Google's template targets the cluster +
+  iterates node pools; our snapshot fetcher returns per-node-pool
+  shape so the rule applies directly. The original P4-PRE plan had
+  this as a `google_service_account/*` rule but our importer doesn't
+  enumerate ServiceAccountKey resources -- this gives the same
+  security signal at the right snapshot layer.
+
+### 27. google_kms_crypto_key/key_rotation_max_90_days.rego (P4-6)
+
+* **Source:** `gcp_cmek_rotation_v1.yaml`.
+* **Mined defaults vs CIS divergence**: Google's archive default =
+  `31536000s` (1 year). CIS GCP 1.10 recommends 90 days. We choose
+  STRICTER (90d = 7,776,000s) and cite both in the provenance + deny
+  message for transparency.
+* **Mined sentinel:** `"99999999s"` for "never rotates" -- by
+  parsing as a huge number the inequality trips automatically.
+* **CIS:** GCP 1.10. **NIST:** SC-12.
+
+### 28. google_kms_crypto_key/key_protection_level_hsm.rego (P4-6)
+
+* **Source:** `gcp_cmek_settings_v1.yaml`.
+* **Mined field path:** `versionTemplate.protectionLevel`. Allowed
+  values per Google: `SOFTWARE`, `HSM`, `EXTERNAL`. We hardcode HSM
+  as the floor (Google's archive parameterizes).
+* **NIST:** SC-12, SC-13.
 
 ---
 
