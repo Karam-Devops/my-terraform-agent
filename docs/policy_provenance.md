@@ -41,6 +41,7 @@ Total rules: **16** (9 GCP + 7 AWS).
 | google_storage_bucket/bucket_public_access | gcp_storage_bucket_world_readable_v1 + gcp_storage_bucket_policy_only_v1 | CIS GCP 5.1, 5.2 | AC-3, SC-7 | mined: header + bucketPolicyOnly dual-check + IAM-binding direct check applied |
 | google_storage_bucket/bucket_retention | gcp_storage_bucket_retention_v1 | (NIST SI-12) | SI-12 | mined: header + max-retention future-work note |
 | google_storage_bucket/bucket_versioning | — (no GCP equivalent) | (industry consensus) | SI-12, CP-9 | header only — Google's library never wrote this |
+| google_compute_firewall/firewall_no_open_ssh | gcp_restricted_firewall_rules_v1 (derived) | CIS GCP 3.6 | SC-7 | **P4-5 NEW** — full rule, mining-derived |
 | aws_instance/ec2_ebs_encryption | — (AWS) | CIS AWS 2.2.1 | SC-28 | header only |
 | aws_instance/ec2_imds_v2 | — (AWS) | CIS AWS 5.6 | AC-3 | header only |
 | aws_instance/ec2_no_public_ip | — (AWS) | (CIS Controls v8 12.x) | SC-7 | header only |
@@ -360,6 +361,24 @@ industry consensus.
 sibling). Cite "industry consensus / data-loss prevention".
 
 **NIST:** SP 800-53 SI-12 + CP-9 (System Backup).
+
+---
+
+### 10. google_compute_firewall/firewall_no_open_ssh.rego (P4-5)
+
+* **Source:** `gcp_restricted_firewall_rules_v1.yaml` (derived).
+  Google's template is fully parameterized; we hardcode the
+  SSH-from-internet case (CIS GCP 3.6 names this specific rule).
+  Field paths + sentinel values mined verbatim.
+* **Mined sentinels:** `"0.0.0.0/0"`, `"all"` (wildcard
+  IPProtocol), port range syntax `"lo-hi"`, missing `ports` =
+  all open.
+* **CIS:** GCP 3.6.  **NIST:** SC-7.
+* **Helpers** in `_helpers.rego` (sibling): `default_list`,
+  `firewall_enabled`, `sources_open_to_internet`, `permits_tcp`,
+  `permits_port`, `allows_tcp_port_to_world` -- shared with
+  `firewall_no_open_rdp.rego` (CIS GCP 3.7) which ships in the
+  same P4-5 wave.
 
 ---
 
