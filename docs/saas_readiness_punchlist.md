@@ -1147,6 +1147,129 @@ Streamlit page that mirrors Firefly's column set + flag
 semantics scores immediately; a custom layout requires
 explaining the vocabulary before any feature gets evaluated.
 
+**Round-1 scope tightening (2026-04-27).** Two explicit constraints
+from the user pivot:
+
+  1. **AWS-only target cloud surface.** The translator backend
+     (run_translation_batch + aws_engine + azure_engine) supports
+     both AWS and Azure, but the customer-facing UI shows AWS only
+     for Round-1. Mechanism: ``translator/config.py`` exposes
+     ``TRANSLATOR_TARGETS_ALLOWED`` (env-overridable list);
+     Cloud Run env sets it to ``aws``; Streamlit reads the list
+     and renders only those targets in the dropdown / radio.
+     Single-target case auto-selects without prompting (no UI
+     widget for a one-element choice -- mirrors the CLI behavior
+     shipped in P4-15.2).
+     Operator default (env unset): both targets visible. CLI in
+     SaaS-mode: env=aws.
+     Azure stays in CI, in tests, in the operator CLI -- it just
+     isn't surfaced to customers in Round-1.
+
+  2. **Make the UI as similar to Firefly.ai as possible.** Below
+     is the explicit visual + interaction-pattern parity spec the
+     Phase 6 Streamlit build targets.
+
+**Firefly visual parity spec (Phase 6 build target).**
+
+  *Color palette:*
+    - Background: dark navy (~#0F1419 / #111827)
+    - Surface (cards): slightly lighter navy (#1A1F2E / #1F2937)
+    - Primary accent: cyan/blue (#00B4FF or #3B82F6)
+    - Status badge colors:
+      * Codified  -> green  (#10B981)
+      * Unmanaged -> blue   (#3B82F6)
+      * Drifted   -> amber  (#F59E0B)
+      * Ghost     -> red    (#EF4444)
+      * Ignored   -> gray   (#6B7280)
+    - Text: light gray (#E5E7EB) on dark; white on accent
+    - Borders / dividers: very dark gray (#2A2F3A)
+
+  *Layout (top-down):*
+    - Top nav bar (~56px): logo (left) | breadcrumb
+      "Account > Project" (center) | search box | user menu (right)
+    - Left rail (~64px collapsed, ~200px expanded): icon-only nav
+      with tooltips. Items: Inventory (home), Codify, Drift,
+      Policy, Settings.
+    - Main content: filter chips strip across top, then the
+      data grid.
+
+  *Inventory grid (the home tab):*
+    - Columns left-to-right:
+      Cloud icon | Type | Name | Env | **IaC Status** | **Flags** |
+      Location | Owner
+    - Row height: ~48px (Firefly-style breathing room; not the
+      Streamlit dataframe default)
+    - Hover: subtle row highlight (background nudges to #232A38)
+    - Click: opens right-side drawer (~480px wide) sliding in
+      from the right
+    - Status badge: pill-shape, status color background, small
+      icon + label text
+    - Flags column: stacked icons (max ~4), tooltipped on hover
+
+  *Filter chips (above grid):*
+    - "All" + per-IaC-status chips with counts:
+      [Codified 12] [Unmanaged 3] [Drifted 1] [Ghost 0] [Ignored 0]
+    - Per-flag chips below: [Policy 4] [Git 12] [Relationships 8]
+    - Click a chip = filter; click again = unfilter; Cmd-click
+      multi-selects
+
+  *Right-side drawer (when row clicked):*
+    - Header: resource name + cloud icon + status badge
+    - Tabs across top: Overview | Code | Drift | Policies | Activity
+    - Overview: key metadata table (similar to Firefly's
+      "Properties" panel); IaC Status callout box with action
+      buttons matching the status (Codify / Restore / Accept /
+      Drop / Skip / Show details)
+    - Code: syntax-highlighted view of the .tf file with
+      download button
+    - Drift: side-by-side diff (cloud vs HCL); used by the
+      "Needs Attention" customer-facing fix flow
+    - Policies: list of rules evaluated, with pass/fail badges
+      and the CIS / NIST control IDs from CG-3 metadata
+    - Activity: timeline of changes (uses GCS Object Versioning
+      from CG-8H to populate)
+
+  *Other Firefly-isms worth mirroring:*
+    - Search box uses a "type-ahead with highlighted matches"
+      pattern, not a strict equality filter
+    - Empty states have illustrative icons + a single primary
+      CTA ("Connect a cloud account" / "Run your first import")
+    - Loading states: skeleton rows that match the final layout,
+      not a generic spinner
+    - Error states: inline red-banner above the affected widget,
+      with a copyable request_id for support
+    - Toast notifications top-right for action confirmations
+
+  *Streamlit-specific implementation notes:*
+    - The above ISN'T native Streamlit. Will require custom CSS
+      via ``st.markdown(..., unsafe_allow_html=True)`` for the
+      visual language + careful use of ``st.columns`` /
+      ``st.container`` for layout.
+    - The data grid: use ``streamlit-aggrid`` (gives Firefly-class
+      row interactions) instead of ``st.dataframe``. Adds one
+      dep; worth it.
+    - The right drawer: Streamlit doesn't have native drawers --
+      use a wide right column toggled by session state. Visually
+      "drawer-like enough" without a custom component.
+    - Color theme: Streamlit's ``config.toml`` ``[theme]`` section
+      handles the global palette; per-widget custom CSS handles
+      the rest.
+
+  *What Phase 6 ships first.* Inventory tab + drawer (highest
+  impact). Filter chips + search second. Per-tab content (Code /
+  Drift / Policies / Activity in the drawer) rolls in as the
+  matching backends mature. Streamlit-aggrid integration is the
+  long pole -- prototype it early in Phase 6 so we can fall back
+  to native ``st.dataframe`` if it has integration issues with
+  Cloud Run.
+
+  *Design references operators should keep open during Phase 6 build:*
+    - Firefly Inventory page screenshots in their docs +
+      product-tour videos (get a feel for the row hover +
+      drawer slide animation)
+    - Their "Resource details" drawer (the tabbed view inside
+      a drawer is the canonical pattern)
+
 ### CG-7. Failure isolation via quarantine pattern — surfaced + SHIPPED in SMOKE 4 hotfix wave (2026-04-27)
 
 **Today (after CG-7 ship).** When a resource's per-resource plan
@@ -1415,6 +1538,11 @@ layer + max-instances bump.
     - ``--cpu=4`` (was 2) -- matches translator parallelism
     - Vertex AI quota raise: 120 -> 300 RPM (3x customers ×
       8 workers × 3 calls)
+    - Env: ``TRANSLATOR_TARGETS_ALLOWED=aws`` (CG-6 Round-1
+      AWS-only constraint -- hides Azure from the customer-facing
+      UI without removing it from the engine. Operator CLI sees
+      both targets unless this env is set; the SaaS deployment
+      sets it explicitly so the customer never sees Azure.)
 
   * **UI affordances** (Phase 6 work folded forward):
     - ``st.download_button`` per .tf file in the workdir

@@ -765,15 +765,34 @@ def main():
     print("   MULTI-CLOUD IaC TRANSLATION ENGINE")
     print("=" * 70)
 
-    # 1. Choose Target Cloud
-    while True:
-        target = input(
-            "\nTranslate GCP resources to [AWS] or [Azure]? "
-            "(Enter 'aws' or 'azure'): "
-        ).strip().lower()
-        if target in ['aws', 'azure']:
-            break
-        print("❌ Invalid choice. Please enter 'aws' or 'azure'.")
+    # 1. Choose Target Cloud.
+    # The allowlist (translator/config.py:TRANSLATOR_TARGETS_ALLOWED)
+    # gates which targets the prompt offers. Round-1 SaaS deployments
+    # set TRANSLATOR_TARGETS_ALLOWED=aws to hide Azure entirely;
+    # operators running locally with no env override see both choices.
+    # Single-target mode auto-selects without prompting (mirrors the
+    # CG-8H Streamlit UI behavior: don't show a radio with one option).
+    allowed = config.TRANSLATOR_TARGETS_ALLOWED
+    if not allowed:
+        # Defensive: misconfigured env var -- treat as default.
+        allowed = ["aws", "azure"]
+
+    if len(allowed) == 1:
+        target = allowed[0]
+        print(f"\nTranslating GCP resources to {target.upper()} "
+              f"(only enabled target).")
+    else:
+        choices_display = " or ".join(f"[{t.upper()}]" for t in allowed)
+        choices_help = " or ".join(f"'{t}'" for t in allowed)
+        while True:
+            target = input(
+                f"\nTranslate GCP resources to {choices_display}? "
+                f"(Enter {choices_help}): "
+            ).strip().lower()
+            if target in allowed:
+                break
+            print(f"❌ Invalid choice. Please enter one of: "
+                  f"{', '.join(allowed)}.")
 
     # 2. Pick the workdir.
     workdir = _select_workdir()

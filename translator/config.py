@@ -29,6 +29,40 @@ MAX_RETRIES = 3 # We'll keep retries lower for translation, as it's less prone t
 import os as _os
 MAX_TRANSLATION_WORKERS = int(_os.environ.get("MAX_TRANSLATION_WORKERS", "4"))
 
+
+# --- Target-cloud allowlist (P4-15.2 / CG-8H prep) ---
+# Which target clouds the UI should expose. The engine BACKEND
+# (aws_engine + azure_engine + run_translation_batch) supports both
+# unconditionally -- this list controls what the operator-facing CLI
+# OR the SaaS UI offers as choices.
+#
+# Round-1 SaaS scope (per user decision 2026-04-27): AWS only. Azure
+# stays in the codebase + tests + CLI for operator validation, but the
+# customer-facing Streamlit UI consults TRANSLATOR_TARGETS_ALLOWED
+# and renders only the listed targets. This keeps the customer
+# experience focused on the validated path while preserving Azure
+# capability for our internal smokes + later customer asks.
+#
+# The CLI also consults this list, so an operator can run the CLI in
+# "SaaS mode" by setting TRANSLATOR_TARGETS_ALLOWED=aws to get
+# identical UX to what the Streamlit UI will render. By default
+# (env unset), the CLI shows all supported targets so operator
+# debugging is unconstrained.
+#
+# Comma-separated lowercase. Examples:
+#     unset (default for CLI):  ["aws", "azure"]
+#     export TRANSLATOR_TARGETS_ALLOWED=aws       -> ["aws"]
+#     export TRANSLATOR_TARGETS_ALLOWED=aws,azure -> ["aws", "azure"]
+#
+# Round-1 Cloud Run env will set TRANSLATOR_TARGETS_ALLOWED=aws.
+_DEFAULT_TARGETS = "aws,azure"
+TRANSLATOR_TARGETS_ALLOWED: list[str] = [
+    t.strip().lower()
+    for t in _os.environ.get("TRANSLATOR_TARGETS_ALLOWED",
+                             _DEFAULT_TARGETS).split(",")
+    if t.strip()
+]
+
 # --- Translation Heuristics (The "Rosetta Stone") ---
 AWS_ARCHITECTURAL_RULES = """
 CRITICAL AWS ARCHITECTURAL RULES:
