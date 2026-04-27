@@ -556,18 +556,21 @@ migration with backend implications").
 | Policy violation cap | Phase 4 | 0.25 day |
 | **CG-1 unmanaged-resource tracking (Drift engine)** | **Phase 4** | **1.5 days** |
 | **CG-2 Detector + Policy coverage parity** | **Phase 4** | **2 days** |
+| **CG-3 Public-benchmark + Google-archive control mapping** | **Phase 4** | **2.5 days** (1 day overlaps CG-2's new-rule budget) |
 | **CC-9 Few-shot golden examples (top 10 types)** | **Phase 4** | **5 days** |
 | CC-3 cold-start preflight | Phase 5 | 1 day |
 | **CC-5 ResourceOutcome backend** | **Phase 5** | **1 day** |
 | **CC-5 + CC-6 UI rendering** | **Phase 6** | **(folded into Phase 6 UI work)** |
 | **CC-8 URN-as-displayName normalisation** | **CLOSED** (Phase 2 P2-6 / `70bf9c0`) | shipped |
 
-**Total additional effort folded in:** ~15.5 days (5 days original
+**Total additional effort folded in:** ~17 days (5 days original
 hygiene + 1.5 days CG-1 + 4 days surfaced by Phase 1 SMOKE: CC-5
 backend, CC-6 backend, CC-7 dep migration, CG-2 coverage parity +
-5 days surfaced by Phase 2 SMOKEs: CC-9 few-shot examples). No
-standalone "fix the audit findings" phase; every item folds into a
-phase that was already going to touch the relevant engine.
+5 days surfaced by Phase 2 SMOKEs: CC-9 few-shot examples + 1.5
+days net new from Phase 3-end strategic review: CG-3 control
+mapping minus the 1-day CG-2 overlap). No standalone "fix the
+audit findings" phase; every item folds into a phase that was
+already going to touch the relevant engine.
 
 **Items surfaced by Phase 1 SMOKE (2026-04-26):** CC-5, CC-6, CC-7,
 CG-2. The smoke against `dev-proj-470211` exercised all 4 engines
@@ -588,6 +591,18 @@ cover only 2/11 resource types vs the importer (CG-2).
     nesting confusion = ~3 of 16 resources fail per smoke. Few-shot
     examples are the industry-standard fix that closes 70% -> 90%+
     first-attempt accuracy without architectural changes. Phase 4.
+
+**Items surfaced by end-of-Phase-3 strategic review (2026-04-27):**
+  * **CG-3 Public-benchmark + Google-archive control mapping** --
+    triggered by the obvious "doesn't Google publish official
+    policies?" question. Investigation found the GCP policy-library
+    repo was archived 2025-08-20 with a different input format
+    (CAI protobuf vs our Terraform plan JSON), so wholesale
+    adoption is wrong. But the embedded `rego: |` blocks in their
+    YAML templates carry Google's last-published numeric defaults
+    (e.g. CMEK rotation = 1 year), which we mirror as
+    "Google-archive default" provenance alongside CIS/NIST control
+    IDs in our own rules. Three-source citation per rule. Phase 4.
 
 The Phase 2 smokes also exposed the per-resource UX vocabulary
 that CC-5 needs to render: 9 distinct `failure_reason` enum values
@@ -723,6 +738,140 @@ surface.
 tracking), CG-2 is what makes the Drift + Policy engines actually
 useful. Today they're a tech demo on 2 resource types. After
 CG-2 they're production-grade across the importer's whole footprint.
+
+### CG-3. Public-benchmark + Google-archived control mapping in policy rules — surfaced 2026-04-27
+
+**Today.** Our `.rego` rules (11 files: 3 GCE + 4 GCS + 3 EC2 + 4 S3 +
+2 common) enforce sensible defaults but carry no provenance metadata.
+A customer reading a violation message sees `bucket lacks
+encryption_default` with no answer to "says who?". A vendor demo
+prospect comparing us to Firefly / ControlMonkey / Prisma will
+note the absence of CIS / NIST / SOC2 control IDs immediately —
+those vendors all surface the control catalog mapping as a
+top-level UI element.
+
+**Why we don't just adopt GoogleCloudPlatform/policy-library.**
+Investigated 2026-04-27 in response to the obvious "doesn't Google
+publish policies?" question. Findings:
+
+  1. **Upstream archived 2025-08-20.** Read-only repo, no new
+     policies, no security fixes, no support for new GCP services.
+     Adopting it = adopting a dead dependency.
+  2. **Wrong input format for our use case.** Their policies are
+     Gatekeeper-style ConstraintTemplates (YAML wrapping Rego)
+     consuming Cloud Asset Inventory protobuf
+     (`input.asset.resource.data.*`). We use plain `.rego` via
+     conftest consuming Terraform plan JSON
+     (`input.resource_changes[_].change.after.*`). Different
+     shapes, different evaluation timing (their policies validate
+     resources ALREADY in cloud; ours gate the proposed change
+     BEFORE apply).
+  3. **No CIS/NIST citations in their templates either.** Random
+     sample of 4 templates (storage_world_readable, cmek_rotation,
+     iam_sa_key_age, storage_retention) — none cite a public
+     control catalog. Their library was a parameterised template
+     engine, not a compliance-mapped library.
+
+**But there IS extractable value.** Three signals from the
+embedded `rego: |` block in each YAML template (Apache 2.0
+licensed; safe to adapt):
+
+  1. **Numeric defaults Google last published.** E.g. CMEK rotation
+     default `31536000s` (1 year). Citing Google's last-recommended
+     value alongside our chosen value is a "we did our homework"
+     signal even when we choose stricter.
+  2. **Configurable-vs-hardcoded design choices.** Storage retention
+     days = no default, operator must specify. Rotation period =
+     default with override. Reflects Google's view on which knobs
+     are org-policy vs universal.
+  3. **Sentinel patterns.** E.g. `99999999s` as "never rotates"
+     fallback — missing field always triggers fail. Worth mirroring.
+
+Often Google's defaults are LESS strict than CIS. CMEK rotation:
+Google = 1 year, CIS GCP 1.10 = 90 days. Right call is to default
+to the stricter (CIS) value AND cite the looser (Google-archive)
+value for transparency.
+
+**Spec.** Three-line provenance comment block at the top of every
+Rego rule:
+
+```rego
+# Source: GoogleCloudPlatform/policy-library (archived 2025-08-20)
+#         <ConstraintTemplateName> -- last published default <X>
+# Standard: CIS GCP <section.rule> -- recommends <Y>
+# NIST: SP 800-53 <control-family.id>
+# We default to: <chosen value> (rationale: <stricter|matches Google|...>)
+package <existing.package.path>
+```
+
+Helper function `policy_metadata()` extracts these into the
+`details` field of every deny[] rule so the UI renders:
+
+  * Plain-English failure explanation
+  * Three control IDs with hyperlinks (CIS / NIST / Google-archive)
+  * "Why this default" rationale text
+
+**Spec details.** Five-step rollout in Phase 4:
+
+  1. (0.25 day) Define the metadata header convention + write a
+     conftest test that asserts every `.rego` in `policy/policies/`
+     carries a complete metadata block.
+  2. (0.5 day) Audit each of the existing 11 rules: cross-check
+     against archived GoogleCloudPlatform/policy-library template
+     for matching tf_type. Record the Google-default value, the
+     CIS recommendation, and our chosen value in a markdown table
+     (`docs/policy_provenance.md`).
+  3. (0.5 day) Add the metadata block to each existing rule.
+     Mechanical edit; deterministic.
+  4. (1 day) For each NEW rule added under CG-2 (8-10 rules
+     across the newly-in-scope types), follow the same
+     three-source calibration: Google-archive default + CIS
+     recommendation + chosen value. Cite all three.
+  5. (0.25 day) Wire the metadata into policy violation output
+     so failures render with control IDs (UI work folds into
+     Phase 6).
+
+**CIS coverage targets** (the 5-10 NEW rules from CG-2):
+  * CIS GCP 1.10 — KMS rotation period <= 90 days
+    (`google_kms_crypto_key`)
+  * CIS GCP 3.6 — VPC firewall does not allow 0.0.0.0/0 on SSH
+    (`google_compute_firewall`)
+  * CIS GCP 3.7 — VPC firewall does not allow 0.0.0.0/0 on RDP
+    (`google_compute_firewall`)
+  * CIS GCP 4.10 — VPC Flow Logs enabled on subnetworks
+    (`google_compute_subnetwork`)
+  * CIS GCP 5.1 — Cloud SQL not publicly accessible
+    (`google_sql_database_instance`, future)
+  * CIS GCP 7.x — GKE private nodes + workload identity + node
+    auto-upgrade (`google_container_cluster` /
+    `google_container_node_pool`) — covers 3 rules
+  * CIS GCP 8.x — Logging sink to immutable bucket retention
+    (`google_logging_project_sink`, future)
+
+That's 5 immediately-applicable rules (KMS, FW SSH, FW RDP, Flow
+Logs, GKE private nodes) + 3 more once we add the supporting
+types. Total 8 NEW rules with full three-source provenance.
+
+**Why this is Phase 4.** Cleanest sequence: CG-2 expands type
+coverage and adds the rules, CG-3 layers metadata + benchmark
+mapping on top in the same Phase. One PR per scope expansion;
+metadata baked in from rule creation, not retrofitted later.
+
+**Estimate.** 2.5 days:
+  * 0.25 day metadata convention + conftest enforcement test
+  * 0.5 day audit + provenance table for existing 11 rules
+  * 0.5 day backfill metadata into existing rules
+  * 1 day add metadata as part of CG-2's 8-10 new rules (folded
+    in, not on top)
+  * 0.25 day violation-output wiring (UI consumption deferred to
+    Phase 6)
+
+**Why this matters for the demo.** Compliance auditability is
+table stakes for any enterprise prospect with a SOC2 or PCI
+program. "We enforce CIS GCP 1.10" is parseable to a
+non-engineer; "we check rotation period" is not. The Google-
+archive citation is a credibility multiplier specifically with
+GCP-focused buyers — they'll recognise the project name.
 
 ---
 
