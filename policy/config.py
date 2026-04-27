@@ -92,3 +92,27 @@ SEVERITY_WEIGHTS = {
 # severity is seen. MED+ would be too noisy for a POC; HIGH is the right
 # enterprise default ("things that would fail an audit").
 FAIL_AT_SEVERITY = "HIGH"
+
+
+# --- P4-1 violation caps (defends against malicious / buggy input) ---------
+
+# Maximum violations a single conftest call may surface for one resource.
+# Defends against a buggy rule that iterates a long list (e.g. a VM with
+# 100 NICs each with 10 access configs => 1000 individual violations) AND
+# against a malicious .tf crafted to trigger the same.
+#
+# Per-call cap is the first defensive layer -- engine.evaluate() truncates
+# the returned list at this count and emits a one-line warning. Callers
+# see at most this many violations from any single resource.
+MAX_VIOLATIONS_PER_CALL = 100
+
+# Maximum total violations across an entire run (all resources combined).
+# Defends against the malicious-tf case where 10000 trivial resources each
+# produce a few violations, blowing up policy output and downstream
+# rendering / log-volume / dashboard-aggregation costs.
+#
+# Per-run cap is the second defensive layer -- the standalone CLI in
+# policy/run.py stops aggregating once the cap is exceeded and emits a
+# single warning. The decoration path (policy/integration.py) is per-
+# resource and bounded by MAX_VIOLATIONS_PER_CALL alone.
+MAX_VIOLATIONS_PER_RUN = 1000

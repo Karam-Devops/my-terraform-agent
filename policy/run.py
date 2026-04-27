@@ -174,8 +174,19 @@ def main() -> int:
 
     snapshots = cloud_snapshot.fetch_snapshots(in_scope)
 
+    # P4-1 per-run cap: track running total of violations across all
+    # resources. Once we exceed config.MAX_VIOLATIONS_PER_RUN, stop
+    # adding to per_resource and emit a single warning. Defends against
+    # the malicious-tf case (10k trivial resources => 10k+ violations
+    # blowing up output / log volume / dashboard rendering costs).
     per_resource: Dict[str, List[engine.Violation]] = {}
+    run_total = 0
+    cap_run = config.MAX_VIOLATIONS_PER_RUN
+    cap_hit = False
     for r in in_scope:
+        if run_total >= cap_run:
+            cap_hit = True
+            break
         snap = snapshots.get(r.tf_address)
         # Accept either dict (parsed) or string (raw JSON) — cloud_snapshot's
         # contract isn't documented as one or the other in the detector path,
@@ -185,7 +196,24 @@ def main() -> int:
                 snap = json.loads(snap)
             except (json.JSONDecodeError, TypeError):
                 snap = None
-        per_resource[r.tf_address] = _scan_resource(r, snap)
+        violations = _scan_resource(r, snap)
+        # If adding all of this resource's violations would exceed the
+        # cap, take only the budget remainder. Rare but matters for
+        # determinism (operator should always see exactly cap_run
+        # entries, not an off-by-one count).
+        remaining = cap_run - run_total
+        if len(violations) > remaining:
+            violations = violations[:remaining]
+            cap_hit = True
+        per_resource[r.tf_address] = violations
+        run_total += len(violations)
+
+    if cap_hit:
+        print(f"\n⚠️  Truncated at {cap_run} violations across the run "
+              f"(per-run cap from policy/config.MAX_VIOLATIONS_PER_RUN). "
+              f"Subsequent resources / violations were not evaluated. "
+              f"This usually indicates a buggy rule, malicious input, "
+              f"or an unusually large project -- please review.")
 
     high_count = _print_report(per_resource)
     return 1 if high_count > 0 else 0

@@ -51,12 +51,35 @@ import os
 import shutil
 import subprocess
 import sys
+import threading
+import time
+import traceback
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from . import cloud_snapshot, config, state_reader
 from .diff_engine import ResourceDrift, diff_resource
+
+# P4-1 (CC-2 detector half): per-operation timeout budgets for terraform
+# subprocess invocations. Phase 0 audit flagged that detector shells out to
+# `terraform plan/apply/init/import/state` with no timeout -- a slow
+# upstream wedges the request indefinitely and Cloud Run's 60-min request
+# timeout is the only backstop.
+#
+# Budgets per the punchlist CC-2 spec. Conservative -- a slow-but-real run
+# completes; only genuine hangs get killed:
+_TERRAFORM_TIMEOUTS: Dict[str, int] = {
+    "init":    600,   # downloads providers; slow first run, fast on rerun
+    "plan":    300,   # per -target invocation
+    "apply":   600,   # per -target apply (largest changes are still <10min)
+    "refresh": 300,   # refresh-only apply (state sync, no resource mutation)
+    "import":  120,   # per resource (single API roundtrip + state write)
+    "state":    60,   # state subcommands (rm, mv, list) -- in-memory ops
+}
+# Default for any subcommand not in the map. Same as plan -- conservative
+# enough to cover most ad-hoc operations without locking up indefinitely.
+_TERRAFORM_DEFAULT_TIMEOUT = 300
 
 
 # --- Summary record -------------------------------------------------------
@@ -195,6 +218,36 @@ def _prompt(text: str, valid: set, default: Optional[str] = None) -> str:
 _INPUT_FALSE_COMMANDS = frozenset({"plan", "apply", "refresh", "destroy", "import"})
 
 
+def _start_kill_watchdog(proc: "subprocess.Popen[Any]",
+                         timeout_s: int) -> threading.Thread:
+    """Start a daemon thread that kills `proc` after `timeout_s` seconds.
+
+    Cross-platform alternative to subprocess.run(timeout=) -- we can't
+    use that because we want to STREAM stdout (the operator watches plan
+    output flow in real time during a demo). Streaming requires Popen +
+    iterating stdout, which doesn't accept a `timeout=` arg directly.
+
+    The watchdog approach is intentionally simple: sleep for the budget,
+    then check if the process is still running, kill if so. Race-free
+    enough for our use case -- if the process exits a hair before the
+    watchdog wakes, ``proc.poll()`` returns the real exit code and we
+    skip the kill. If it exits during the kill, both calls are
+    idempotent on POSIX and Windows.
+
+    Daemon thread = no need to join; if the host process exits while
+    the watchdog is sleeping, the thread dies too (no leaked thread).
+    """
+    def _watchdog() -> None:
+        time.sleep(timeout_s)
+        if proc.poll() is None:
+            proc.kill()
+
+    t = threading.Thread(target=_watchdog, daemon=True,
+                         name="tf_kill_watchdog")
+    t.start()
+    return t
+
+
 def _run_terraform(args: List[str], *, cwd: Optional[str] = None) -> int:
     """
     Stream a terraform invocation to stdout, return its exit code.
@@ -208,7 +261,7 @@ def _run_terraform(args: List[str], *, cwd: Optional[str] = None) -> int:
     FastAPI worker threads) MUST pass it explicitly so two concurrent
     requests for two different projects don't fight over process cwd.
 
-    Two non-obvious behaviours baked in:
+    Three non-obvious behaviours baked in:
       - `-input=false` is forced for plan/apply/refresh-family commands.
         Terraform parses ALL `.tf` files in the workspace before honouring
         -target, and if any declare a variable with no default (very common
@@ -217,6 +270,15 @@ def _run_terraform(args: List[str], *, cwd: Optional[str] = None) -> int:
         that fail fast with a clear error. We do NOT inject this for `state`
         subcommands, which reject unknown flags after the subcommand name.
       - `terraform` not on PATH is reported clearly rather than crashing.
+      - **P4-1 timeout enforcement.** Per-operation budget from
+        ``_TERRAFORM_TIMEOUTS`` enforced via a daemon watchdog thread (we
+        can't use subprocess.run(timeout=) because we stream). On timeout
+        the process is killed, exit code 124 is returned (GNU `timeout`
+        convention), and a [TIMEOUT] line is printed for the operator.
+        Phase 5 will lift this through the API layer as a typed
+        ``UpstreamTimeout`` exception; today, callers see a non-zero
+        exit code and the action is reported as failed -- same surface
+        as any other terraform failure.
     """
     if args and args[0] in _INPUT_FALSE_COMMANDS:
         full_args = [args[0], "-input=false"] + list(args[1:])
@@ -257,10 +319,32 @@ def _run_terraform(args: List[str], *, cwd: Optional[str] = None) -> int:
         print(f"  [FAIL] `{terraform_bin}` no longer exists. Action skipped.")
         return 127
 
+    # P4-1: arm the timeout watchdog. Subcommand at full_args[0] -- after
+    # any -input=false injection, this is still the subcommand name (e.g.
+    # "plan", "init", "apply"). state subcommands ("state rm") are also
+    # captured because we look at full_args[0] only.
+    op = full_args[0] if full_args else "unknown"
+    timeout_s = _TERRAFORM_TIMEOUTS.get(op, _TERRAFORM_DEFAULT_TIMEOUT)
+    started = time.monotonic()
+    _start_kill_watchdog(proc, timeout_s)
+
     assert proc.stdout is not None  # for type-checkers; Popen with PIPE guarantees this
     for line in proc.stdout:
         print(f"    {line.rstrip()}")
     proc.wait()
+    elapsed = time.monotonic() - started
+
+    # P4-1: detect watchdog kill. The kill races with normal exit, so we
+    # use elapsed-time as the discriminator: if we ran for at least the
+    # budget, the watchdog is the most likely cause. Belt-and-braces
+    # check on exit code as well -- POSIX kill is -9, Windows kill is
+    # typically 1 but varies. Elapsed-time is the more reliable signal.
+    if elapsed >= timeout_s - 1 and proc.returncode != 0:
+        print(f"  [TIMEOUT] terraform {op} exceeded {timeout_s}s budget "
+              f"(ran {elapsed:.1f}s before watchdog killed). "
+              f"Action failed.")
+        return 124  # GNU timeout convention
+
     return proc.returncode
 
 
@@ -271,15 +355,45 @@ def _state_path(workdir: Optional[str] = None) -> str:
 
     Per-project workdir refactor: state lives in the per-project workdir,
     NOT at the repo root any more (the repo root no longer has a
-    terraform.tfstate after migrate_workdir.py ran). Resolution order:
+    terraform.tfstate after migrate_workdir.py ran).
 
-      1. Explicit ``workdir`` argument (programmatic / SaaS path -- the
-         only thread-safe option for concurrent multi-project requests).
-      2. Process cwd (CLI back-compat -- detector/run.py chdirs to the
-         per-project workdir at entry, so getcwd works).
+    P4-1 (CC-2 detector hygiene): the previous ``workdir or os.getcwd()``
+    fallback was the exact silent-cwd-fallback pattern that caused the
+    per-project workdir refactor in the first place. A buggy programmatic
+    caller that forgot to pass ``workdir`` would silently use the
+    process cwd -- which on Cloud Run is the container root, not the
+    requesting tenant's workdir, leading to wrong-tenant state reads.
+    Now: a missing ``workdir`` raises ``PreflightError`` so the bug
+    surfaces at the boundary instead of producing wrong-but-plausible
+    results downstream.
+
+    The CLI (detector/run.py) ALREADY passes ``workdir=workdir`` through
+    every call site that reaches here -- verified across run.py L162 ->
+    run_remediation -> action handlers -> _state_path. The cwd fallback
+    was dead code; this commit removes it.
+
+    Args:
+        workdir: per-project workdir absolute path. Required.
+
+    Returns:
+        Absolute path to ``<workdir>/<STATE_FILE_NAME>``.
+
+    Raises:
+        PreflightError: workdir is None or empty. The caller is buggy
+        and should plumb the workdir through explicitly.
     """
-    base = workdir or os.getcwd()
-    return os.path.join(base, config.STATE_FILE_NAME)
+    if not workdir:
+        # Lazy import to avoid pulling common.errors during module load
+        # for callers that never need this branch (most CLI paths).
+        from common.errors import PreflightError
+        raise PreflightError(
+            "_state_path() called without a workdir; refusing to fall "
+            "back to process cwd (would risk wrong-tenant state reads "
+            "under concurrency).",
+            stage="resolve_workdir",
+            reason="missing_workdir_arg",
+        )
+    return os.path.join(workdir, config.STATE_FILE_NAME)
 
 
 def _backup_state(state_path: str) -> Optional[str]:
@@ -438,9 +552,14 @@ def _policy_check_for(tf_address: str,
             snap = _fetch_cloud_snapshot(tf_address, workdir=workdir)
         # tf_type is the first dotted component of the address. Resources
         # imported by the importer always have well-formed addresses.
+        # P4-1: tightened from broad ``except Exception`` to ``IndexError``
+        # (the only realistic failure -- empty string after split returns
+        # [""] not raises, but [0] on [] would IndexError). AttributeError
+        # if tf_address is None would surface as a real bug, not be
+        # swallowed.
         try:
             tf_type = tf_address.split(".", 1)[0]
-        except Exception:
+        except IndexError:
             return None
         try:
             return _policy.classify_drift(tf_address, tf_type, snap)
@@ -1081,6 +1200,19 @@ def remediate_one(
         else:
             ok = handler(tf_address, confirmation=confirmation, workdir=workdir)
     except Exception as e:  # pragma: no cover — defensive shell for the UI
+        # P4-1: keep the broad catch (this is the documented UI defensive
+        # shell -- callers receive a typed RemediationResult instead of
+        # an unhandled exception bubbling into Streamlit / FastAPI), but
+        # ALSO print the traceback to stderr so operators reading the
+        # process log see the original failure. Pre-P4-1 the stack was
+        # silently dropped on the floor; only the formatted message
+        # survived, making real bugs hard to diagnose.
+        #
+        # When CC-1 detector logging migration ships, replace this with
+        # ``_log.exception("remediate_one_unhandled_exception",
+        # tf_address=tf_address, action=action_key)`` which serializes
+        # the exception + stack into the structured log automatically.
+        traceback.print_exc(file=sys.stderr)
         return RemediationResult(
             tf_address=tf_address,
             action=action_key,

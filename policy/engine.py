@@ -46,6 +46,8 @@ import subprocess
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional
 
+from . import config as _policy_config
+
 
 # Match `[SEVERITY][rule_id] message text`. Severity is uppercase and one
 # of HIGH/MED/LOW; rule_id is any non-bracket chars.
@@ -179,6 +181,20 @@ def evaluate(
             )
             if v is not None:
                 violations.append(v)
+
+    # P4-1 per-call cap: if a single resource produces an unreasonable
+    # number of violations (buggy rule iterating a long list, malicious
+    # .tf crafted to detonate one), truncate at the cap and emit a
+    # one-line warning. Prevents the worst case where a single API call
+    # returns thousands of violation records.
+    cap = _policy_config.MAX_VIOLATIONS_PER_CALL
+    if len(violations) > cap:
+        truncated = len(violations) - cap
+        print(f"   ⚠️  Truncated {truncated} additional violations on "
+              f"{resource_address} (cap: {cap}/call). "
+              f"This usually indicates a buggy rule iterating a long "
+              f"list -- please review.")
+        violations = violations[:cap]
 
     return violations
 

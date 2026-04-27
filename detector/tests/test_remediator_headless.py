@@ -24,6 +24,13 @@ from unittest.mock import patch
 
 PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
 
+# P4-1: _state_path() now hard-errors when workdir is missing (no silent
+# cwd fallback under concurrency). Tests that exercise the apply / state-rm
+# code paths (which reach _state_path for backup) MUST pass an explicit
+# workdir. Used as a sentinel -- the actual filesystem path doesn't matter
+# because _backup_state is mocked, but the value must be truthy.
+_TEST_WORKDIR = "/test/workdir"
+
 
 def _load_remediator():
     """Load detector.remediator without dragging in detector/__init__.py
@@ -104,7 +111,8 @@ class RemediateOneTests(unittest.TestCase):
              patch.object(self.r, "_backup_state", return_value="/tmp/backup"), \
              patch.object(self.r, "_reverify", return_value=None):
             mock_tf.side_effect = [2, 0]  # plan -> changes pending, apply -> ok
-            result = self.r.remediate_one("foo.bar", "restore", auto_confirm=True)
+            result = self.r.remediate_one("foo.bar", "restore", auto_confirm=True,
+                                          workdir=_TEST_WORKDIR)
         self.assertTrue(result.success, result.message)
         self.assertEqual(result.status, "ok")
         # Both plan and apply were attempted (auto-confirm did NOT skip
@@ -144,7 +152,8 @@ class RemediateOneTests(unittest.TestCase):
         # straight to `terraform state rm`.
         with patch.object(self.r, "_run_terraform", return_value=0) as mock_tf, \
              patch.object(self.r, "_backup_state", return_value="/tmp/backup"):
-            result = self.r.remediate_one("foo.bar", "drop", auto_confirm=True)
+            result = self.r.remediate_one("foo.bar", "drop", auto_confirm=True,
+                                          workdir=_TEST_WORKDIR)
         self.assertTrue(result.success, result.message)
         self.assertEqual(result.status, "ok")
         # Should have called `terraform state rm foo.bar` exactly once.
@@ -292,6 +301,7 @@ class RunRemediationTests(unittest.TestCase):
                 [self.drift],
                 confirmation=self.r.AutoConfirmPolicy(answer="Y"),
                 enable_policy_gate=False,
+                workdir=_TEST_WORKDIR,
             )
 
         fake_factory.assert_not_called()
@@ -427,6 +437,7 @@ class PolicyGateTests(unittest.TestCase):
                 "foo.bar", "restore",
                 confirmation=self.r.AutoConfirmPolicy(answer="Y"),
                 policy_check=lambda: _FakeImpact(["HIGH"]),
+                workdir=_TEST_WORKDIR,
             )
         self.assertTrue(result.success, result.message)
         self.assertEqual(mock_tf.call_count, 2)
@@ -440,6 +451,7 @@ class PolicyGateTests(unittest.TestCase):
                 "foo.bar", "restore",
                 auto_confirm=True,
                 policy_check=lambda: _FakeImpact([]),
+                workdir=_TEST_WORKDIR,
             )
         self.assertTrue(result.success)
         self.assertEqual(mock_tf.call_count, 2)
@@ -459,6 +471,7 @@ class PolicyGateTests(unittest.TestCase):
                 auto_confirm=True,
                 enable_policy_gate=False,
                 policy_check=boom,
+                workdir=_TEST_WORKDIR,
             )
         self.assertTrue(result.success)
 
@@ -490,6 +503,7 @@ class PolicyGateTests(unittest.TestCase):
                 auto_confirm=True,
                 # Passing policy_check should be silently ignored for accept.
                 policy_check=lambda: _FakeImpact(["HIGH"]),
+                workdir=_TEST_WORKDIR,
             )
         self.assertTrue(result.success, result.message)
 
@@ -501,6 +515,7 @@ class PolicyGateTests(unittest.TestCase):
                 "foo.bar", "drop",
                 auto_confirm=True,
                 policy_check=lambda: _FakeImpact(["HIGH"]),
+                workdir=_TEST_WORKDIR,
             )
         self.assertTrue(result.success, result.message)
 
