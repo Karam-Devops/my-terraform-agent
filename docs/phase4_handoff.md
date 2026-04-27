@@ -1,4 +1,4 @@
-# Phase 4 Handoff (mid-session 2026-04-27)
+# Phase 4 Handoff (updated 2026-04-27 mid-session)
 
 **Purpose.** Captures Phase 4 progress + all decisions + concrete next
 steps so a fresh session can pick up cleanly without re-deriving
@@ -9,7 +9,12 @@ patterns or re-asking the user for choices already made.
 ## Where we are (commits landed)
 
 ```
-37cfe18 Phase 4 P4-5 preview: 1 firewall rule + helpers + structural test  <- HEAD
+c411682 Phase 4 P4-8: CG-3 walker test -- enforce provenance across all 44 rules  <- HEAD
+efa0d78 Phase 4 P4-7: CG-2 SQL + Cloud Run + Pub/Sub rules wave (9 new)
+92b033c Phase 4 P4-6: CG-2 GKE + KMS rules wave (10 new)
+0ca059d Phase 4 P4-5: CG-2 Compute + Network rules wave (8 new)
+37cfe18 Phase 4 P4-5 preview: 1 firewall rule + helpers + structural test
+453819c docs: Phase 4 mid-session handoff -- patterns + remaining work spec
 f815762 Phase 4 P4-4: CG-2 part A -- IN_SCOPE expansion + drift-stub gating
 5c6fb06 Phase 4 P4-3: CG-1 DriftReport + Detector.rescan() unmanaged-tracking
 a25bea9 Phase 4 P4-2: extract importer.inventory(project_id) for Detector reuse
@@ -18,8 +23,8 @@ d2279c5 P4-PRE follow-up: 15-type policy coverage gap with mining map
 06274fa P4-PRE: mine GoogleCloudPlatform/policy-library + apply to 16 regos
 ```
 
-**Test totals: 269 green** (105 importer + 53 translator + 80 detector
-+ 14 policy + 18 common). Run the full suite with:
+**Test totals: 558 green + 379 subtests** (105 importer + 53 translator
++ 80 detector + 252 policy/common). Run the full suite with:
 
 ```
 python -m pytest detector/tests policy/tests common/tests -q
@@ -29,7 +34,7 @@ python -m unittest discover -s translator/tests -p "test_*.py"
 
 ---
 
-## Phase 4 plan (11 commits; 4 done, 7 remaining)
+## Phase 4 plan (11 commits; 8 done, 3 remaining)
 
 | # | Status | Commit | Description |
 |---|---|---|---|
@@ -37,14 +42,18 @@ python -m unittest discover -s translator/tests -p "test_*.py"
 | P4-2 | ✅ | `a25bea9` | importer.inventory() extraction |
 | P4-3 | ✅ | `5c6fb06` | DriftReport + Detector.rescan() |
 | P4-4 | ✅ | `f815762` | IN_SCOPE_TF_TYPES 2 → 17 + drift-stub gating |
-| **P4-5 preview** | ✅ | `37cfe18` | 1 firewall rule + helpers + test pattern |
-| **P4-5 (rest)** | next | — | ~8 more compute + network rules |
-| P4-6 | pending | — | GKE + Identity + KMS rules wave (~11 rules) |
-| P4-7 | pending | — | SQL + Cloud Run + Pub/Sub rules (~9 rules) |
-| P4-8 | pending | — | CG-3 metadata enforcement walker test |
-| P4-9a | pending | — | CC-9 scaffolding + 3 priority golden examples |
-| P4-9b | pending | — | CC-9 remaining 7 golden examples |
-| P4-10 | pending | — | SMOKE 4 (full 4-engine end-to-end) + retro |
+| P4-5 preview | ✅ | `37cfe18` | 1 firewall rule + helpers + test pattern |
+| P4-5 | ✅ | `0ca059d` | Compute + Network rules wave (8 more rules; 9 total in wave) |
+| P4-6 | ✅ | `92b033c` | GKE + KMS rules wave (10 new rules) |
+| P4-7 | ✅ | `efa0d78` | SQL + Cloud Run + Pub/Sub rules (9 new rules) |
+| P4-8 | ✅ | `c411682` | CG-3 walker test (264 subtests across 44 rules) |
+| **P4-9a** | next | — | CC-9 scaffolding + loader + 3 priority golden examples |
+| **P4-9b** | pending | — | CC-9 remaining 7 golden examples |
+| **P4-10** | pending | — | SMOKE 4 (full 4-engine end-to-end) + retro |
+
+**CG-2 + CG-3 COMPLETE.** 44 Rego rules across 14 dirs (12 GCP + 2 AWS
++ common), all carrying three-source provenance auto-validated by the
+P4-8 walker.
 
 ---
 
