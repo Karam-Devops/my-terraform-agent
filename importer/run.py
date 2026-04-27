@@ -11,10 +11,46 @@ import time
 import re
 from . import (
     config, gcp_client, terraform_client, hcl_generator, knowledge_base,
-    heuristics, snapshot_scrubber, lifecycle_planner, resource_mode,
+    snapshot_scrubber, lifecycle_planner, resource_mode,
     inventory as _inventory,
     quarantine as _quarantine,
 )
+
+
+# P4-13: heuristics.json + heuristics.py were retired in this commit.
+# All 5 active rules migrated to the proper layers (3 to resource_mode,
+# 1 to post_llm_overrides, 1 already in golden examples). The module
+# had a tiny ~5-line regex helper for error-pattern extraction that
+# the interactive HITL menu still uses for display purposes -- inlined
+# below so the legacy file can be deleted entirely. Pure function; no
+# I/O. See docs/saas_readiness_punchlist.md migration breakdown.
+import re as _re
+
+def _error_signature(error_message: str, resource_type: str) -> str:
+    """Extract a short label from a terraform error message.
+
+    Used by the interactive HITL menu's "Teaching Mode" display to
+    show the operator which field/block triggered the error. Pure
+    regex; no persistence (heuristics.json was retired in P4-13).
+    Returns 'generic_error' when no recognised pattern matches --
+    same fallback the legacy heuristics.generate_error_signature
+    used so the display surface is unchanged.
+    """
+    if not error_message:
+        return f"{resource_type}:unknown_error"
+    block_match = _re.search(
+        r'Blocks of type "([^"]+)" are not expected here',
+        error_message, _re.IGNORECASE,
+    )
+    if block_match:
+        return block_match.group(1)
+    arg_match = _re.search(
+        r'An argument named "([^"]+)" is not expected here',
+        error_message, _re.IGNORECASE,
+    )
+    if arg_match:
+        return arg_match.group(1)
+    return "generic_error"
 # Root-level app config — distinct from `importer/config.py`. The root holds
 # the project-ID concepts (HOST/TARGET/DEMO) and the resolver that enforces
 # the demo-lock safety gate. Aliased to `app_config` to avoid shadowing the
@@ -167,18 +203,12 @@ def _compute_ignore_set(
     for f in lifecycle_planner.derive_lifecycle_ignores(cloud_data, mapping['tf_type']):
         cumulative.add(f)
 
-    # 3. DB lookup keyed by the current Terraform error.
-    if current_error:
-        sig = manual_trigger_key or heuristics.generate_error_signature(
-            current_error, mapping['tf_type']
-        )
-        db_snippet = heuristics.get_heuristic_for_error(mapping['tf_type'], sig)
-        if db_snippet:
-            cmd = db_snippet.strip().upper()
-            if cmd.startswith("IGNORE"):
-                field = cmd.split(":", 1)[1].strip() if ":" in cmd else sig
-                if field:
-                    cumulative.add(field)
+    # 3. (P4-13) DB lookup against the current Terraform error -- removed.
+    # heuristics.json was retired; persistent IGNORE entries no longer
+    # exist. Sources 1, 2, 4, 5 below cover the same need: source 2
+    # (lifecycle_planner.derive_lifecycle_ignores) auto-derives from
+    # the cloud snapshot's optional+computed fields, which was the
+    # primary source of legacy IGNORE rules anyway.
 
     # 4. Manual operator snippet from interactive teach.
     if manual_snippet:
@@ -622,20 +652,12 @@ def _generate_and_save_hcl(mapping, schema, heuristics_kb):
     expert_snippets = []
 
     # --- 1. LOAD ALL MEMORY ---
-    # IGNORE entries are deferred to _compute_ignore_set() below so they
-    # join the cumulative UNION; here we only handle OMIT keys (pre-LLM
-    # JSON scrubbing) and raw HCL snippet entries (verbatim injection),
-    # which have semantics independent of the ignore_changes set.
-    if mapping['tf_type'] in heuristics_kb:
-        for error_key, snippet in heuristics_kb[mapping['tf_type']].items():
-            heuristics.warn_legacy_rule_used(mapping['tf_type'], error_key, snippet)
-            cmd = snippet.strip().upper()
-            if cmd == "OMIT":
-                keys_to_omit.append(error_key)
-            elif cmd.startswith("IGNORE"):
-                continue  # routed through _compute_ignore_set
-            else:
-                expert_snippets.append(snippet) # It's a code block
+    # P4-13: legacy heuristics_kb pass removed. heuristics.json was
+    # retired; all 5 active rules migrated (3 to resource_mode pre-LLM
+    # scrubs, 1 to post_llm_overrides post-LLM deletion, 1 already in
+    # CC-9 golden examples). keys_to_omit / expert_snippets are now
+    # populated only by per-attempt manual snippets + the existing
+    # programmatic sources downstream in this function.
 
     # --- 1b. Cumulative IGNORE_LIST (TODO #8) ---
     # One call assembles the union of heuristics + schema-derived
@@ -697,37 +719,18 @@ def _attempt_correction(mapping, resource_json, previous_error, attempt_num, sch
     keys_to_omit = []
     expert_snippets = []
 
-    # 1. Load global memory from heuristics.json — OMIT keys and raw HCL
-    # snippets only. IGNORE entries are routed through _compute_ignore_set
-    # below so they join the cumulative UNION (TODO #8).
-    if mapping['tf_type'] in heuristics_kb:
-        for error_key, snippet in heuristics_kb[mapping['tf_type']].items():
-            heuristics.warn_legacy_rule_used(mapping['tf_type'], error_key, snippet)
-            cmd = snippet.strip().upper()
-            if cmd == "OMIT":
-                keys_to_omit.append(error_key)
-            elif cmd.startswith("IGNORE"):
-                continue  # routed through _compute_ignore_set
-            else:
-                expert_snippets.append(snippet) # It's raw HCL code
+    # 1. (P4-13) heuristics_kb pre-load removed -- the file was retired.
+    # All 5 active rules migrated to resource_mode (pre-LLM scrub) +
+    # post_llm_overrides (post-LLM deletion) + CC-9 golden examples
+    # (positive shape signal).
 
-    # 2. Handle Automated DB Snippet lookup for the CURRENT error
-    # (Only used if no manual snippet is provided). IGNORE entries here
-    # are also routed through _compute_ignore_set.
-    error_signature = manual_trigger_key or heuristics.generate_error_signature(previous_error, mapping['tf_type'])
-
-    if not manual_snippet:
-        db_snippet = heuristics.get_heuristic_for_error(mapping['tf_type'], error_signature)
-        if db_snippet:
-            cmd = db_snippet.strip().upper()
-            if cmd == "OMIT":
-                if error_signature not in keys_to_omit: keys_to_omit.append(error_signature)
-            elif cmd.startswith("IGNORE"):
-                pass  # routed through _compute_ignore_set
-            else:
-                # Add it to snippets ONLY if it isn't already there from step 1
-                if db_snippet not in expert_snippets:
-                    expert_snippets.append(db_snippet)
+    # 2. (P4-13) DB snippet lookup against current error -- removed.
+    # error_signature is no longer needed for persistence; the
+    # interactive HITL menu still uses _error_signature() at the top
+    # of this module for "Teaching Mode" display only.
+    error_signature = manual_trigger_key or _error_signature(
+        previous_error, mapping['tf_type'],
+    )
 
     # 3. Handle Manual Input (Overrides DB). IGNORE entries here also
     # routed through _compute_ignore_set so they join the union.
@@ -947,9 +950,13 @@ def run_workflow() -> WorkflowResult:
             started=started,
         )
 
-    print("\n--- Pre-loading all required documentation schemas and heuristics ---")
+    print("\n--- Pre-loading all required documentation schemas ---")
     schemas = {m['tf_type']: knowledge_base.get_schema_for_resource(m['tf_type']) for m in mappings}
-    heuristics_kb = heuristics.load_heuristics()
+    # P4-13: heuristics_kb retained as an empty-dict shim so existing
+    # downstream call sites that look up tf_type keys naturally find
+    # nothing. All 5 legacy rules migrated to resource_mode +
+    # post_llm_overrides + golden examples; no rules in this dict.
+    heuristics_kb = {}
 
     print("\n--- Generating Initial HCL Files in Parallel ---")
     initial_results = []
@@ -1139,9 +1146,9 @@ def run_workflow() -> WorkflowResult:
                 if choice not in ['1', '2', '3']: print("Invalid choice."); continue
                 if choice == '3': break
 
-                if choice == '1': 
-                    error_trigger_key = heuristics.generate_error_signature(clean_error, mapping['tf_type'])
-                    print(f"\n--- Teaching Mode for error pattern: '{error_trigger_key}' ---")
+                if choice == '1':
+                    error_trigger_key = _error_signature(clean_error, mapping['tf_type'])
+                    print(f"\n--- Manual Snippet (per-run only; persistence removed P4-13) for error pattern: '{error_trigger_key}' ---")
                     user_input = get_multiline_input().strip()
                     if not user_input: continue
                     
@@ -1184,10 +1191,15 @@ def run_workflow() -> WorkflowResult:
                             print("   ❌ Invalid syntax. Use OMIT:fieldname or IGNORE:fieldname")
                             continue
 
-                    # 2. Save the clean rule to the knowledge base
-                    heuristics.save_heuristic(mapping['tf_type'], error_trigger_key, snippet_to_save)
-                    print("--- Retrying immediately with newly learned heuristic... ---")
-                    
+                    # 2. (P4-13) heuristics.save_heuristic removed --
+                    # heuristics.json was retired. Snippet applies to THIS
+                    # retry only; not persisted across runs. Operators
+                    # debugging recurring issues should add the rule at
+                    # the appropriate layer (resource_mode pre-LLM scrub,
+                    # post_llm_overrides post-LLM, or CC-9 golden example)
+                    # rather than relying on per-run snippet memory.
+                    print("--- Retrying with operator-provided snippet (per-run only) ---")
+
                     # 3. Prepare the arguments for the generator
                     keys_to_omit_immediate = [error_trigger_key] if snippet_to_save == "OMIT" else []
 
@@ -1200,7 +1212,7 @@ def run_workflow() -> WorkflowResult:
                     snippet_to_pass = None
                     if snippet_to_save == "IGNORE":
                         union_fields = _compute_ignore_set(
-                            mapping, resource_json, heuristics.load_heuristics(),
+                            mapping, resource_json, {},  # P4-13: empty heuristics_kb
                             manual_snippet="IGNORE",
                             manual_trigger_key=error_trigger_key,
                         )
@@ -1270,7 +1282,7 @@ def run_workflow() -> WorkflowResult:
                     for i in range(config.MAX_LLM_RETRIES):
                         print(f"--- AI Cycle {i + 1} of {config.MAX_LLM_RETRIES} ---")
                         mapping, output, is_success = _attempt_correction(
-                            mapping, resource_json, current_error, i + 2, schemas.get(mapping['tf_type']), heuristics.load_heuristics()
+                            mapping, resource_json, current_error, i + 2, schemas.get(mapping['tf_type']), {}  # P4-13: empty heuristics_kb
                         )
                         if is_success:
                             print(f"✅ AI SUCCEEDED on attempt {i + 1}!")

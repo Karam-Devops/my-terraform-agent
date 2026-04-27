@@ -164,6 +164,14 @@ _MODES: Dict[str, Dict[str, Any]] = {
             # value. Stripping at snapshot stage means the LLM never sees
             # it and never emits the partial-empty block.
             "monitoring_config.advanced_datapath_observability_config",
+            # P4-13: Ray Operator addon -- Autopilot manages it internally
+            # and rejects manual configuration. Migrated from the legacy
+            # heuristics.json (where the rule was a SNIPPET that emitted
+            # `ray_operator_config { enabled = false }` -- which Autopilot
+            # also rejects). The right behaviour is to STRIP the field
+            # entirely so the LLM never sees it and never emits a block
+            # that the provider will reject.
+            "addons_config.ray_operator_config",
         ],
         "prompt_addendum": (
             "\n\n========================================================================\n"
@@ -343,6 +351,55 @@ _MODES: Dict[str, Dict[str, Any]] = {
             "(cgroup, sysctl, hugepages) it goes in `linux_node_config`. If it's\n"
             "a kubelet-tuning concept (cpu_manager, pod_pids, kubelet_*) it goes\n"
             "in `kubelet_config`. Otherwise it goes directly in `node_config`.\n"
+            "========================================================================\n"
+        ),
+    },
+    "compute_instance_default": {
+        # P4-13: replaces two legacy heuristics.json OMIT rules for
+        # google_compute_instance:
+        #   guest_os_features: OMIT
+        #   resource_policies: OMIT
+        # Both were SNIPPET-class workarounds that the snapshot_scrubber
+        # couldn't catch via schema_oracle (the fields are NOT
+        # computed-only -- they have real values that the LLM happily
+        # echoes back, but the provider rejects them at apply time on
+        # the standard import path). Pre-LLM strip via this mode is
+        # the right architectural home -- mirrors how P2-10 handles
+        # cluster_ipv4_cidr for gke_standard.
+        #
+        # Detector is _always_true; applies to every compute_instance
+        # snapshot.
+        "applies_to": "google_compute_instance",
+        "detect": _always_true,
+        "prune_top_level": [
+            # Computed feature flags Google sets on the source image
+            # (e.g. {"type": "VIRTIO_SCSI_MULTIQUEUE"}). The LLM emits
+            # them as a HCL block; provider rejects ('not expected
+            # here' on standard import flow). Per-VM customisation
+            # would need a separate explicit field, which we don't
+            # support yet.
+            "guestOsFeatures", "guest_os_features",
+            # Snapshot/backup schedules attached to the disk via
+            # resource_policies. The LLM emits them as a top-level
+            # list; provider expects them at disk-resource level via
+            # google_compute_resource_policy + a separate
+            # google_compute_disk_resource_policy_attachment. Fork
+            # for a future commit if customers need round-trip.
+            "resourcePolicies", "resource_policies",
+        ],
+        "prompt_addendum": (
+            "\n\n========================================================================\n"
+            "MODE OVERRIDE - COMPUTE INSTANCE DEFAULT\n"
+            "========================================================================\n"
+            "Two cloud-side fields are stripped from the input snapshot before\n"
+            "you see it (no need to reproduce them in HCL):\n"
+            "  * `guest_os_features` -- computed from the source image; not\n"
+            "    settable on the instance resource.\n"
+            "  * `resource_policies`  -- attached via separate\n"
+            "    google_compute_disk_resource_policy_attachment resource,\n"
+            "    not on the instance.\n"
+            "If the input JSON does NOT carry these fields, you don't need to\n"
+            "do anything special; this addendum just documents why.\n"
             "========================================================================\n"
         ),
     },

@@ -101,10 +101,25 @@ class DetectModesTests(unittest.TestCase):
         self.assertEqual(modes, ["gke_standard"])
 
     def test_non_cluster_type_returns_empty(self):
-        """Modes only fire for the tf_type they `applies_to`."""
+        """Modes only fire for the tf_type they `applies_to`.
+
+        google_storage_bucket is the canonical "no modes registered"
+        type today -- pin it explicitly so this test stays meaningful
+        even as we add per-type default modes (P4-11 added
+        cloud_run_v2_default; P4-13 added compute_instance_default;
+        future commits may add others).
+        """
         snap = {"autopilotConfig": {"enabled": True}}
-        modes = detect_modes(snap, "google_compute_instance")
+        modes = detect_modes(snap, "google_storage_bucket")
         self.assertEqual(modes, [])
+
+    def test_compute_instance_default_mode_always_fires(self):
+        """P4-13: every google_compute_instance snapshot picks up the
+        compute_instance_default mode for v1-vestige stripping
+        (guest_os_features, resource_policies). Mirrors how
+        cloud_run_v2_default works for google_cloud_run_v2_service."""
+        modes = detect_modes({}, "google_compute_instance")
+        self.assertIn("compute_instance_default", modes)
 
 
 class P29PruneListTests(unittest.TestCase):

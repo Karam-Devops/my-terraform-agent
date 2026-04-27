@@ -20,6 +20,13 @@
         "from": "locations",
         "to": "node_locations"
       }
+    ],
+    "deletions": [
+      {
+        "comment": "P4-13: `enterprise_config` was deprecated upstream as of GKE provider 2024 release. Provider warning visible in SMOKE 4: 'GKE Enterprise features are now available without an Enterprise tier. This field is deprecated and will be removed in a future major release'. The legacy heuristics.json had a SNIPPET that emitted `enterprise_config { desired_tier = \"STANDARD\" }` -- the right behaviour today is to OMIT entirely so the LLM doesn't produce the deprecated block. Provider accepts absence as the default. Block_path empty -> delete from anywhere.",
+        "block_path": "",
+        "field": "enterprise_config"
+      }
     ]
   },
 
