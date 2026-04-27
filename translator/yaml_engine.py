@@ -15,11 +15,12 @@ logger = logging.getLogger(__name__)
 def _blueprint_diagnostic_path(source_filename: str) -> str:
     """Return a per-invocation, collision-free path for the diagnostic YAML blueprint.
 
-    The blueprint file is a diagnostic artifact persisted next to the
-    source ``.tf`` so operators can attribute downstream HCL bugs to the
-    correct stage (extraction vs. generation).
+    The blueprint file is a diagnostic artifact persisted so operators
+    can attribute downstream HCL bugs to the correct stage (Phase 1
+    extraction vs. Phase 2 generation). It is WRITE-ONLY -- Phase 2
+    consumes the YAML in memory, never re-reads the file.
 
-    P3-3 fix: pre-P3-3 the filename was a fixed
+    P3-3 fix (UUID suffix): pre-P3-3 the filename was a fixed
     ``_intermediate_blueprint_<basename>.yaml`` pattern. Two concurrent
     translations of the SAME source file -- different tenants in the
     same per-project workdir, or one tenant retrying after a transient
@@ -28,18 +29,30 @@ def _blueprint_diagnostic_path(source_filename: str) -> str:
     explicitly under "WARN: intermediate YAML files collide under
     concurrency".
 
-    Fix: append an 8-char hex UUID suffix per invocation. Format:
+    P4-15.3 fix (subdirectory): pre-P4-15.3 the file was written next
+    to the source ``.tf`` -- which polluted the per-project workdir
+    with one yaml file per invocation, on top of the .tf files that
+    are the actual deliverable. SMOKE 4 surfaced this concretely
+    after a 12-file batch left ~12 ``_intermediate_blueprint_*.yaml``
+    files in the workdir alongside the 12 ``.tf`` files plus the
+    ``translated/`` subdir. Operator browsing the workdir hit
+    visual noise > signal.
 
-        _intermediate_blueprint_<clean_basename>_<uuid8>.yaml
+    P4-15.3 moves the diagnostic to a hidden subdirectory:
 
-    Why 8 chars: 16^8 = 4.3 billion possible IDs per source file; the
-    odds of two concurrent translations colliding within a single
-    project workdir are essentially zero unless we're operating at
-    galactic-scale parallelism. The trade-off is directory clutter
-    (each translation leaves a file forever), but the gitignore
-    pattern (``_intermediate_blueprint_*.yaml``) covers the new shape
-    too, and operators can periodically clean diagnostic artifacts
-    with ``find imported/ -name '_intermediate_blueprint_*.yaml' -mtime +30 -delete``.
+        <workdir>/_diagnostics/blueprints/_intermediate_blueprint_<clean>_<uuid8>.yaml
+
+    Mirrors the ``_quarantine/`` convention from CG-7 (P4-1) so all
+    underscore-prefixed subdirs in the workdir are diagnostic /
+    operational, not customer deliverables. Parent directory is
+    created lazily by the writer (extract_yaml_blueprint).
+
+    Optional disable: setting ``MTAGENT_PERSIST_BLUEPRINTS=0`` (or
+    ``false`` / ``no`` / ``off``) returns ``None`` from this helper;
+    extract_yaml_blueprint then skips the file write entirely. SaaS
+    Round-1 (CG-8H) leaves persistence ON by default for diagnosis
+    on customer-reported failures; production deployments may turn
+    it off to reduce ephemeral /tmp churn.
 
     Pulled out as a pure helper so it can be unit-tested without
     pulling in llm_provider / langchain. Same testability pattern as
@@ -50,8 +63,11 @@ def _blueprint_diagnostic_path(source_filename: str) -> str:
             absolute and bare-basename inputs are handled.
 
     Returns:
-        Path string (preserves the source's absolute / relative shape).
+        Path string (preserves the source's absolute / relative shape),
+        OR ``None`` when persistence is disabled via env var.
     """
+    if not _persist_blueprints_enabled():
+        return None
     base = os.path.basename(source_filename)
     clean = base.replace("google_", "").rsplit(".", 1)[0]
     invocation_id = uuid.uuid4().hex[:8]
@@ -60,8 +76,20 @@ def _blueprint_diagnostic_path(source_filename: str) -> str:
     source_dir = os.path.dirname(source_filename) or "."
     return os.path.join(
         source_dir,
+        "_diagnostics",
+        "blueprints",
         f"_intermediate_blueprint_{clean}_{invocation_id}.yaml",
     )
+
+
+def _persist_blueprints_enabled() -> bool:
+    """True iff diagnostic blueprint persistence is enabled.
+
+    Default ON (preserves backward compat + aids local debugging).
+    Disable with ``MTAGENT_PERSIST_BLUEPRINTS`` set to a falsy value.
+    """
+    raw = os.environ.get("MTAGENT_PERSIST_BLUEPRINTS", "1")
+    return raw.strip().lower() not in {"0", "false", "no", "off", ""}
 
 def extract_yaml_blueprint(source_hcl: str, source_filename: str) -> Optional[str]:
     """
@@ -129,20 +157,36 @@ def extract_yaml_blueprint(source_hcl: str, source_filename: str) -> Optional[st
 
         logger.info("   ✅ Successfully extracted cloud-agnostic YAML blueprint.")
 
-        # Diagnostic: persist intermediate YAML next to the source .tf so we can
-        # attribute downstream bugs to the correct stage (extraction vs. generation).
-        # Without this, an inversion or omission in the final HCL is ambiguous —
-        # it could originate here OR in aws_engine.py / azure_engine.py. This file
-        # is gitignored (see .gitignore: _intermediate_blueprint_*.yaml).
-        # Save failure is non-fatal; the main pipeline must not be blocked by it.
-        # P3-3: filename now includes a per-invocation UUID suffix so concurrent
-        # translations of the same source file don't clobber each other's
-        # diagnostic blueprint. See _blueprint_diagnostic_path docstring.
+        # Diagnostic: persist intermediate YAML in the workdir's
+        # _diagnostics/blueprints/ subdirectory so we can attribute
+        # downstream bugs to the correct stage (extraction vs.
+        # generation). Without this, an inversion or omission in the
+        # final HCL is ambiguous -- it could originate here OR in
+        # aws_engine.py / azure_engine.py. This file is gitignored
+        # (see .gitignore: _intermediate_blueprint_*.yaml).
+        #
+        # P3-3: filename includes a per-invocation UUID suffix so
+        # concurrent translations of the same source file don't
+        # clobber each other's diagnostic blueprint.
+        # P4-15.3: moved from workdir root to <workdir>/_diagnostics/
+        # blueprints/ to declutter the workdir (mirrors CG-7's
+        # _quarantine/ convention). Parent dir created lazily on
+        # first persist event.
+        # MTAGENT_PERSIST_BLUEPRINTS=0 disables persistence entirely
+        # (returns None from _blueprint_diagnostic_path).
+        # Save failure is non-fatal; the main pipeline must not be
+        # blocked by it.
         try:
             yaml_path = _blueprint_diagnostic_path(source_filename)
-            with open(yaml_path, "w", encoding="utf-8") as fh:
-                fh.write(yaml_output)
-            logger.info(f"   📝 Intermediate blueprint persisted for diagnosis: {yaml_path}")
+            if yaml_path:
+                # Lazy directory creation -- only mkdir on first persist
+                # so workdirs that never translate stay clean.
+                os.makedirs(os.path.dirname(yaml_path), exist_ok=True)
+                with open(yaml_path, "w", encoding="utf-8") as fh:
+                    fh.write(yaml_output)
+                logger.info(f"   📝 Intermediate blueprint persisted for diagnosis: {yaml_path}")
+            else:
+                logger.debug("   blueprint persistence disabled via MTAGENT_PERSIST_BLUEPRINTS")
         except Exception as save_err:
             logger.warning(f"   ⚠️  Could not persist intermediate YAML (diagnostic only, pipeline continues): {save_err}")
 

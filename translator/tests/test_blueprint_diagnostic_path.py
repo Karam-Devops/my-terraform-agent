@@ -105,13 +105,18 @@ class BlueprintDiagnosticPathTests(unittest.TestCase):
         self.engine = _load_yaml_engine()
 
     def test_returns_path_under_source_directory(self):
-        """Blueprint sits next to the source .tf, not in some random tempdir."""
+        """Blueprint sits under <workdir>/_diagnostics/blueprints/, not
+        in the workdir root (P4-15.3 declutter -- mirrors CG-7's
+        _quarantine/ convention)."""
         out = self.engine._blueprint_diagnostic_path(
             "imported/dev-proj-470211/google_compute_instance_poc_vm.tf"
         )
         norm = out.replace("\\", "/")
         self.assertTrue(
-            norm.startswith("imported/dev-proj-470211/_intermediate_blueprint_"),
+            norm.startswith(
+                "imported/dev-proj-470211/_diagnostics/blueprints/"
+                "_intermediate_blueprint_"
+            ),
             f"unexpected path prefix: {norm}",
         )
         self.assertTrue(norm.endswith(".yaml"), f"missing .yaml extension: {norm}")
@@ -167,21 +172,23 @@ class BlueprintDiagnosticPathTests(unittest.TestCase):
         out = self.engine._blueprint_diagnostic_path("google_iam.tf")
         norm = out.replace("\\", "/")
         self.assertTrue(
-            norm.startswith("./_intermediate_blueprint_iam_"),
+            norm.startswith(
+                "./_diagnostics/blueprints/_intermediate_blueprint_iam_"
+            ),
             f"bare-basename source produced unexpected path: {norm}",
         )
 
     def test_absolute_source_path_preserves_absoluteness(self):
         """Absolute source -> absolute blueprint path under the same
-        parent directory. Cleaned basename is `compute_disk` (only the
-        leading `google_` is stripped, not the underscored words after)."""
+        parent directory's _diagnostics/blueprints/ subdir."""
         out = self.engine._blueprint_diagnostic_path(
             "/var/lib/iac/imported/p/google_compute_disk.tf"
         )
         norm = out.replace("\\", "/")
         self.assertTrue(
             norm.startswith(
-                "/var/lib/iac/imported/p/_intermediate_blueprint_compute_disk_"
+                "/var/lib/iac/imported/p/_diagnostics/blueprints/"
+                "_intermediate_blueprint_compute_disk_"
             ),
             f"absolute parent not preserved: {norm}",
         )
@@ -220,6 +227,69 @@ class BlueprintDiagnosticPathTests(unittest.TestCase):
             base.endswith(".yaml"),
             f"filename doesn't match gitignore suffix: {base}",
         )
+
+
+class BlueprintPersistenceDisableTests(unittest.TestCase):
+    """P4-15.3 added MTAGENT_PERSIST_BLUEPRINTS env var to disable
+    diagnostic persistence entirely (production deployments may want
+    this to reduce ephemeral /tmp churn under CG-8H Cloud Run)."""
+
+    def setUp(self):
+        self.engine = _load_yaml_engine()
+
+    def test_default_unset_persists(self):
+        """No env var -> persist (returns a path, not None)."""
+        from unittest.mock import patch
+        with patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("MTAGENT_PERSIST_BLUEPRINTS", None)
+            out = self.engine._blueprint_diagnostic_path(
+                "imported/p/google_compute_instance.tf"
+            )
+            self.assertIsNotNone(out)
+
+    def test_explicitly_disabled_returns_none(self):
+        """Setting the env to a falsy value -> None (writer skips)."""
+        from unittest.mock import patch
+        for val in ("0", "false", "no", "off", "FALSE", "Off"):
+            with self.subTest(value=val):
+                with patch.dict(os.environ,
+                                {"MTAGENT_PERSIST_BLUEPRINTS": val}):
+                    out = self.engine._blueprint_diagnostic_path(
+                        "imported/p/google_compute_instance.tf"
+                    )
+                    self.assertIsNone(
+                        out,
+                        f"env val {val!r} should disable persistence",
+                    )
+
+    def test_truthy_values_persist(self):
+        """Truthy / explicit-on values -> persist normally."""
+        from unittest.mock import patch
+        for val in ("1", "true", "yes", "on"):
+            with self.subTest(value=val):
+                with patch.dict(os.environ,
+                                {"MTAGENT_PERSIST_BLUEPRINTS": val}):
+                    out = self.engine._blueprint_diagnostic_path(
+                        "imported/p/google_compute_instance.tf"
+                    )
+                    self.assertIsNotNone(out)
+
+    def test_path_under_diagnostics_subdir_when_enabled(self):
+        """The new subdirectory layout is _diagnostics/blueprints/ --
+        pin it explicitly so accidental flattening would fail this test
+        (P4-15.3 anti-regression; SMOKE 4 surfaced clutter as the
+        problem, regression would put files back in workdir root)."""
+        from unittest.mock import patch
+        with patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("MTAGENT_PERSIST_BLUEPRINTS", None)
+            out = self.engine._blueprint_diagnostic_path(
+                "imported/p/google_compute_instance.tf"
+            )
+            self.assertIn("_diagnostics", out)
+            self.assertIn("blueprints", out)
+            # Specifically verify the subdir comes BEFORE the filename
+            # (i.e. it's a directory component, not part of the basename).
+            self.assertNotIn("_diagnostics", os.path.basename(out))
 
 
 if __name__ == "__main__":
