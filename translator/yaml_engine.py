@@ -3,12 +3,65 @@
 import os
 import re
 import logging
+import uuid
 from typing import Optional
 from langchain_core.messages import SystemMessage, HumanMessage
 from .. import llm_provider
 
 # Initialize standard logger for enterprise observability
 logger = logging.getLogger(__name__)
+
+
+def _blueprint_diagnostic_path(source_filename: str) -> str:
+    """Return a per-invocation, collision-free path for the diagnostic YAML blueprint.
+
+    The blueprint file is a diagnostic artifact persisted next to the
+    source ``.tf`` so operators can attribute downstream HCL bugs to the
+    correct stage (extraction vs. generation).
+
+    P3-3 fix: pre-P3-3 the filename was a fixed
+    ``_intermediate_blueprint_<basename>.yaml`` pattern. Two concurrent
+    translations of the SAME source file -- different tenants in the
+    same per-project workdir, or one tenant retrying after a transient
+    LLM failure -- would race on the file and clobber each other's
+    diagnostic. The Phase 0 audit's translator WARN list flagged this
+    explicitly under "WARN: intermediate YAML files collide under
+    concurrency".
+
+    Fix: append an 8-char hex UUID suffix per invocation. Format:
+
+        _intermediate_blueprint_<clean_basename>_<uuid8>.yaml
+
+    Why 8 chars: 16^8 = 4.3 billion possible IDs per source file; the
+    odds of two concurrent translations colliding within a single
+    project workdir are essentially zero unless we're operating at
+    galactic-scale parallelism. The trade-off is directory clutter
+    (each translation leaves a file forever), but the gitignore
+    pattern (``_intermediate_blueprint_*.yaml``) covers the new shape
+    too, and operators can periodically clean diagnostic artifacts
+    with ``find imported/ -name '_intermediate_blueprint_*.yaml' -mtime +30 -delete``.
+
+    Pulled out as a pure helper so it can be unit-tested without
+    pulling in llm_provider / langchain. Same testability pattern as
+    translator/run.py's resolve_output_path.
+
+    Args:
+        source_filename: Path to the GCP ``.tf`` source file. Both
+            absolute and bare-basename inputs are handled.
+
+    Returns:
+        Path string (preserves the source's absolute / relative shape).
+    """
+    base = os.path.basename(source_filename)
+    clean = base.replace("google_", "").rsplit(".", 1)[0]
+    invocation_id = uuid.uuid4().hex[:8]
+    # `or "."` mirrors the resolve_output_path guard for bare-basename
+    # source paths -- no directory component means CWD.
+    source_dir = os.path.dirname(source_filename) or "."
+    return os.path.join(
+        source_dir,
+        f"_intermediate_blueprint_{clean}_{invocation_id}.yaml",
+    )
 
 def extract_yaml_blueprint(source_hcl: str, source_filename: str) -> Optional[str]:
     """
@@ -77,13 +130,11 @@ def extract_yaml_blueprint(source_hcl: str, source_filename: str) -> Optional[st
         # it could originate here OR in aws_engine.py / azure_engine.py. This file
         # is gitignored (see .gitignore: _intermediate_blueprint_*.yaml).
         # Save failure is non-fatal; the main pipeline must not be blocked by it.
+        # P3-3: filename now includes a per-invocation UUID suffix so concurrent
+        # translations of the same source file don't clobber each other's
+        # diagnostic blueprint. See _blueprint_diagnostic_path docstring.
         try:
-            base = os.path.basename(source_filename)
-            clean = base.replace("google_", "").rsplit(".", 1)[0]
-            yaml_path = os.path.join(
-                os.path.dirname(source_filename) or ".",
-                f"_intermediate_blueprint_{clean}.yaml"
-            )
+            yaml_path = _blueprint_diagnostic_path(source_filename)
             with open(yaml_path, "w", encoding="utf-8") as fh:
                 fh.write(yaml_output)
             logger.info(f"   📝 Intermediate blueprint persisted for diagnosis: {yaml_path}")
