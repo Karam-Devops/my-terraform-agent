@@ -47,13 +47,19 @@ python -m unittest discover -s translator/tests -p "test_*.py"
 | P4-6 | ✅ | `92b033c` | GKE + KMS rules wave (10 new rules) |
 | P4-7 | ✅ | `efa0d78` | SQL + Cloud Run + Pub/Sub rules (9 new rules) |
 | P4-8 | ✅ | `c411682` | CG-3 walker test (264 subtests across 44 rules) |
-| **P4-9a** | next | — | CC-9 scaffolding + loader + 3 priority golden examples |
-| **P4-9b** | pending | — | CC-9 remaining 7 golden examples |
-| **P4-10** | pending | — | SMOKE 4 (full 4-engine end-to-end) + retro |
+| P4-9a | ✅ | `0f8378b` | CC-9 scaffolding + loader + 3 priority golden examples |
+| P4-9b | ✅ | `0a35740` | CC-9 remaining 7 golden examples (test fixture extension) |
+| P4-9 hotfix | ✅ | `38aed9e` | gitignore exception for golden_examples/*.tf |
+| **P4-10** | manual | — | SMOKE 4 prep doc shipped; user runs the manual smoke |
 
-**CG-2 + CG-3 COMPLETE.** 44 Rego rules across 14 dirs (12 GCP + 2 AWS
-+ common), all carrying three-source provenance auto-validated by the
-P4-8 walker.
+**Phase 4 SUBSTANTIALLY COMPLETE.** All 10 dev/code commits landed. Last
+step is the manual SMOKE 4 the user executes per
+`docs/smoke4_prep.md` -- prep doc + retro template ready.
+
+CG-1 + CG-2 + CG-3 + CC-9 all shipped. 44 Rego rules across 14 dirs
+all carrying three-source provenance auto-validated by the P4-8
+walker. 10 hand-written golden HCL examples for the importer's top
+10 hallucination-prone types.
 
 ---
 
