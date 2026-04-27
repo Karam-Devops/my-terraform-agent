@@ -561,7 +561,8 @@ migration with backend implications").
 | **CG-5 Flags column parity (Policy + Git + Relationships)** | **Phase 5/6 split** | **2 days** (0.5d backend P5 + 1.5d UI P6) |
 | **CG-6 Inventory tab as primary UI surface** | **Phase 6** | folded into existing Phase 6 UI budget |
 | **CG-7 Failure isolation via quarantine pattern** | **Phase 4 hotfix (SHIPPED)** | **0.5 day** -- shipped same wave as P4-11/P4-12 SMOKE-4 hotfixes |
-| **CG-8 Round-1 Cloud Run deployment (NO persistent storage)** | **Phase 5A** | **1.5-2 days** -- container + Cloud Run config + auth + customer onboarding doc; explicitly DEFERS GCS to Phase 5B/6 |
+| **CG-8 Round-1 Cloud Run deployment (NO persistent storage)** | **Phase 5A — superseded** | **1.5-2 days** -- minimum viable; superseded by user's pivot to high-perf variant CG-8H (2026-04-27) |
+| **CG-8H Round-1 Cloud Run + GCS high-perf variant** | **Phase 5A (CHOSEN)** | **2.5-3 days** -- CG-8 base + GCS rsync layer + max>1 + customer download UX. Solves 14 of 18 forecasted pitfalls vs 6 for vanilla CG-8. Customer commits to "no live hotfixes during test" so deploy-data-loss isn't the driver; high-perf + cross-session persistence is. |
 | **CC-9 Few-shot golden examples (top 10 types)** | **Phase 4** | **5 days** |
 | CC-3 cold-start preflight | Phase 5 | 1 day |
 | **CC-5 ResourceOutcome backend** | **Phase 5** | **1 day** |
@@ -1347,6 +1348,116 @@ Phase-5 hygiene/CC items currently scheduled there) followed by
 Phase 5B (the deferred GCS/Firestore stack from CG-9). The
 existing "Phase 5" line items in the table above remain in 5A
 unless explicitly moved to 5B during retros.
+
+### CG-8H. Round-1 Cloud Run + GCS high-perf variant — surfaced 2026-04-27 (supersedes CG-8)
+
+**Why this exists.** After CG-8 was specced, two constraint changes
+pivoted the scope:
+
+  1. **User commits to "no live hotfixes during Round-1 customer
+     test windows"** -- the social mitigation for deploy-data-loss
+     is now contractual rather than the architecture's job.
+  2. **High performance is a Round-1 goal**, not just baseline
+     functionality.
+
+CG-8 was sized for "minimum viable" with the social mitigation
+doing the heavy lifting on data loss. With both constraints
+shifted, the marginal half-day to add GCS solves 8 additional
+forecasted pitfalls (#10 cross-session view, #15 per-tenant
+isolation, #17 audit trail are the highest-impact wins) AND
+unlocks ``max_instances > 1`` for true multi-customer concurrency.
+
+**What's the same as CG-8.** The container build, IAP auth,
+cross-project SA impersonation, Vertex AI quota raise, customer
+onboarding doc are all unchanged. CG-8H = CG-8 + a small GCS
+layer + max-instances bump.
+
+**What's added vs CG-8.**
+
+  * **GCS bucket per environment** (NOT per tenant -- single bucket
+    + per-tenant prefixing). Object Versioning ON. Lifecycle
+    rule: archive at 90d. Bucket lock for immutability of audit
+    history. ``gs://mtagent-state-prod/tenants/<id>/projects/<id>/``
+
+  * **NEW module** ``common/storage.py`` (~50 LOC):
+    - ``hydrate_workdir(tenant_id, project_id) -> str`` -- runs
+      ``gcloud storage rsync gs://...prefix.../  /tmp/imported/<request_uuid>/``
+      at request start. Returns the local /tmp path the engines see.
+    - ``persist_workdir(local_path, tenant_id, project_id) -> None``
+      -- runs ``gcloud storage rsync /tmp/imported/<request_uuid>/  gs://...prefix.../``
+      at request end.
+    - Pure-function module; no module-level state. Tested with
+      mocked subprocess.run.
+
+  * **Per-request /tmp scoping**: each Cloud Run request gets its
+    own ``/tmp/imported/<request_uuid>/`` slice. Multiple
+    simultaneous requests on the same container instance have
+    fully isolated workdirs. Cleaned up at request end after
+    persist completes.
+
+  * **terraform GCS backend** declared in generated .tf files:
+    ```
+    terraform { backend "gcs" {
+      bucket = "mtagent-state-prod"
+      prefix = "tenants/<tenant>/projects/<project>/state"
+    } }
+    ```
+    terraform handles state-file locking via GCS object lock
+    natively -- no app-side coordination needed. Mid-request
+    Cloud Run kill leaves no orphan locks (covered by
+    pitfall #12).
+
+  * **Cloud Run config delta from CG-8:**
+    - ``--max-instances=3`` (was 1) -- safe to scale because
+      state is shared via GCS backend
+    - ``--memory=8Gi`` (was 4Gi) -- more headroom for parallel
+      translator
+    - ``--cpu=4`` (was 2) -- matches translator parallelism
+    - Vertex AI quota raise: 120 -> 300 RPM (3x customers ×
+      8 workers × 3 calls)
+
+  * **UI affordances** (Phase 6 work folded forward):
+    - ``st.download_button`` per .tf file in the workdir
+    - "Cross-session reopen" -- on Streamlit page load, hydrate
+      from GCS so customer sees yesterday's imports
+    - Per-resource audit trail: list of GCS object versions for
+      a given .tf
+
+**Pitfall coverage delta** (CG-8 vanilla -> CG-8H):
+
+  * Critical 6/6 (was 5/6 with #4 forced to max=1)
+  * Important 4/5 (was 1/5; CG-8H solves #9 / #10)
+  * Worth-knowing 4/7 (was 0/7; CG-8H solves #12 / #14 / #15 / #17)
+
+  Total: **14/18 solved or improved** vs **6/18** with vanilla CG-8.
+  The 4 still orthogonal: #7 (streaming UI; needs Streamlit work),
+  #11 (existing customer terraform; onboarding doc), #16 (Vertex
+  cold start; already P3-1), #18 (Streamlit + Cloud Run integration
+  edge cases; needs validation regardless).
+
+**Estimate.** 2.5-3 days:
+  * 0.5 day Dockerfile + provider plugin baking (same as CG-8)
+  * 0.25 day Cloud Run config + IAP (same as CG-8)
+  * 0.25 day cross-project SA wiring (same as CG-8)
+  * 0.5 day customer onboarding doc (same as CG-8)
+  * 0.25 day Vertex AI quota raise (same as CG-8)
+  * **0.5 day common/storage.py + per-request /tmp scoping** (NEW)
+  * **0.25 day terraform GCS backend wiring + smoke** (NEW)
+  * **0.25 day Streamlit download/hydrate UX** (NEW; folds from
+    Phase 6)
+
+**Why this is still Phase 5A and not 5B.** The full CG-9 storage
+stack adds Firestore, multi-region, Cloud Tasks, and real auth.
+CG-8H stops at "GCS only" -- enough for high-performance Round-1
+without any of the heavier orchestration. Firestore (per-resource
+metadata for UI) folds into Phase 6 alongside CG-6 inventory tab
+where it actually pays off; multi-region + Cloud Tasks defer to
+Phase 5B/6 retro.
+
+**CG-9 status update.** With CG-8H absorbing GCS, CG-9 becomes
+"the Phase 6+ scaling layer": Firestore + multi-region + Cloud
+Tasks + real auth. Effort estimate unchanged; phase moves from
+5B to 6+ pending Round-1 retro signal.
 
 ### CG-9. Phase 5B persistent storage stack (deferred from CG-8) — surfaced 2026-04-27
 
