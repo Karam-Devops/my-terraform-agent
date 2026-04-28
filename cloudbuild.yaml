@@ -74,6 +74,18 @@ steps:
       - --port=8080
       - --no-allow-unauthenticated
       - --concurrency=10
+      # PUI-1B SMOKE 2026-04-28: --session-affinity is REQUIRED because
+      # Streamlit holds session_state IN-MEMORY per container. Without
+      # session affinity, a multi-step click flow (Discover -> Pick ->
+      # Import) can land successive requests on different containers --
+      # the second container has empty session_state and the page acts
+      # like a fresh load (lost picker selection, lost discovery list).
+      # Symptom that surfaced: Discover succeeded on container A; Run
+      # import landed on container B (cold start, NumExpr re-import
+      # visible in logs); B had no `_importer_discovered_<proj>` key
+      # so the workflow never fired. With --session-affinity, all
+      # requests from the same browser session pin to the same container.
+      - --session-affinity
       # Runtime env vars. ALL hardcoded values here are sensible
       # Stage-1 defaults; Stage-2 swap is just changing PROJECT_ID at
       # the top of this command (the rest auto-derive from $PROJECT_ID
