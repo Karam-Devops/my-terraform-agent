@@ -15,10 +15,12 @@
 
 The architecture is identical between stages — only project names + auth + quota change. PSA-6 cross-project SA impersonation + GCS prefixing are designed to make the migration a config-only change (no code edits).
 
-**Branching strategy (per user decision 2026-04-28):**
+**Branching strategy (per user decision 2026-04-28, refined later same day):**
 
-* `main` — phase plan + Phase 5A plumbing commits (PSA-X items)
-* `streamlit-UI` — all Phase 6 UI commits (PUI-X items); branched from `main` after this plan lands. Merged back to `main` at end of Phase 6.
+* `main` — **FROZEN at `a41f4b6` (the plan commit) for the duration of Phase 5+6.** Stable rollback point. No PSA-X or PUI-X commits land here directly.
+* `streamlit-UI` — **ALL Phase 5A + Phase 6 commits** (PSA-X plumbing AND PUI-X UI). Branched from `main` at `a41f4b6`. Merged back to `main` only at the END of Phase 6 once SMOKE 5 passes.
+
+Rationale for the refinement: keeping `main` immobile gives an unambiguous "known-good" reference for the entire ~10-day build. If anything goes catastrophically wrong mid-Phase-5A (e.g. a bad Cloud Run config breaks our deploy story), `main` still has a working `phase-4-complete` baseline + the planning doc — no archeology needed.
 
 ---
 
@@ -330,12 +332,12 @@ customer feedback demands it.
 
 When you say "go," I will:
 
-1. Phase 5A (PSA-X plumbing) commits land on **`main`** (deployment scaffolding isn't UI work).
-2. Phase 6 (PUI-X UI) commits land on **`streamlit-UI`** branch (created from main after this plan + Phase 5A complete).
-3. Start with PSA-1 (Dockerfile) + PSA-3 (`common/storage.py`) in parallel — no dependency between them.
-4. PSA-1 first commit includes the GCP project bootstrap script (creates `mtagent-internal-dev`, enables Cloud Run + Cloud Build + GCR + IAM + Vertex AI + Cloud Storage APIs, creates the `mtagent-state-dev` GCS bucket).
-5. NO Vertex AI quota request submission this phase — deferred to Stage 2.
-6. Daily progress updates against the milestones in Section 4.
+1. **All Phase 5A + Phase 6 commits land on `streamlit-UI`.** `main` stays frozen at `a41f4b6` until end-of-Phase-6 merge.
+2. Start with PSA-1 (Dockerfile) + PSA-3 (`common/storage.py`) in parallel — no dependency between them.
+3. PSA-1 first commit includes the GCP project bootstrap script (creates `mtagent-internal-dev`, enables Cloud Run + Cloud Build + GCR + IAM + Vertex AI + Cloud Storage APIs, creates the `mtagent-state-dev` GCS bucket).
+4. NO Vertex AI quota request submission this phase — deferred to Stage 2.
+5. Daily progress updates against the milestones in Section 4.
+6. End-of-Phase-6: SMOKE 5 against `dev-proj-470211` → if pass, fast-forward `main` → `streamlit-UI`; if fail, hotfix on `streamlit-UI` and re-run SMOKE 5.
 
 ## 11. Stage-2 migration (pre-customer onboarding)
 
