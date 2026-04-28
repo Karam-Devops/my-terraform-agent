@@ -1,1 +1,2 @@
-Get-Item .terraform_schema_cache.json -ErrorAction SilentlyContinue | Select-Object Name, Length, LastWriteTime
+Remove-Item .terraform_schema_cache.json
+Remove-Item -Recurse -Force imported -ErrorAction SilentlyContinue
