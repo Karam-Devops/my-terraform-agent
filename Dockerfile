@@ -98,7 +98,9 @@ ENV PORT=8080 \
     MTAGENT_LOG_FORMAT=json \
     MTAGENT_LOG_LEVEL=INFO \
     PYTHONUNBUFFERED=1 \
-    PYTHONPATH=/app
+    PYTHONPATH=/app \
+    TF_IN_AUTOMATION=1 \
+    TF_NO_COLOR=1
 # PYTHONPATH=/app: when streamlit runs `app/main.py`, only the script's
 # dir (`/app/app/`) lands on sys.path, NOT the WORKDIR. Without
 # PYTHONPATH=/app, top-level package imports like `from app.ui.sidebar`,

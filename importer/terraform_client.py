@@ -335,12 +335,20 @@ def import_resource(mapping, force_refresh=False):
                      tf_address=tf_address)
             return True
 
-        # Extract just the first line for cleaner logging
-        first_line = error_output.splitlines()[0] if error_output else "Unknown Error"
+        # PUI-1B SMOKE 2026-04-28: previous code only logged the first
+        # line of error_output. With terraform's ANSI-colored output
+        # AND piped subprocess capture, the first line was often just
+        # color escape codes, leaving Cloud Logging with nothing
+        # useful for triage. Now we capture: stderr (first 2000 chars),
+        # stdout (first 1000 chars -- terraform sometimes emits errors
+        # there), AND the returncode for completeness. TF_NO_COLOR=1
+        # in the Dockerfile env strips ANSI at the source.
         log.error("import_failed",
                   resource_name=mapping['resource_name'],
                   tf_address=tf_address,
-                  error=first_line)
+                  returncode=e.returncode,
+                  stderr=(e.stderr or "")[:2000],
+                  stdout=(e.stdout or "")[:1000])
         return False
 
 
