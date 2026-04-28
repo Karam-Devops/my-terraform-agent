@@ -87,6 +87,32 @@ class DriftReport:
     inventory_errors: List[str] = field(default_factory=list)
     duration_s: float = 0.0
 
+    # D-4 fix (2026-04-28): expose the per-bucket counts as properties
+    # so callers can write `report.compliant_count` (the natural name)
+    # instead of `len(report.compliant)`. Pre-fix the *_count names
+    # only existed in the as_fields() dict, so every operator hitting
+    # the obvious accessor (we hit this twice during SMOKE 4) got an
+    # AttributeError. Properties mirror the dict keys exactly.
+    @property
+    def drifted_count(self) -> int:
+        """Number of state resources that drifted from cloud."""
+        return len(self.drifted)
+
+    @property
+    def compliant_count(self) -> int:
+        """Number of state resources whose cloud values match .tf."""
+        return len(self.compliant)
+
+    @property
+    def unmanaged_count(self) -> int:
+        """Number of cloud resources NOT in state (CG-1 metric)."""
+        return len(self.unmanaged)
+
+    @property
+    def inventory_error_count(self) -> int:
+        """Number of asset types that failed enumeration."""
+        return len(self.inventory_errors)
+
     @property
     def total_in_state(self) -> int:
         """Resources tracked by Terraform (drifted + compliant)."""

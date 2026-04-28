@@ -174,5 +174,68 @@ class DriftReportAsFieldsTests(unittest.TestCase):
         self.assertEqual(d["exit_code"], 1)
 
 
+class DriftReportCountPropertiesTests(unittest.TestCase):
+    """D-4 fix (2026-04-28): the *_count names exist as @property
+    accessors on DriftReport, mirroring the as_fields() dict keys.
+
+    Pre-fix, callers reaching for the natural names
+    (``report.compliant_count``, ``report.unmanaged_count``) hit
+    AttributeError. The only escape hatch was either ``len(report.X)``
+    or ``report.as_fields()["X_count"]`` -- both unintuitive. Tests
+    below pin all four count properties so a regression that drops
+    them would be caught immediately.
+    """
+
+    def _make(self, drifted=0, compliant=0, unmanaged=0, errors=0) -> DriftReport:
+        return DriftReport(
+            project_id="dev-proj-470211",
+            drifted=[_state(f"d{i}") for i in range(drifted)],
+            compliant=[_state(f"c{i}") for i in range(compliant)],
+            unmanaged=[
+                _cloud(f"u{i}", "google_storage_bucket")
+                for i in range(unmanaged)
+            ],
+            inventory_errors=[f"err{i}" for i in range(errors)],
+        )
+
+    def test_drifted_count_matches_list_length(self):
+        r = self._make(drifted=3)
+        self.assertEqual(r.drifted_count, 3)
+        self.assertEqual(r.drifted_count, len(r.drifted))
+
+    def test_compliant_count_matches_list_length(self):
+        r = self._make(compliant=12)
+        self.assertEqual(r.compliant_count, 12)
+        self.assertEqual(r.compliant_count, len(r.compliant))
+
+    def test_unmanaged_count_matches_list_length(self):
+        r = self._make(unmanaged=68)
+        self.assertEqual(r.unmanaged_count, 68)
+        self.assertEqual(r.unmanaged_count, len(r.unmanaged))
+
+    def test_inventory_error_count_matches_list_length(self):
+        r = self._make(errors=2)
+        self.assertEqual(r.inventory_error_count, 2)
+        self.assertEqual(r.inventory_error_count, len(r.inventory_errors))
+
+    def test_all_counts_zero_on_empty_report(self):
+        r = self._make()
+        self.assertEqual(r.drifted_count, 0)
+        self.assertEqual(r.compliant_count, 0)
+        self.assertEqual(r.unmanaged_count, 0)
+        self.assertEqual(r.inventory_error_count, 0)
+
+    def test_count_properties_match_as_fields_dict(self):
+        """The whole point of these properties: parity with the dict
+        keys so callers can use either accessor pattern interchangeably.
+        """
+        r = self._make(drifted=1, compliant=12, unmanaged=68, errors=2)
+        d = r.as_fields()
+        self.assertEqual(r.drifted_count, d["drifted_count"])
+        self.assertEqual(r.compliant_count, d["compliant_count"])
+        self.assertEqual(r.unmanaged_count, d["unmanaged_count"])
+        self.assertEqual(r.inventory_error_count, d["inventory_error_count"])
+
+
 if __name__ == "__main__":
     unittest.main()

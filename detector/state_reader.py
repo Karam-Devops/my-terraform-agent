@@ -23,7 +23,34 @@ class ManagedResource:
 
     @property
     def project_id(self) -> Optional[str]:
-        return self.attributes.get("project")
+        # Most GCP types store the project under a top-level `project`
+        # attribute in state. Cheap happy-path lookup first.
+        proj = self.attributes.get("project")
+        if proj:
+            return proj
+        # D-3 fix (2026-04-28): some types don't have a top-level
+        # `project` -- it's encoded in a parent URN instead. The known
+        # case is google_kms_crypto_key, where `key_ring` is
+        # `projects/<P>/locations/<L>/keyRings/<K>` and the canonical
+        # `id` is `projects/<P>/locations/<L>/keyRings/<K>/cryptoKeys/<X>`.
+        # Pre-fix, the detector printed
+        #   "⚠️  google_kms_crypto_key.poc_key has no 'project'
+        #    attribute in state. Skipping."
+        # then skipped the describe -> resource showed up as
+        # "missing snapshot" -> downstream a cosmetic in-sync display
+        # via the drift-stub path (drift-stub types report has_drift
+        # = False even with a missing snapshot, masking the noise).
+        # Cosmetic in the report, but each missed snapshot also fires
+        # a LOW `cloud_snapshot_missing` finding in the Policy stage.
+        # Extracting from `id` resolves both: describe call succeeds,
+        # the LOW finding goes away.
+        rid = self.attributes.get("id", "")
+        if isinstance(rid, str) and rid.startswith("projects/"):
+            parts = rid.split("/", 2)
+            # parts == ["projects", "<P>", "<rest-of-path>"]
+            if len(parts) >= 2 and parts[1]:
+                return parts[1]
+        return None
 
     @property
     def location(self) -> Optional[str]:
