@@ -61,9 +61,23 @@ _log = get_logger(__name__)
 # SDK client singletons (lazy-initialised; ADC via Cloud Run metadata)
 # ----------------------------------------------------------------------
 
+# All clients lazy-initialised (ADC via Cloud Run metadata server).
 _storage_client = None
 _compute_instances_client = None
+_compute_disks_client = None
+_compute_firewalls_client = None
+_compute_networks_client = None
+_compute_subnetworks_client = None
+_compute_addresses_client = None
+_compute_global_addresses_client = None
+_compute_instance_templates_client = None
 _container_clusters_client = None
+_kms_client = None
+_pubsub_publisher_client = None
+_pubsub_subscriber_client = None
+_iam_client = None
+_run_services_client = None
+_sql_admin_client = None  # googleapiclient discovery (no first-class SDK)
 
 
 def _get_storage_client():
@@ -82,12 +96,122 @@ def _get_compute_instances_client():
     return _compute_instances_client
 
 
+def _get_compute_disks_client():
+    global _compute_disks_client
+    if _compute_disks_client is None:
+        from google.cloud import compute_v1
+        _compute_disks_client = compute_v1.DisksClient()
+    return _compute_disks_client
+
+
+def _get_compute_firewalls_client():
+    global _compute_firewalls_client
+    if _compute_firewalls_client is None:
+        from google.cloud import compute_v1
+        _compute_firewalls_client = compute_v1.FirewallsClient()
+    return _compute_firewalls_client
+
+
+def _get_compute_networks_client():
+    global _compute_networks_client
+    if _compute_networks_client is None:
+        from google.cloud import compute_v1
+        _compute_networks_client = compute_v1.NetworksClient()
+    return _compute_networks_client
+
+
+def _get_compute_subnetworks_client():
+    global _compute_subnetworks_client
+    if _compute_subnetworks_client is None:
+        from google.cloud import compute_v1
+        _compute_subnetworks_client = compute_v1.SubnetworksClient()
+    return _compute_subnetworks_client
+
+
+def _get_compute_addresses_client():
+    global _compute_addresses_client
+    if _compute_addresses_client is None:
+        from google.cloud import compute_v1
+        _compute_addresses_client = compute_v1.AddressesClient()
+    return _compute_addresses_client
+
+
+def _get_compute_global_addresses_client():
+    global _compute_global_addresses_client
+    if _compute_global_addresses_client is None:
+        from google.cloud import compute_v1
+        _compute_global_addresses_client = compute_v1.GlobalAddressesClient()
+    return _compute_global_addresses_client
+
+
+def _get_compute_instance_templates_client():
+    global _compute_instance_templates_client
+    if _compute_instance_templates_client is None:
+        from google.cloud import compute_v1
+        _compute_instance_templates_client = compute_v1.InstanceTemplatesClient()
+    return _compute_instance_templates_client
+
+
 def _get_container_clusters_client():
     global _container_clusters_client
     if _container_clusters_client is None:
         from google.cloud import container_v1
         _container_clusters_client = container_v1.ClusterManagerClient()
     return _container_clusters_client
+
+
+def _get_kms_client():
+    global _kms_client
+    if _kms_client is None:
+        from google.cloud import kms_v1
+        _kms_client = kms_v1.KeyManagementServiceClient()
+    return _kms_client
+
+
+def _get_pubsub_publisher_client():
+    global _pubsub_publisher_client
+    if _pubsub_publisher_client is None:
+        from google.cloud import pubsub_v1
+        _pubsub_publisher_client = pubsub_v1.PublisherClient()
+    return _pubsub_publisher_client
+
+
+def _get_pubsub_subscriber_client():
+    global _pubsub_subscriber_client
+    if _pubsub_subscriber_client is None:
+        from google.cloud import pubsub_v1
+        _pubsub_subscriber_client = pubsub_v1.SubscriberClient()
+    return _pubsub_subscriber_client
+
+
+def _get_iam_client():
+    global _iam_client
+    if _iam_client is None:
+        from google.cloud import iam_admin_v1
+        _iam_client = iam_admin_v1.IAMClient()
+    return _iam_client
+
+
+def _get_run_services_client():
+    global _run_services_client
+    if _run_services_client is None:
+        from google.cloud import run_v2
+        _run_services_client = run_v2.ServicesClient()
+    return _run_services_client
+
+
+def _get_sql_admin_client():
+    """Cloud SQL Admin API has no first-class google-cloud-* SDK; use
+    the googleapiclient discovery-based pattern."""
+    global _sql_admin_client
+    if _sql_admin_client is None:
+        from googleapiclient.discovery import build
+        # cache_discovery=False avoids a noisy ImportError warning when
+        # oauth2client isn't installed (we use google-auth instead).
+        _sql_admin_client = build(
+            "sqladmin", "v1", cache_discovery=False,
+        )
+    return _sql_admin_client
 
 
 # ----------------------------------------------------------------------
@@ -226,6 +350,281 @@ def _describe_container_cluster(
 
 
 # ----------------------------------------------------------------------
+# PERF-T0b v2: 13 remaining handlers
+# ----------------------------------------------------------------------
+
+def _describe_compute_disk(
+    project_id: str, name: str, **extras: Any,
+) -> Optional[dict]:
+    """Compute Engine persistent disk (zonal)."""
+    zone = extras.get("zone") or extras.get("location")
+    if not zone:
+        _log.error("describe_disk_missing_zone",
+                   project_id=project_id, name=name)
+        return None
+    client = _get_compute_disks_client()
+    try:
+        disk = client.get(project=project_id, zone=zone, disk=name)
+    except gcs_exceptions.NotFound:
+        return None
+    return _proto_to_camel_dict(disk)
+
+
+def _describe_compute_firewall(
+    project_id: str, name: str, **_extras: Any,
+) -> Optional[dict]:
+    """Compute Engine firewall rule (global)."""
+    client = _get_compute_firewalls_client()
+    try:
+        fw = client.get(project=project_id, firewall=name)
+    except gcs_exceptions.NotFound:
+        return None
+    return _proto_to_camel_dict(fw)
+
+
+def _describe_compute_network(
+    project_id: str, name: str, **_extras: Any,
+) -> Optional[dict]:
+    """VPC network (global)."""
+    client = _get_compute_networks_client()
+    try:
+        net = client.get(project=project_id, network=name)
+    except gcs_exceptions.NotFound:
+        return None
+    return _proto_to_camel_dict(net)
+
+
+def _describe_compute_subnetwork(
+    project_id: str, name: str, **extras: Any,
+) -> Optional[dict]:
+    """VPC subnetwork (regional)."""
+    region = extras.get("region") or extras.get("location")
+    if not region:
+        _log.error("describe_subnetwork_missing_region",
+                   project_id=project_id, name=name)
+        return None
+    client = _get_compute_subnetworks_client()
+    try:
+        sub = client.get(
+            project=project_id, region=region, subnetwork=name,
+        )
+    except gcs_exceptions.NotFound:
+        return None
+    return _proto_to_camel_dict(sub)
+
+
+def _describe_compute_address(
+    project_id: str, name: str, **extras: Any,
+) -> Optional[dict]:
+    """Static IP address (regional OR global).
+
+    Heuristic: if region is provided -> regional client; else -> global.
+    Matches gcloud's behavior (regional addresses use --region, global
+    addresses use --global).
+    """
+    region = extras.get("region") or extras.get("location")
+    if region and region != "global":
+        client = _get_compute_addresses_client()
+        try:
+            addr = client.get(
+                project=project_id, region=region, address=name,
+            )
+        except gcs_exceptions.NotFound:
+            return None
+        return _proto_to_camel_dict(addr)
+    # Global address path
+    client = _get_compute_global_addresses_client()
+    try:
+        addr = client.get(project=project_id, address=name)
+    except gcs_exceptions.NotFound:
+        return None
+    return _proto_to_camel_dict(addr)
+
+
+def _describe_compute_instance_template(
+    project_id: str, name: str, **_extras: Any,
+) -> Optional[dict]:
+    """Compute Engine instance template (global)."""
+    client = _get_compute_instance_templates_client()
+    try:
+        tmpl = client.get(project=project_id, instance_template=name)
+    except gcs_exceptions.NotFound:
+        return None
+    return _proto_to_camel_dict(tmpl)
+
+
+def _describe_container_node_pool(
+    project_id: str, name: str, **extras: Any,
+) -> Optional[dict]:
+    """GKE node pool (nested under a cluster).
+
+    Requires ``location`` AND ``cluster`` in extras.
+    """
+    location = extras.get("location") or extras.get("zone") or extras.get("region")
+    cluster = extras.get("cluster")
+    if not location or not cluster:
+        _log.error(
+            "describe_node_pool_missing_parent",
+            project_id=project_id, name=name,
+            location=location, cluster=cluster,
+        )
+        return None
+    client = _get_container_clusters_client()
+    np_path = (
+        f"projects/{project_id}/locations/{location}/clusters/"
+        f"{cluster}/nodePools/{name}"
+    )
+    try:
+        np = client.get_node_pool(name=np_path)
+    except gcs_exceptions.NotFound:
+        return None
+    return _proto_to_camel_dict(np)
+
+
+def _describe_kms_key_ring(
+    project_id: str, name: str, **extras: Any,
+) -> Optional[dict]:
+    """KMS key ring (regional).
+
+    Requires ``location`` in extras.
+    """
+    location = extras.get("location") or extras.get("region")
+    if not location:
+        _log.error("describe_keyring_missing_location",
+                   project_id=project_id, name=name)
+        return None
+    client = _get_kms_client()
+    kr_path = (
+        f"projects/{project_id}/locations/{location}/keyRings/{name}"
+    )
+    try:
+        kr = client.get_key_ring(name=kr_path)
+    except gcs_exceptions.NotFound:
+        return None
+    return _proto_to_camel_dict(kr)
+
+
+def _describe_kms_crypto_key(
+    project_id: str, name: str, **extras: Any,
+) -> Optional[dict]:
+    """KMS crypto key (nested under a key ring).
+
+    Requires ``location`` AND ``keyring`` in extras.
+    """
+    location = extras.get("location") or extras.get("region")
+    keyring = extras.get("keyring") or extras.get("key_ring")
+    if not location or not keyring:
+        _log.error(
+            "describe_crypto_key_missing_parent",
+            project_id=project_id, name=name,
+            location=location, keyring=keyring,
+        )
+        return None
+    client = _get_kms_client()
+    ck_path = (
+        f"projects/{project_id}/locations/{location}/keyRings/"
+        f"{keyring}/cryptoKeys/{name}"
+    )
+    try:
+        ck = client.get_crypto_key(name=ck_path)
+    except gcs_exceptions.NotFound:
+        return None
+    return _proto_to_camel_dict(ck)
+
+
+def _describe_pubsub_topic(
+    project_id: str, name: str, **_extras: Any,
+) -> Optional[dict]:
+    """Pub/Sub topic (project-scoped, no location)."""
+    client = _get_pubsub_publisher_client()
+    topic_path = f"projects/{project_id}/topics/{name}"
+    try:
+        topic = client.get_topic(request={"topic": topic_path})
+    except gcs_exceptions.NotFound:
+        return None
+    return _proto_to_camel_dict(topic)
+
+
+def _describe_pubsub_subscription(
+    project_id: str, name: str, **_extras: Any,
+) -> Optional[dict]:
+    """Pub/Sub subscription (project-scoped)."""
+    client = _get_pubsub_subscriber_client()
+    sub_path = f"projects/{project_id}/subscriptions/{name}"
+    try:
+        sub = client.get_subscription(request={"subscription": sub_path})
+    except gcs_exceptions.NotFound:
+        return None
+    return _proto_to_camel_dict(sub)
+
+
+def _describe_sql_database_instance(
+    project_id: str, name: str, **_extras: Any,
+) -> Optional[dict]:
+    """Cloud SQL instance.
+
+    Uses the discovery-based googleapiclient (no first-class
+    google-cloud-sql-admin SDK exists). Returns the dict directly --
+    googleapiclient already gives camelCase JSON.
+    """
+    client = _get_sql_admin_client()
+    try:
+        return client.instances().get(
+            project=project_id, instance=name,
+        ).execute()
+    except Exception as e:
+        # googleapiclient raises HttpError on 404; treat any failure
+        # as not-found here (genuine errors propagate to the caller's
+        # except in get_resource_details_json).
+        if "404" in str(e) or "Not Found" in str(e):
+            return None
+        raise
+
+
+def _describe_service_account(
+    project_id: str, name: str, **_extras: Any,
+) -> Optional[dict]:
+    """IAM Service Account.
+
+    `name` should be the SA email (e.g. "poc-sa@p.iam.gserviceaccount.com").
+    The SA URN format is `projects/<P>/serviceAccounts/<email>`.
+    """
+    client = _get_iam_client()
+    sa_path = f"projects/{project_id}/serviceAccounts/{name}"
+    try:
+        from google.cloud import iam_admin_v1
+        sa = client.get_service_account(
+            request={"name": sa_path},
+        )
+    except gcs_exceptions.NotFound:
+        return None
+    return _proto_to_camel_dict(sa)
+
+
+def _describe_cloud_run_v2_service(
+    project_id: str, name: str, **extras: Any,
+) -> Optional[dict]:
+    """Cloud Run v2 service (regional).
+
+    Requires ``location`` in extras.
+    """
+    location = extras.get("location") or extras.get("region")
+    if not location:
+        _log.error("describe_cloud_run_missing_location",
+                   project_id=project_id, name=name)
+        return None
+    client = _get_run_services_client()
+    svc_path = (
+        f"projects/{project_id}/locations/{location}/services/{name}"
+    )
+    try:
+        svc = client.get_service(name=svc_path)
+    except gcs_exceptions.NotFound:
+        return None
+    return _proto_to_camel_dict(svc)
+
+
+# ----------------------------------------------------------------------
 # Dispatch table
 # ----------------------------------------------------------------------
 
@@ -241,9 +640,25 @@ def _describe_container_cluster(
 # pubsub_subscription, sql_database_instance, service_account,
 # cloud_run_v2_service).
 _HANDLERS: dict = {
+    # PERF-T0b v1 (verified end-to-end via PUI-1B smoke 2026-04-28)
     "google_storage_bucket": _describe_storage_bucket,
     "google_compute_instance": _describe_compute_instance,
     "google_container_cluster": _describe_container_cluster,
+    # PERF-T0b v2 (mass-produced from the v1 pattern)
+    "google_compute_disk": _describe_compute_disk,
+    "google_compute_firewall": _describe_compute_firewall,
+    "google_compute_network": _describe_compute_network,
+    "google_compute_subnetwork": _describe_compute_subnetwork,
+    "google_compute_address": _describe_compute_address,
+    "google_compute_instance_template": _describe_compute_instance_template,
+    "google_container_node_pool": _describe_container_node_pool,
+    "google_kms_key_ring": _describe_kms_key_ring,
+    "google_kms_crypto_key": _describe_kms_crypto_key,
+    "google_pubsub_topic": _describe_pubsub_topic,
+    "google_pubsub_subscription": _describe_pubsub_subscription,
+    "google_sql_database_instance": _describe_sql_database_instance,
+    "google_service_account": _describe_service_account,
+    "google_cloud_run_v2_service": _describe_cloud_run_v2_service,
 }
 
 

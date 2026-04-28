@@ -59,7 +59,14 @@ def _install_google_cloud_asset_stub() -> None:
 
     if "google.cloud.compute_v1" not in sys.modules:
         compute_stub = types.ModuleType("google.cloud.compute_v1")
-        compute_stub.InstancesClient = MagicMock(name="compute.InstancesClient")
+        # All compute clients we use (v1 + v2 added in PERF-T0b v2)
+        for cls_name in (
+            "InstancesClient", "DisksClient", "FirewallsClient",
+            "NetworksClient", "SubnetworksClient", "AddressesClient",
+            "GlobalAddressesClient", "InstanceTemplatesClient",
+        ):
+            setattr(compute_stub, cls_name,
+                    MagicMock(name=f"compute.{cls_name}"))
         sys.modules["google.cloud.compute_v1"] = compute_stub
 
     if "google.cloud.container_v1" not in sys.modules:
@@ -68,6 +75,38 @@ def _install_google_cloud_asset_stub() -> None:
             name="container.ClusterManagerClient",
         )
         sys.modules["google.cloud.container_v1"] = container_stub
+
+    # PERF-T0b v2 SDK stubs
+    if "google.cloud.kms_v1" not in sys.modules:
+        kms_stub = types.ModuleType("google.cloud.kms_v1")
+        kms_stub.KeyManagementServiceClient = MagicMock(
+            name="kms.KeyManagementServiceClient",
+        )
+        sys.modules["google.cloud.kms_v1"] = kms_stub
+
+    if "google.cloud.pubsub_v1" not in sys.modules:
+        pubsub_stub = types.ModuleType("google.cloud.pubsub_v1")
+        pubsub_stub.PublisherClient = MagicMock(name="pubsub.PublisherClient")
+        pubsub_stub.SubscriberClient = MagicMock(name="pubsub.SubscriberClient")
+        sys.modules["google.cloud.pubsub_v1"] = pubsub_stub
+
+    if "google.cloud.iam_admin_v1" not in sys.modules:
+        iam_stub = types.ModuleType("google.cloud.iam_admin_v1")
+        iam_stub.IAMClient = MagicMock(name="iam.IAMClient")
+        sys.modules["google.cloud.iam_admin_v1"] = iam_stub
+
+    if "google.cloud.run_v2" not in sys.modules:
+        run_stub = types.ModuleType("google.cloud.run_v2")
+        run_stub.ServicesClient = MagicMock(name="run.ServicesClient")
+        sys.modules["google.cloud.run_v2"] = run_stub
+
+    # googleapiclient (for SQL Admin -- no first-class google-cloud-sql SDK)
+    if "googleapiclient" not in sys.modules:
+        sys.modules["googleapiclient"] = types.ModuleType("googleapiclient")
+    if "googleapiclient.discovery" not in sys.modules:
+        disc_stub = types.ModuleType("googleapiclient.discovery")
+        disc_stub.build = MagicMock(name="googleapiclient.discovery.build")
+        sys.modules["googleapiclient.discovery"] = disc_stub
 
     # google.api_core.exceptions stub (in case common/tests/conftest.py
     # didn't run first -- pytest's collection order can vary).

@@ -76,18 +76,17 @@ class DispatchTests(unittest.TestCase):
         )
 
     def test_handler_returns_none_for_unregistered(self):
-        """Types without a per-service SDK handler yet fall back to
-        asset_v1 path in gcp_client. None signals 'no handler'."""
+        """Types without a per-service SDK handler fall back to
+        asset_v1 path in gcp_client. None signals 'no handler'.
+        Uses a fake tf_type that intentionally doesn't exist
+        (PERF-T0b v2 covers all real ones)."""
         self.assertIsNone(
-            router.get_handler("google_kms_crypto_key"),
-        )
-        self.assertIsNone(
-            router.get_handler("google_pubsub_topic"),
+            router.get_handler("google_fake_unregistered_type"),
         )
 
     def test_describe_returns_none_for_unregistered(self):
         result = router.describe(
-            "google_kms_crypto_key", "dev-proj-470211", "key-x",
+            "google_fake_unregistered_type", "dev-proj-470211", "x",
         )
         self.assertIsNone(result)
 
@@ -239,6 +238,143 @@ class ContainerClusterHandlerTests(unittest.TestCase):
         self.assertEqual(
             call_kwargs["name"],
             "projects/dev-proj-470211/locations/us-central1/clusters/cluster-a",
+        )
+
+
+class FullDispatchCoverageTests(unittest.TestCase):
+    """PERF-T0b v2: every tf_type in ASSET_TO_TERRAFORM_MAP must have
+    a per-service describe handler.
+
+    Without this pin, future contributors adding a new asset_type
+    would silently fall back to the asset_v1 sparse path -- resulting
+    in incomplete HCL generation. The test enforces 1:1 coverage so
+    the regression we hit during PUI-1B SMOKE 2026-04-28 can't recur
+    silently.
+    """
+
+    def test_every_supported_tf_type_has_a_handler(self):
+        from importer import config
+        all_tf_types = set(config.ASSET_TO_TERRAFORM_MAP.values())
+        handler_types = set(router._HANDLERS.keys())
+        missing = all_tf_types - handler_types
+        self.assertEqual(
+            missing, set(),
+            f"Per-service describe handler missing for "
+            f"{len(missing)} type(s): {sorted(missing)}. "
+            f"Add a handler in importer/_describe_router.py and "
+            f"register it in _HANDLERS dict.",
+        )
+
+    def test_handler_dict_has_no_orphans(self):
+        """Reverse check: every handler must map to a real tf_type
+        the importer actually supports. Catches typos in handler
+        registration."""
+        from importer import config
+        all_tf_types = set(config.ASSET_TO_TERRAFORM_MAP.values())
+        handler_types = set(router._HANDLERS.keys())
+        orphans = handler_types - all_tf_types
+        self.assertEqual(
+            orphans, set(),
+            f"Handler registered for unknown tf_type(s): {sorted(orphans)}. "
+            f"Either remove the handler OR add the tf_type to "
+            f"ASSET_TO_TERRAFORM_MAP.",
+        )
+
+
+class ComputeFamilyHandlerTests(unittest.TestCase):
+    """Spot-check a few of the v2 compute handlers to confirm the
+    pattern. Full per-handler tests aren't necessary -- they all
+    follow the same 'lazy client + get() + proto-to-dict' shape, and
+    the FullDispatchCoverageTests above pin registration."""
+
+    def test_disk_requires_zone(self):
+        with patch.object(router, "_get_compute_disks_client") as mc:
+            result = router._describe_compute_disk("p", "disk-a")
+            self.assertIsNone(result)
+            mc.return_value.get.assert_not_called()
+
+    def test_firewall_global_no_extras_required(self):
+        """Firewalls are global (no zone/region required)."""
+        mock_client = MagicMock()
+        mock_fw = MagicMock()
+        mock_fw._pb = MagicMock()
+        mock_client.get.return_value = mock_fw
+        with patch.object(router, "_get_compute_firewalls_client",
+                          return_value=mock_client), \
+             patch.object(router, "MessageToDict",
+                          return_value={"name": "fw-a"}):
+            result = router._describe_compute_firewall("p", "fw-a")
+        self.assertIsNotNone(result)
+        # Confirm SDK called with project + firewall (no zone/region kwarg)
+        call_kwargs = mock_client.get.call_args.kwargs
+        self.assertEqual(call_kwargs["project"], "p")
+        self.assertEqual(call_kwargs["firewall"], "fw-a")
+        self.assertNotIn("zone", call_kwargs)
+        self.assertNotIn("region", call_kwargs)
+
+
+class NestedResourceHandlerTests(unittest.TestCase):
+    """Pin the parent-identifier requirement for nested resources
+    (node_pool requires cluster, crypto_key requires keyring)."""
+
+    def test_node_pool_requires_cluster_and_location(self):
+        with patch.object(router, "_get_container_clusters_client") as mc:
+            # No cluster -> None
+            self.assertIsNone(router._describe_container_node_pool(
+                "p", "pool-a", location="us-central1",
+            ))
+            # No location -> None
+            self.assertIsNone(router._describe_container_node_pool(
+                "p", "pool-a", cluster="cluster-x",
+            ))
+            mc.return_value.get_node_pool.assert_not_called()
+
+    def test_crypto_key_requires_keyring_and_location(self):
+        with patch.object(router, "_get_kms_client") as mc:
+            self.assertIsNone(router._describe_kms_crypto_key(
+                "p", "key-a", location="us-central1",
+            ))
+            self.assertIsNone(router._describe_kms_crypto_key(
+                "p", "key-a", keyring="kr-x",
+            ))
+            mc.return_value.get_crypto_key.assert_not_called()
+
+
+class PubSubHandlerTests(unittest.TestCase):
+    """Pub/Sub handlers use a request= dict (different SDK shape from
+    compute's positional kwargs); pin the path construction."""
+
+    def test_topic_path_construction(self):
+        mock_client = MagicMock()
+        mock_topic = MagicMock()
+        mock_topic._pb = MagicMock()
+        mock_client.get_topic.return_value = mock_topic
+        with patch.object(router, "_get_pubsub_publisher_client",
+                          return_value=mock_client), \
+             patch.object(router, "MessageToDict",
+                          return_value={"name": "topic-a"}):
+            router._describe_pubsub_topic("dev-proj-470211", "topic-a")
+        request = mock_client.get_topic.call_args.kwargs["request"]
+        self.assertEqual(
+            request["topic"], "projects/dev-proj-470211/topics/topic-a",
+        )
+
+    def test_subscription_path_construction(self):
+        mock_client = MagicMock()
+        mock_sub = MagicMock()
+        mock_sub._pb = MagicMock()
+        mock_client.get_subscription.return_value = mock_sub
+        with patch.object(router, "_get_pubsub_subscriber_client",
+                          return_value=mock_client), \
+             patch.object(router, "MessageToDict",
+                          return_value={"name": "sub-a"}):
+            router._describe_pubsub_subscription(
+                "dev-proj-470211", "sub-a",
+            )
+        request = mock_client.get_subscription.call_args.kwargs["request"]
+        self.assertEqual(
+            request["subscription"],
+            "projects/dev-proj-470211/subscriptions/sub-a",
         )
 
 
