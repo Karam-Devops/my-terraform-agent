@@ -369,4 +369,21 @@ def get_resource_state_as_json(
     state = get_resource_state(project_id, asset_type, asset_name)
     if state is None:
         return None
-    return json.dumps(state, indent=2)
+    serialized = json.dumps(state, indent=2)
+    # PUI-1B SMOKE 2026-04-28: regression triage diagnostic.
+    # CLI mode generated complete HCL; Cloud Run + asset_v1 SDK
+    # generated HCL missing required fields (e.g. `location` for
+    # google_storage_bucket). Hypothesis: list_assets's content_type=
+    # RESOURCE returns a sparser dict than `gcloud <service> describe`.
+    # Logging the field list + size lets us verify by comparing to
+    # the OLD subprocess output captured during SMOKE 4 (CLI logs).
+    _log.info(
+        "describe_state_diagnostic",
+        project_id=project_id,
+        asset_type=asset_type,
+        asset_name=asset_name,
+        field_count=len(state) if isinstance(state, dict) else 0,
+        field_keys=sorted(state.keys())[:50] if isinstance(state, dict) else [],
+        payload_bytes=len(serialized),
+    )
+    return serialized
