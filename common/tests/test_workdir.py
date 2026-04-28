@@ -25,6 +25,9 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
+from common import workdir as _workdir
+from unittest.mock import patch
+
 from common import workdir
 
 
@@ -242,6 +245,75 @@ class SeedProvidersStubTests(unittest.TestCase):
         expected = os.path.join(self.tmp, "provider_versions",
                                 "_providers_seed.tf")
         self.assertEqual(path, expected)
+
+
+class ResolveBaseEnvVarTests(unittest.TestCase):
+    """PUI-1B SMOKE 2026-04-28 regression: when MTAGENT_IMPORT_BASE
+    is set (PSA-4 / Cloud Run mode), each call must re-read the env
+    var. The OLD process-level cache returned the FIRST request's
+    path forever, so per-request UUID rotation broke -- engine ran
+    in stale workdir while PSA-4 hydrated/persisted in the new one.
+
+    These tests pin the new caching policy:
+      * env var SET   -> no cache; resolves fresh per call
+      * env var UNSET -> cache (CLI / dev path; perf optimization)
+    """
+
+    def setUp(self):
+        # Clear any cached state from a prior test in the same session.
+        _workdir.reset_cache()
+
+    def tearDown(self):
+        _workdir.reset_cache()
+
+    def test_env_var_change_between_calls_is_seen_immediately(self):
+        """The bug: PSA-4 sets MTAGENT_IMPORT_BASE per request, expecting
+        each request's resolve to see the new value. Pre-fix, the
+        process cache returned the FIRST value forever.
+
+        Uses tempfile-based absolute paths so the test works on both
+        POSIX (/tmp/...) and Windows (C:\\Users\\...\\AppData\\Local\\Temp\\...)
+        -- the resolved value differs per OS but the contract (NEW value
+        returned on every call when env var changes) is universal.
+        """
+        with tempfile.TemporaryDirectory() as tmp_a, \
+                tempfile.TemporaryDirectory() as tmp_b:
+            with patch.dict(os.environ,
+                            {"MTAGENT_IMPORT_BASE": tmp_a}):
+                first = _workdir._resolve_base()
+            self.assertEqual(first, tmp_a)
+
+            # Second request, different UUID-scoped path.
+            with patch.dict(os.environ,
+                            {"MTAGENT_IMPORT_BASE": tmp_b}):
+                second = _workdir._resolve_base()
+            self.assertEqual(
+                second, tmp_b,
+                "env var change must propagate -- otherwise PSA-4's "
+                "per-request UUID rotation breaks the engine workdir",
+            )
+
+    def test_env_var_unset_uses_cached_default(self):
+        """CLI / dev path: no env var, the repo-relative default is
+        cached for perf (resolve_project_workdir runs many times per
+        engine call)."""
+        env = {k: v for k, v in os.environ.items()
+               if k != "MTAGENT_IMPORT_BASE"}
+        with patch.dict(os.environ, env, clear=True):
+            first = _workdir._resolve_base()
+            second = _workdir._resolve_base()
+        self.assertEqual(first, second)
+        # Both should be a real path under repo root (./imported/)
+        self.assertTrue(first.endswith("imported"),
+                        f"unexpected default base: {first!r}")
+
+    def test_env_var_relative_resolves_against_repo_root(self):
+        """Relative env override resolves to repo-root/<override>."""
+        with patch.dict(os.environ,
+                        {"MTAGENT_IMPORT_BASE": "custom_imported"}):
+            result = _workdir._resolve_base()
+        self.assertTrue(result.endswith("custom_imported"))
+        self.assertTrue(os.path.isabs(result))
 
 
 if __name__ == "__main__":

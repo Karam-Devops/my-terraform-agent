@@ -132,27 +132,46 @@ def _repo_root() -> str:
 
 
 def _resolve_base() -> str:
-    """Resolve and cache the import base directory.
+    """Resolve the import base directory.
 
     Honours ``$MTAGENT_IMPORT_BASE`` if set; absolute values are used
     as-is (Cloud Run pattern), relative values resolve against repo root
     for predictability.
+
+    Caching policy (PUI-1B SMOKE 2026-04-28 fix):
+
+      * Env var SET: re-read on EVERY call (no cache). Rationale --
+        PSA-4 middleware sets ``MTAGENT_IMPORT_BASE`` to a per-request
+        UUID-scoped path (``/tmp/imported/<uuid>/``), and changes the
+        value on each request. A process-level cache here would
+        return the FIRST request's path forever, even after subsequent
+        requests rotated the UUID. Surfaced as: terraform_init runs
+        in a stale workdir while PSA-4 hydrates / persists in the
+        new one -- two different paths, broken state.
+
+      * Env var UNSET: cache (CLI / dev). Operators run from a fixed
+        repo-relative path (``./imported/``); recomputing on every
+        call is wasted work.
+
+    The ``reset_cache()`` test helper still works (clears whatever's
+    cached for the env-unset path).
     """
     global _cached_base
-    if _cached_base:
-        return _cached_base
-
     env_override = os.environ.get("MTAGENT_IMPORT_BASE")
+
+    # SaaS mode: env var present -> resolve fresh every call. Skip
+    # the cache entirely so per-request UUID rotation works.
     if env_override:
         if os.path.isabs(env_override):
-            _cached_base = env_override
-        else:
-            _cached_base = os.path.normpath(
-                os.path.join(_repo_root(), env_override)
-            )
-    else:
-        _cached_base = os.path.join(_repo_root(), _DEFAULT_BASE_RELATIVE)
+            return env_override
+        return os.path.normpath(
+            os.path.join(_repo_root(), env_override)
+        )
 
+    # CLI / dev mode: env var unset -> cache the repo-relative default.
+    if _cached_base:
+        return _cached_base
+    _cached_base = os.path.join(_repo_root(), _DEFAULT_BASE_RELATIVE)
     return _cached_base
 
 
