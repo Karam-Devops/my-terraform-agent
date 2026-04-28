@@ -55,7 +55,8 @@ class ManagedResource:
     @property
     def location(self) -> Optional[str]:
         # The "location" concept lives under different state-attribute
-        # names depending on the resource type. Three buckets:
+        # names depending on the resource type. Three top-level buckets
+        # plus a URN-extraction fallback:
         #   * "zone"     — google_compute_instance, google_compute_disk
         #                  (anything zonal)
         #   * "location" — google_storage_bucket, google_kms_key_ring,
@@ -63,20 +64,71 @@ class ManagedResource:
         #                  region-or-zone-agnostic types)
         #   * "region"   — google_compute_subnetwork, google_compute_address
         #                  (regional-only types)
+        #   * URN extract — google_kms_crypto_key in particular doesn't
+        #                  have ANY top-level location attribute. Its
+        #                  location lives inside `key_ring` (the parent
+        #                  URN: `projects/<P>/locations/<L>/keyRings/<K>`)
+        #                  AND inside `id` (`projects/<P>/locations/<L>/
+        #                  keyRings/<K>/cryptoKeys/<X>`). Parse either.
         #
-        # D-1 fix (2026-04-28): the prior code only checked the first
-        # two. Subnetworks left `location` returning None, which made
-        # `gcp_client.get_resource_details_json` skip the --region flag
-        # at describe time, and gcloud rejected the call as
-        # "Underspecified resource ... Specify the [--region] flag."
-        # The detector then treated the failed describe as
-        # "resource may have been deleted" and reported the resource
-        # as "in sync" downstream -- a silent drift mask.
-        return (
+        # D-1 fix (2026-04-28): added `region` to the fallback chain
+        # for google_compute_subnetwork.
+        # D-3 round 2 (same day, after smoke surfaced gcloud "Failed
+        # to find attribute [location]" on crypto_key describe):
+        # added URN-extraction fallback so crypto_key can populate
+        # the --location flag from its parent URN.
+        direct = (
             self.attributes.get("zone")
             or self.attributes.get("location")
             or self.attributes.get("region")
         )
+        if direct:
+            return direct
+        # URN fallback: pattern is `projects/<P>/locations/<L>/...`.
+        # `key_ring` is the most specific parent URN (no extra path
+        # segments after the location part to introduce ambiguity);
+        # try it first, then fall back to `id`.
+        for attr in ("key_ring", "id"):
+            urn = self.attributes.get(attr, "")
+            if isinstance(urn, str):
+                parts = urn.split("/")
+                # parts == ["projects", "<P>", "locations", "<L>", ...]
+                if (len(parts) >= 4
+                        and parts[0] == "projects"
+                        and parts[2] == "locations"
+                        and parts[3]):
+                    return parts[3]
+        return None
+
+    @property
+    def keyring(self) -> Optional[str]:
+        """Parent keyring name for google_kms_crypto_key.
+
+        State's `key_ring` attribute is the full URN
+        (`projects/<P>/locations/<L>/keyRings/<K>`), but
+        ``gcloud kms keys describe`` expects just the keyring name
+        (e.g. ``poc-keyring``) via the ``--keyring`` flag.
+
+        D-3 round 2 (2026-04-28): the detector's ``_build_mapping``
+        wasn't surfacing the keyring parent at all. ``gcp_client``
+        already has the wiring to thread ``mapping["keyring"]`` into
+        the ``--keyring`` flag (see ``importer/gcp_client.py`` line
+        ~218); we just needed to populate the mapping key from state.
+        Type-scoped to crypto_key -- other types don't use the
+        keyring concept.
+        """
+        if self.tf_type != "google_kms_crypto_key":
+            return None
+        key_ring = self.attributes.get("key_ring", "")
+        if isinstance(key_ring, str):
+            parts = key_ring.split("/")
+            # parts == ["projects", "<P>", "locations", "<L>",
+            #          "keyRings", "<K>"]
+            if (len(parts) >= 6
+                    and parts[4] == "keyRings"
+                    and parts[5]):
+                return parts[5]
+        return None
 
     @property
     def resource_name(self) -> Optional[str]:

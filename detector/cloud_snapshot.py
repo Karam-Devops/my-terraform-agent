@@ -30,13 +30,25 @@ def _build_mapping(resource: ManagedResource) -> Optional[dict]:
         print(f"⚠️  {resource.tf_address} has no 'project' attribute in state. Skipping.")
         return None
 
-    return {
+    mapping = {
         "tf_type": resource.tf_type,
         "hcl_name": resource.hcl_name,
         "resource_name": resource.resource_name,
         "project_id": resource.project_id,
         "location": resource.location,
     }
+    # D-3 round 2 (2026-04-28): surface parent identifiers for nested
+    # resource types so importer.gcp_client can wire them into the
+    # right --<parent>-flag at describe time. Pattern mirrors how
+    # importer/run.py extracts these from the asset URN during the
+    # importer's inventory phase. Only crypto_key needs it today;
+    # other nested types (notably google_container_node_pool) aren't
+    # drift-aware so the detector doesn't reach this path for them
+    # (would need a parallel `cluster` extraction here when that
+    # changes).
+    if resource.keyring:
+        mapping["keyring"] = resource.keyring
+    return mapping
 
 
 def _fetch_one(resource: ManagedResource) -> tuple:
