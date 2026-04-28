@@ -1,0 +1,81 @@
+# mtagent .dockerignore
+#
+# What goes IN the image (kept):
+#   - All Python source (importer/, translator/, detector/, policy/, common/, app/)
+#   - provider_versions/ (canonical lock file + providers seed for D-6)
+#   - importer/golden_examples/*.tf (CC-9 few-shot reference)
+#   - importer/post_llm_overrides.json
+#   - policy/policies/*.rego
+#   - requirements.txt
+#   - Dockerfile, cloudbuild.yaml (informational; not used at runtime)
+#
+# What's EXCLUDED (filtered):
+
+# --- Python build / cache artifacts ---
+__pycache__
+*.pyc
+*.pyo
+*.pyd
+.pytest_cache
+.mypy_cache
+.ruff_cache
+*.egg-info
+build/
+dist/
+
+# --- Virtual environment (we install fresh in the image) ---
+.venv/
+venv/
+env/
+
+# --- Per-project workdirs (runtime artifacts; recreated per request) ---
+imported/
+generated_iac/
+
+# --- Schema cache (regenerated on first KB bootstrap; D-6 fix) ---
+.terraform_schema_cache.json
+.terraform/
+.terraform.lock.hcl
+
+# --- IDE / editor state ---
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+
+# --- Git ---
+.git/
+.gitignore
+.gitattributes
+
+# --- Local env files (NEVER bake credentials into the image) ---
+.env
+.env.*
+*.key
+*.pem
+service-account-*.json
+credentials.json
+
+# --- Documentation (informational; not needed in runtime image) ---
+docs/
+README.md
+*.md
+
+# --- Test artifacts ---
+.coverage
+htmlcov/
+.tox/
+
+# --- KB cache (auto-bootstrapped at runtime per D-6) ---
+importer/knowledge_base/*.json
+
+# --- Translator diagnostics (off by default in SaaS via env var) ---
+**/_diagnostics/
+
+# --- CG-7 quarantine (per-tenant, runtime-only) ---
+**/_quarantine/
+
+# --- Errors.txt (developer scratchpad; not shipped) ---
+Errors.txt
+instructions.txt.txt
