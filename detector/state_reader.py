@@ -27,8 +27,29 @@ class ManagedResource:
 
     @property
     def location(self) -> Optional[str]:
-        # google_compute_instance uses "zone"; google_storage_bucket uses "location"
-        return self.attributes.get("zone") or self.attributes.get("location")
+        # The "location" concept lives under different state-attribute
+        # names depending on the resource type. Three buckets:
+        #   * "zone"     — google_compute_instance, google_compute_disk
+        #                  (anything zonal)
+        #   * "location" — google_storage_bucket, google_kms_key_ring,
+        #                  google_kms_crypto_key (multi-region or
+        #                  region-or-zone-agnostic types)
+        #   * "region"   — google_compute_subnetwork, google_compute_address
+        #                  (regional-only types)
+        #
+        # D-1 fix (2026-04-28): the prior code only checked the first
+        # two. Subnetworks left `location` returning None, which made
+        # `gcp_client.get_resource_details_json` skip the --region flag
+        # at describe time, and gcloud rejected the call as
+        # "Underspecified resource ... Specify the [--region] flag."
+        # The detector then treated the failed describe as
+        # "resource may have been deleted" and reported the resource
+        # as "in sync" downstream -- a silent drift mask.
+        return (
+            self.attributes.get("zone")
+            or self.attributes.get("location")
+            or self.attributes.get("region")
+        )
 
     @property
     def resource_name(self) -> Optional[str]:
