@@ -2,7 +2,7 @@
 #
 # Cloud Build config for the mtagent Cloud Run deployment.
 # Three stages: build → push → deploy. All parameterized via $PROJECT_ID
-# and $SHORT_SHA so the same yaml works for any host project (Stage-1
+# and ${_TAG} so the same yaml works for any host project (Stage-1
 # internal-dev, Stage-2 company-prod) without edits.
 #
 # Pre-requisites (run scripts/bootstrap_host_project.sh first):
@@ -28,7 +28,7 @@ steps:
     name: gcr.io/cloud-builders/docker
     args:
       - build
-      - --tag=us-central1-docker.pkg.dev/$PROJECT_ID/mtagent/mtagent-app:$SHORT_SHA
+      - --tag=us-central1-docker.pkg.dev/$PROJECT_ID/mtagent/mtagent-app:${_TAG}
       - --tag=us-central1-docker.pkg.dev/$PROJECT_ID/mtagent/mtagent-app:latest
       - .
 
@@ -37,7 +37,7 @@ steps:
     name: gcr.io/cloud-builders/docker
     args:
       - push
-      - us-central1-docker.pkg.dev/$PROJECT_ID/mtagent/mtagent-app:$SHORT_SHA
+      - us-central1-docker.pkg.dev/$PROJECT_ID/mtagent/mtagent-app:${_TAG}
     waitFor: [build]
 
   - id: push-latest
@@ -63,7 +63,7 @@ steps:
       - run
       - deploy
       - mtagent-app
-      - --image=us-central1-docker.pkg.dev/$PROJECT_ID/mtagent/mtagent-app:$SHORT_SHA
+      - --image=us-central1-docker.pkg.dev/$PROJECT_ID/mtagent/mtagent-app:${_TAG}
       - --region=us-central1
       - --service-account=mtagent-runtime@$PROJECT_ID.iam.gserviceaccount.com
       - --memory=8Gi
@@ -95,7 +95,7 @@ steps:
 # ---- Images Cloud Build records as outputs (for Artifact Registry
 # tracking + the Cloud Build UI's "Artifacts" section) ----
 images:
-  - us-central1-docker.pkg.dev/$PROJECT_ID/mtagent/mtagent-app:$SHORT_SHA
+  - us-central1-docker.pkg.dev/$PROJECT_ID/mtagent/mtagent-app:${_TAG}
   - us-central1-docker.pkg.dev/$PROJECT_ID/mtagent/mtagent-app:latest
 
 # ---- Build options ----
@@ -113,3 +113,18 @@ options:
 # slow push (1-2min for 500MB) + deploy (~30s) with comfortable
 # headroom for retries.
 timeout: 1200s
+
+# ---- User-defined substitutions ----
+# _TAG: image tag. Default "manual" for `gcloud builds submit` runs
+# (built-in $SHORT_SHA is empty for non-trigger builds, which causes
+# an "invalid image name" parse error). Override at submit time:
+#
+#   # Manual build with git SHA tracking:
+#   gcloud builds submit --config=cloudbuild.yaml \
+#     --substitutions=_TAG=$(git rev-parse --short HEAD) \
+#     --project=mtagent-internal-dev
+#
+#   # Or via a Cloud Build trigger (set _TAG=$SHORT_SHA in the
+#   # trigger's substitutions block; Cloud Build will populate it):
+substitutions:
+  _TAG: manual
