@@ -18,11 +18,12 @@ from __future__ import annotations
 
 import json
 import os
-import subprocess
 import unittest
-from unittest.mock import patch
+from unittest.mock import patch, MagicMock
 
 from common import snapshots
+# google.api_core.exceptions stubbed via common/tests/conftest.py.
+from google.api_core import exceptions as gcs_exceptions
 
 
 class SnapshotsEnabledTests(unittest.TestCase):
@@ -50,18 +51,18 @@ class SnapshotsEnabledTests(unittest.TestCase):
 
 
 class WriteSnapshotGatingTests(unittest.TestCase):
-    """When env is OFF, write_snapshot must NOT call gcloud."""
+    """When env is OFF, write_snapshot must NOT touch the SDK."""
 
-    def test_no_gcloud_calls_when_disabled(self):
+    def test_no_sdk_calls_when_disabled(self):
         env = {k: v for k, v in os.environ.items()
                if k != "MTAGENT_PERSIST_SNAPSHOTS"}
         with patch.dict(os.environ, env, clear=True):
-            with patch.object(snapshots, "_run_gcloud") as mock_run:
+            with patch.object(snapshots, "_get_gcs_client") as mock_get:
                 result = snapshots.write_snapshot(
                     "importer", {"foo": "bar"}, "dev-proj-470211",
                 )
         self.assertFalse(result, "should return False when disabled")
-        mock_run.assert_not_called()
+        mock_get.assert_not_called()
 
     def test_no_validation_when_disabled(self):
         """When env is off, even bogus inputs return cleanly without
@@ -77,7 +78,7 @@ class WriteSnapshotGatingTests(unittest.TestCase):
 
 
 class WriteSnapshotEnabledPathTests(unittest.TestCase):
-    """Pin the gcloud command shape + payload when env is ON."""
+    """Pin the SDK upload pattern + payload when env is ON."""
 
     def setUp(self):
         self._env_patcher = patch.dict(os.environ, {
@@ -85,76 +86,80 @@ class WriteSnapshotEnabledPathTests(unittest.TestCase):
             "MTAGENT_STATE_BUCKET": "test-bucket",
         })
         self._env_patcher.start()
-        self._run_patcher = patch.object(snapshots, "_run_gcloud")
-        self.mock_run = self._run_patcher.start()
-        self.mock_run.return_value = subprocess.CompletedProcess(
-            args=[], returncode=0, stdout="", stderr="",
+        self._client_patcher = patch.object(snapshots, "_get_gcs_client")
+        self.mock_get_client = self._client_patcher.start()
+        self.mock_client = MagicMock(name="gcs_client")
+        self.mock_get_client.return_value = self.mock_client
+        # Track every (bucket_name, blob_name) seen so tests can
+        # assert what got uploaded where.
+        self.upload_log: list = []  # list of (bucket, blob_name, payload)
+        self.mock_client.bucket.side_effect = (
+            lambda name: self._make_bucket(name)
         )
 
     def tearDown(self):
-        self._run_patcher.stop()
+        self._client_patcher.stop()
         self._env_patcher.stop()
 
-    def test_writes_two_gcloud_calls_history_then_latest(self):
+    def _make_bucket(self, bucket_name: str):
+        """Build a MagicMock bucket whose blob() returns a MagicMock
+        blob recording its uploads into self.upload_log."""
+        bucket = MagicMock(name=f"bucket:{bucket_name}")
+        def _blob(blob_name: str):
+            blob = MagicMock(name=f"blob:{blob_name}")
+            def _upload(payload, content_type=None):
+                self.upload_log.append((bucket_name, blob_name, payload))
+            blob.upload_from_string.side_effect = _upload
+            return blob
+        bucket.blob.side_effect = _blob
+        return bucket
+
+    def test_writes_two_uploads_history_then_latest(self):
         """history first (immutable), latest second (overwrite).
         Order matters: a Dashboard read mid-write sees the previous
         latest until the new one lands."""
         snapshots.write_snapshot(
             "importer", {"imported": 13}, "dev-proj-470211",
         )
-        self.assertEqual(self.mock_run.call_count, 2)
-        # Both calls should be gcloud storage cp <local> <gs://...>
-        call_args_history = self.mock_run.call_args_list[0][0][0]
-        call_args_latest = self.mock_run.call_args_list[1][0][0]
-        self.assertEqual(call_args_history[:3],
-                         ["gcloud", "storage", "cp"])
-        self.assertEqual(call_args_latest[:3],
-                         ["gcloud", "storage", "cp"])
-        # First call destination should be /history/<ts>.json
-        self.assertIn("/snapshots/importer/history/",
-                      call_args_history[4])
+        self.assertEqual(len(self.upload_log), 2)
+        # First upload = history
+        bucket1, blob1, _ = self.upload_log[0]
+        self.assertEqual(bucket1, "test-bucket")
+        self.assertIn("snapshots/importer/history/", blob1)
+        self.assertTrue(blob1.endswith(".json"))
+        # Second upload = latest
+        bucket2, blob2, _ = self.upload_log[1]
+        self.assertEqual(bucket2, "test-bucket")
         self.assertTrue(
-            call_args_history[4].endswith(".json"),
-            f"history dest should end .json: {call_args_history[4]}",
-        )
-        # Second call destination should be /latest.json
-        self.assertTrue(
-            call_args_latest[4].endswith("/snapshots/importer/latest.json"),
-            f"latest dest mismatch: {call_args_latest[4]}",
+            blob2.endswith("snapshots/importer/latest.json"),
+            f"latest blob path mismatch: {blob2}",
         )
 
-    def test_payload_is_json_serialized(self):
-        """Verify the tempfile we upload contains a valid JSON
-        rendering of the result dict."""
+    def test_payload_is_valid_json_with_result_dict(self):
+        """Both uploads carry the JSON-serialized result dict."""
         result_dict = {
-            "imported": 13,
-            "needs_attention": 3,
-            "skipped": 0,
-            "failed": 0,
+            "imported": 13, "needs_attention": 3,
+            "skipped": 0, "failed": 0,
         }
         snapshots.write_snapshot(
             "importer", result_dict, "dev-proj-470211",
         )
-        # Inspect what was uploaded by reading the temp file path
-        # (the source = call_args[0][0][3]).
-        # But the temp file is deleted after the call. So we instead
-        # verify by mocking the file write OR by checking the
-        # arguments pass-through.
-        # Simpler: trust that json.dumps was used; verify the dict
-        # itself is JSON-serializable (the only failure mode that
-        # would surface here).
-        self.assertEqual(json.loads(json.dumps(result_dict)), result_dict)
+        # Both upload payloads parse back to the same dict.
+        for _bucket, _blob, payload in self.upload_log:
+            parsed = json.loads(payload)
+            self.assertEqual(parsed, result_dict)
 
-    def test_destination_uri_uses_correct_bucket_and_prefix(self):
+    def test_destination_blob_path_uses_correct_tenant_and_engine(self):
         snapshots.write_snapshot(
             "translator", {"translated": 12}, "dev-proj-470211",
             tenant_id="acme-corp",
         )
-        latest_uri = self.mock_run.call_args_list[1][0][0][4]
+        # Latest blob path includes tenant + project + engine
+        _bucket, blob_path, _payload = self.upload_log[1]
         self.assertEqual(
-            latest_uri,
-            "gs://test-bucket/tenants/acme-corp/projects/"
-            "dev-proj-470211/snapshots/translator/latest.json",
+            blob_path,
+            "tenants/acme-corp/projects/dev-proj-470211/"
+            "snapshots/translator/latest.json",
         )
 
     def test_validates_engine_name_when_enabled(self):
@@ -162,25 +167,26 @@ class WriteSnapshotEnabledPathTests(unittest.TestCase):
             snapshots.write_snapshot(
                 "bogus-engine", {"x": 1}, "dev-proj-470211",
             )
-        self.mock_run.assert_not_called()
+        self.mock_get_client.assert_not_called()
 
     def test_validates_project_id_when_enabled(self):
         with self.assertRaises(ValueError):
             snapshots.write_snapshot(
                 "importer", {"x": 1}, "BAD-PROJECT",
             )
-        self.mock_run.assert_not_called()
+        self.mock_get_client.assert_not_called()
 
     def test_all_4_engines_accepted(self):
         """importer / translator / detector / policy: all valid."""
         for engine in ("importer", "translator", "detector", "policy"):
             with self.subTest(engine=engine):
-                self.mock_run.reset_mock()
+                self.upload_log.clear()
                 result = snapshots.write_snapshot(
                     engine, {"x": 1}, "dev-proj-470211",
                 )
                 self.assertTrue(result)
-                self.assertEqual(self.mock_run.call_count, 2)
+                # Two uploads: history + latest
+                self.assertEqual(len(self.upload_log), 2)
 
 
 class ReadLatestSnapshotTests(unittest.TestCase):
@@ -191,56 +197,76 @@ class ReadLatestSnapshotTests(unittest.TestCase):
             "MTAGENT_STATE_BUCKET": "test-bucket",
         })
         self._env_patcher.start()
-        self._run_patcher = patch.object(snapshots, "_run_gcloud")
-        self.mock_run = self._run_patcher.start()
+        self._client_patcher = patch.object(snapshots, "_get_gcs_client")
+        self.mock_get_client = self._client_patcher.start()
+        self.mock_client = MagicMock(name="gcs_client")
+        self.mock_get_client.return_value = self.mock_client
+        # Track every blob path requested for assertions.
+        self.requested_paths: list = []
+        self.mock_client.bucket.side_effect = (
+            lambda name: self._make_bucket(name)
+        )
 
     def tearDown(self):
-        self._run_patcher.stop()
+        self._client_patcher.stop()
         self._env_patcher.stop()
 
-    def test_returns_dict_on_successful_download(self):
-        """gcloud cp succeeds + temp file contains valid JSON ->
-        return the parsed dict."""
-        # Simulate the download by writing the expected JSON to whatever
-        # tempfile path gcloud cp targets.
-        def _fake_gcloud(args):
-            # args = ["gcloud", "storage", "cp", source_uri, dest_path]
-            dest = args[4]
-            with open(dest, "w", encoding="utf-8") as fh:
-                fh.write('{"imported": 13, "needs_attention": 3}')
-            return subprocess.CompletedProcess(
-                args=args, returncode=0, stdout="", stderr="",
+    def _make_bucket(self, bucket_name: str, fake_content=None,
+                     raise_exc=None):
+        """Build a MagicMock bucket whose blob.download_as_text returns
+        fake_content (or raises raise_exc). Subclasses override the
+        defaults via setattr after construction."""
+        bucket = MagicMock(name=f"bucket:{bucket_name}")
+        def _blob(blob_name: str):
+            self.requested_paths.append(blob_name)
+            blob = MagicMock(name=f"blob:{blob_name}")
+            blob.download_as_text.side_effect = (
+                self._download_behavior
             )
-        self.mock_run.side_effect = _fake_gcloud
+            return blob
+        bucket.blob.side_effect = _blob
+        return bucket
 
+    # The download behavior is overridable per-test; default raises
+    # NotFound so the "engine hasn't run yet" branch fires unless a
+    # test sets a successful payload.
+    def _download_behavior(self, *_args, **_kwargs):
+        if hasattr(self, "_download_payload"):
+            return self._download_payload
+        raise gcs_exceptions.NotFound("not found")
+
+    def test_returns_dict_on_successful_download(self):
+        """blob.download_as_text returns valid JSON -> parsed dict."""
+        self._download_payload = '{"imported": 13, "needs_attention": 3}'
         result = snapshots.read_latest_snapshot(
             "importer", "dev-proj-470211",
         )
         self.assertEqual(result, {"imported": 13, "needs_attention": 3})
 
     def test_returns_none_when_object_missing(self):
-        """gcloud cp returns non-zero ('object not found') -> None.
-        Documented contract: 'engine hasn't run yet for this project'."""
-        self.mock_run.side_effect = subprocess.CalledProcessError(
-            returncode=1, cmd=["gcloud", "storage", "cp"],
-            stderr="Object not found",
-        )
+        """NotFound -> None. Documented contract: 'engine hasn't run yet'."""
+        # Default _download_behavior raises NotFound; nothing to set.
         result = snapshots.read_latest_snapshot(
             "importer", "dev-proj-470211",
         )
         self.assertIsNone(result)
 
     def test_returns_none_when_json_malformed(self):
-        """Downloaded file is not valid JSON -> None (defensive)."""
-        def _fake_gcloud(args):
-            dest = args[4]
-            with open(dest, "w", encoding="utf-8") as fh:
-                fh.write("this is not json {")
-            return subprocess.CompletedProcess(
-                args=args, returncode=0, stdout="", stderr="",
-            )
-        self.mock_run.side_effect = _fake_gcloud
+        """Downloaded text is not valid JSON -> None (defensive)."""
+        self._download_payload = "this is not json {"
+        result = snapshots.read_latest_snapshot(
+            "importer", "dev-proj-470211",
+        )
+        self.assertIsNone(result)
 
+    def test_returns_none_on_other_exception(self):
+        """Network / Forbidden / other failures -> None (Dashboard
+        renders empty-state gracefully). Logged at WARNING so
+        operators can spot recurring failures."""
+        # Override behavior to raise Forbidden on access
+        def _raise_forbidden(*_a, **_kw):
+            raise gcs_exceptions.Forbidden("403")
+        self._download_behavior = _raise_forbidden  # type: ignore[assignment]
         result = snapshots.read_latest_snapshot(
             "importer", "dev-proj-470211",
         )
@@ -252,29 +278,20 @@ class ReadLatestSnapshotTests(unittest.TestCase):
             snapshots.read_latest_snapshot(
                 "bogus", "dev-proj-470211",
             )
-        self.mock_run.assert_not_called()
+        self.mock_get_client.assert_not_called()
 
-    def test_uses_correct_uri(self):
-        """Read URI matches write URI shape (so writes + reads stay
+    def test_uses_correct_blob_path(self):
+        """Read path matches write path shape (writes + reads stay
         in sync as the prefix logic evolves)."""
-        # Set up a successful read so we can inspect the args
-        def _fake_gcloud(args):
-            dest = args[4]
-            with open(dest, "w", encoding="utf-8") as fh:
-                fh.write('{}')
-            return subprocess.CompletedProcess(
-                args=args, returncode=0, stdout="", stderr="",
-            )
-        self.mock_run.side_effect = _fake_gcloud
-
+        self._download_payload = '{}'
         snapshots.read_latest_snapshot(
             "detector", "dev-proj-470211", tenant_id="acme",
         )
-        source_uri = self.mock_run.call_args[0][0][3]
-        self.assertEqual(
-            source_uri,
-            "gs://test-bucket/tenants/acme/projects/dev-proj-470211"
-            "/snapshots/detector/latest.json",
+        # The blob path requested for this read.
+        self.assertIn(
+            "tenants/acme/projects/dev-proj-470211/"
+            "snapshots/detector/latest.json",
+            self.requested_paths,
         )
 
 

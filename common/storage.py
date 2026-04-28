@@ -71,14 +71,23 @@ release.
 
 from __future__ import annotations
 
+import fnmatch
 import os
 import re
 import subprocess
-from typing import List, Optional
+from typing import Iterable, List, Optional
+
+from google.cloud import storage as gcs
+from google.api_core import exceptions as gcs_exceptions
 
 from common.logging import get_logger
 
 _log = get_logger(__name__)
+
+# Module-singleton GCS client. Lazily constructed on first use so import-
+# time cost is zero (matters for unit tests that don't touch GCS).
+# Thread-safe: google-cloud-storage Client is documented as thread-safe.
+_gcs_client: Optional["gcs.Client"] = None
 
 # Default bucket name. Overridable via MTAGENT_STATE_BUCKET env var
 # (set in cloudbuild.yaml deploy step). Sensible Stage-1 default.
@@ -321,22 +330,51 @@ def _validate_ids(tenant_id: str, project_id: str) -> None:
         )
 
 
-def _run_gcloud(args: List[str]) -> subprocess.CompletedProcess:
-    """Run a gcloud command, raising CalledProcessError on non-zero exit.
+def _get_gcs_client() -> "gcs.Client":
+    """Return the module-singleton google-cloud-storage Client.
 
-    Captures stdout/stderr so the caller can include them in error
-    messages. Uses ``check=True`` so the caller doesn't have to
-    inspect ``.returncode`` -- failures bubble up as exceptions.
+    Lazy-initialized; uses Application Default Credentials (ADC)
+    which Cloud Run's metadata server provides automatically. No
+    explicit auth dance needed -- the SDK detects the runtime SA
+    via the metadata server without requiring `gcloud auth login`
+    or `gcloud config set account` (the gcloud CLI's notorious
+    pain point in containerized environments).
 
     Pulled into a helper so tests can patch a single seam:
-    ``patch("common.storage._run_gcloud")``.
+    ``patch("common.storage._get_gcs_client", return_value=mock_client)``.
     """
-    return subprocess.run(
-        args,
-        check=True,
-        capture_output=True,
-        text=True,
-    )
+    global _gcs_client
+    if _gcs_client is None:
+        _gcs_client = gcs.Client()
+    return _gcs_client
+
+
+def _matches_any_pattern(relpath: str, patterns: Iterable[str]) -> bool:
+    """Return True if ``relpath`` matches any of the glob ``patterns``.
+
+    Used by ``persist_workdir`` to filter out ephemeral files (see
+    _PERSIST_EXCLUDES). Supports both regular fnmatch globs (``*.backup``)
+    AND the ``dir/**`` "anything under this directory" shorthand
+    (``_diagnostics/**``) since fnmatch doesn't natively understand ``**``.
+
+    All paths use forward slashes (matched against the canonical
+    POSIX-style relpath) regardless of OS, mirroring how gcloud
+    storage rsync's --exclude flag interpreted them.
+    """
+    rp = relpath.replace("\\", "/")
+    for pattern in patterns:
+        # `dir/**` shorthand: match anything under `dir/`.
+        if pattern.endswith("/**"):
+            prefix = pattern[:-3] + "/"
+            if rp.startswith(prefix) or rp == pattern[:-3]:
+                return True
+        # Standard fnmatch for everything else.
+        if fnmatch.fnmatch(rp, pattern):
+            return True
+        # Also match basename so `*.backup` catches nested files.
+        if fnmatch.fnmatch(os.path.basename(rp), pattern):
+            return True
+    return False
 
 
 def hydrate_workdir(
@@ -382,7 +420,9 @@ def hydrate_workdir(
     local_path = os.path.join(base, project_id)
     os.makedirs(local_path, exist_ok=True)
 
-    src = _gcs_prefix(tenant, project_id)
+    bucket_name = state_bucket()
+    prefix = f"tenants/{tenant}/projects/{project_id}/"
+    src = f"gs://{bucket_name}/{prefix}"
 
     _log.info(
         "storage_hydrate_start",
@@ -392,69 +432,85 @@ def hydrate_workdir(
         local_path=local_path,
     )
 
-    # gcloud storage rsync semantics:
-    #   --recursive: walk subdirectories
-    #   No --delete: hydrate is additive (we never delete local files
-    #     based on what's in GCS). The /tmp dir is fresh per request
-    #     anyway, so additive == authoritative-from-GCS in practice.
-    #   We don't pass --exclude on hydrate (we want everything that
-    #     was persisted, including state files, locks, .terraform/).
+    # SDK-based hydrate (PUI-1 SMOKE layer 5 fix):
+    #   * List blobs under prefix; each blob.name is "tenants/<t>/projects/<p>/relpath..."
+    #   * Strip prefix to get the relative path; join with local_path
+    #   * Make parent dirs as needed; download blob to that local file
+    #
+    # Why SDK over `gcloud storage rsync` subprocess:
+    #   * Uses ADC via metadata server (auto-detected in Cloud Run).
+    #     gcloud CLI requires explicit `gcloud auth login` or
+    #     `gcloud config set account` PLUS a working credential store
+    #     -- a brittle chain that broke in our Cloud Run container.
+    #   * No subprocess fork overhead.
+    #   * Proper exception types (NotFound, Forbidden, etc.) instead
+    #     of stderr-string parsing.
+    client = _get_gcs_client()
     try:
-        _run_gcloud([
-            "gcloud", "storage", "rsync",
-            "--recursive",
-            src,
-            local_path,
-        ])
-    except subprocess.CalledProcessError as e:
-        stderr = (e.stderr or "")
-        # First-run-for-this-project case: the GCS prefix has never
-        # been written to. gcloud signals this with phrasings like:
-        #   "Did not find existing container at: gs://..."
-        #   "no URLs matched"
-        #   "matched no objects"
-        # Treat these as "engine starts with empty workdir" -- a
-        # NORMAL situation, not an error. Confirmed via Cloud Logging
-        # on the first PUI-1 smoke (2026-04-28) where dev-proj-470211
-        # had never been persisted from Cloud Run.
-        not_found_signals = (
-            "did not find existing container",
-            "no urls matched",
-            "matched no objects",
-            "doesn't exist",
-            "does not exist",
+        bucket = client.bucket(bucket_name)
+        blob_iter = client.list_blobs(bucket, prefix=prefix)
+        downloaded = 0
+        for blob in blob_iter:
+            # Skip the prefix itself if it shows up as a 0-byte placeholder.
+            if blob.name == prefix or blob.name.endswith("/"):
+                continue
+            relpath = blob.name[len(prefix):]
+            if not relpath:
+                continue
+            dest_file = os.path.join(local_path, relpath.replace("/", os.sep))
+            os.makedirs(os.path.dirname(dest_file), exist_ok=True)
+            blob.download_to_filename(dest_file)
+            downloaded += 1
+    except gcs_exceptions.NotFound:
+        # First-run-for-this-project case: the bucket exists but the
+        # prefix has never been written to. Listing returns empty (no
+        # exception in modern SDK), but defensive catch in case some
+        # SDK versions raise NotFound on a missing prefix. Either way
+        # ends here as "0 blobs to download" which is correct behavior.
+        _log.info(
+            "storage_hydrate_skipped_source_missing",
+            tenant_id=tenant,
+            project_id=project_id,
+            src=src,
+            local_path=local_path,
+            reason="GCS source prefix doesn't exist yet; "
+                   "starting with empty workdir (first run for "
+                   "this project)",
         )
-        stderr_lower = stderr.lower()
-        if any(sig in stderr_lower for sig in not_found_signals):
-            _log.info(
-                "storage_hydrate_skipped_source_missing",
-                tenant_id=tenant,
-                project_id=project_id,
-                src=src,
-                local_path=local_path,
-                stderr=stderr[:500],
-                reason="GCS source prefix doesn't exist yet; "
-                       "starting with empty workdir (first run for "
-                       "this project)",
-            )
-            return local_path
-
+        return local_path
+    except Exception as e:
         _log.error(
             "storage_hydrate_failed",
             tenant_id=tenant,
             project_id=project_id,
             src=src,
             local_path=local_path,
-            stderr=stderr[:500],
+            error_type=type(e).__name__,
+            error=str(e)[:500],
         )
         raise
 
-    _log.info(
-        "storage_hydrate_complete",
-        tenant_id=tenant,
-        project_id=project_id,
-        local_path=local_path,
-    )
+    if downloaded == 0:
+        # Modern SDK returns an empty iterator (no NotFound) when
+        # nothing matches the prefix -- the COMMON first-run path.
+        _log.info(
+            "storage_hydrate_skipped_source_missing",
+            tenant_id=tenant,
+            project_id=project_id,
+            src=src,
+            local_path=local_path,
+            reason="GCS source prefix has no objects; "
+                   "starting with empty workdir (first run for "
+                   "this project)",
+        )
+    else:
+        _log.info(
+            "storage_hydrate_complete",
+            tenant_id=tenant,
+            project_id=project_id,
+            local_path=local_path,
+            objects_downloaded=downloaded,
+        )
     return local_path
 
 
@@ -500,7 +556,9 @@ def persist_workdir(
             f"Did hydrate_workdir run successfully?"
         )
 
-    dest = _gcs_prefix(tenant, project_id)
+    bucket_name = state_bucket()
+    prefix = f"tenants/{tenant}/projects/{project_id}/"
+    dest = f"gs://{bucket_name}/{prefix}"
 
     _log.info(
         "storage_persist_start",
@@ -510,32 +568,69 @@ def persist_workdir(
         dest=dest,
     )
 
-    # Build the gcloud rsync command. --exclude flags filter the
-    # ephemeral artifacts (_diagnostics, *.backup) defined in
-    # _PERSIST_EXCLUDES.
-    cmd = [
-        "gcloud", "storage", "rsync",
-        "--recursive",
-        "--delete-unmatched-destination-objects",
-    ]
-    for pattern in _PERSIST_EXCLUDES:
-        cmd.extend(["--exclude", pattern])
-    # Trailing slash on local_path matters for the same reason as on
-    # the GCS URI: tells rsync to upload the directory CONTENTS rather
-    # than the directory ITSELF as a child of dest.
-    src_path = local_path.rstrip("/\\") + "/"
-    cmd.extend([src_path, dest])
+    # SDK-based persist (PUI-1 SMOKE layer 5 fix):
+    #   1. Walk local tree, build {relpath -> absolute_local_path}
+    #      for every file NOT matching _PERSIST_EXCLUDES.
+    #   2. List existing blobs under prefix to find ones to delete
+    #      (the rsync --delete-unmatched-destination-objects semantic).
+    #   3. Upload each local file (skip-if-unchanged would require
+    #      MD5 comparison; for Round-1 simplicity we always upload --
+    #      GCS object versioning means cost is dominated by storage,
+    #      not request count).
+    #   4. Delete blobs that exist remotely but not locally.
+    #
+    # Why SDK over `gcloud storage rsync` subprocess: see hydrate_workdir
+    # for the auth + error-handling rationale.
+    client = _get_gcs_client()
+    bucket = client.bucket(bucket_name)
 
     try:
-        _run_gcloud(cmd)
-    except subprocess.CalledProcessError as e:
+        # Step 1: walk local, filter excludes
+        local_files: dict = {}  # relpath (POSIX) -> abs local path
+        for root, _dirs, files in os.walk(local_path):
+            for fname in files:
+                abs_path = os.path.join(root, fname)
+                rel = os.path.relpath(abs_path, local_path).replace(
+                    os.sep, "/",
+                )
+                if _matches_any_pattern(rel, _PERSIST_EXCLUDES):
+                    continue
+                local_files[rel] = abs_path
+
+        # Step 2: collect existing remote blob names (relative to prefix)
+        # so we can compute the set difference for deletion.
+        remote_blobs: dict = {}  # relpath (POSIX) -> Blob
+        for blob in client.list_blobs(bucket, prefix=prefix):
+            if blob.name == prefix or blob.name.endswith("/"):
+                continue
+            rel = blob.name[len(prefix):]
+            remote_blobs[rel] = blob
+
+        # Step 3: upload all local files (overwrites if changed; GCS
+        # object versioning preserves the prior generation).
+        uploaded = 0
+        for rel, abs_path in local_files.items():
+            blob = bucket.blob(prefix + rel)
+            blob.upload_from_filename(abs_path)
+            uploaded += 1
+
+        # Step 4: delete remote blobs that no longer exist locally
+        # (excludes get treated as "not present locally" which means
+        # they'll be deleted from GCS too -- the desired behavior).
+        deleted = 0
+        for rel, blob in remote_blobs.items():
+            if rel not in local_files:
+                blob.delete()
+                deleted += 1
+    except Exception as e:
         _log.error(
             "storage_persist_failed",
             tenant_id=tenant,
             project_id=project_id,
             local_path=local_path,
             dest=dest,
-            stderr=(e.stderr or "")[:500],
+            error_type=type(e).__name__,
+            error=str(e)[:500],
         )
         raise
 
@@ -544,4 +639,6 @@ def persist_workdir(
         tenant_id=tenant,
         project_id=project_id,
         dest=dest,
+        objects_uploaded=uploaded,
+        objects_deleted=deleted,
     )

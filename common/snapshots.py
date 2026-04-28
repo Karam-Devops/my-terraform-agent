@@ -63,6 +63,9 @@ import subprocess
 import tempfile
 from typing import Optional
 
+from google.cloud import storage as gcs
+from google.api_core import exceptions as gcs_exceptions
+
 from common.logging import get_logger
 
 _log = get_logger(__name__)
@@ -136,15 +139,39 @@ def _utc_timestamp() -> str:
     return now.strftime("%Y-%m-%dT%H-%M-%SZ")
 
 
-def _run_gcloud(args: list) -> subprocess.CompletedProcess:
-    """Run a gcloud command, raising CalledProcessError on non-zero.
+# Module-singleton GCS client (lazy init via _get_gcs_client). Same
+# pattern as common/storage.py -- uses ADC via Cloud Run metadata
+# server, no `gcloud auth login` required.
+_gcs_client: Optional["gcs.Client"] = None
+
+
+def _get_gcs_client() -> "gcs.Client":
+    """Return the module-singleton google-cloud-storage Client.
+
+    Lazy-initialized; uses Application Default Credentials (ADC).
+    See common/storage.py:_get_gcs_client for the rationale on
+    why we use the SDK over `gcloud storage` subprocess in
+    Cloud Run -- the gcloud CLI's auth chain is brittle in
+    containers.
 
     Pulled into a helper so tests can patch a single seam:
-    ``patch("common.snapshots._run_gcloud")``.
+    ``patch("common.snapshots._get_gcs_client", return_value=mock_client)``.
     """
-    return subprocess.run(
-        args, check=True, capture_output=True, text=True,
-    )
+    global _gcs_client
+    if _gcs_client is None:
+        _gcs_client = gcs.Client()
+    return _gcs_client
+
+
+def _blob_for_path(client: "gcs.Client", gs_uri: str) -> "gcs.Blob":
+    """Resolve a ``gs://bucket/object/path`` URI to a Blob handle."""
+    if not gs_uri.startswith("gs://"):
+        raise ValueError(f"expected gs:// URI, got {gs_uri!r}")
+    rest = gs_uri[len("gs://"):]
+    bucket_name, _, object_path = rest.partition("/")
+    if not object_path:
+        raise ValueError(f"URI missing object path: {gs_uri!r}")
+    return client.bucket(bucket_name).blob(object_path)
 
 
 def write_snapshot(
@@ -206,28 +233,22 @@ def write_snapshot(
         payload_bytes=len(payload),
     )
 
-    # Use a tempfile -> gcloud cp pattern. gcloud storage cp can
-    # accept stdin via "-" but tempfile is more portable + easier
-    # to debug failed uploads.
-    tmp_fd, tmp_path = tempfile.mkstemp(suffix=".json", prefix="mtagent-snap-")
-    try:
-        with os.fdopen(tmp_fd, "w", encoding="utf-8") as fh:
-            fh.write(payload)
+    # SDK-based upload (PUI-1 SMOKE layer 5 fix): same rationale as
+    # common/storage.py -- gcloud CLI's auth chain doesn't work in
+    # Cloud Run, but Python SDK uses ADC via metadata server cleanly.
+    client = _get_gcs_client()
 
-        # Write history first (immutable; the audit-trail copy).
-        history_uri = f"{prefix}history/{timestamp}.json"
-        _run_gcloud(["gcloud", "storage", "cp", tmp_path, history_uri])
+    # Write history first (immutable; the audit-trail copy).
+    history_uri = f"{prefix}history/{timestamp}.json"
+    history_blob = _blob_for_path(client, history_uri)
+    history_blob.upload_from_string(payload, content_type="application/json")
 
-        # Then overwrite latest.json (the Dashboard's read target).
-        # Doing history first means a Dashboard read mid-write sees
-        # the previous-good latest until the new one lands.
-        latest_uri = f"{prefix}latest.json"
-        _run_gcloud(["gcloud", "storage", "cp", tmp_path, latest_uri])
-    finally:
-        try:
-            os.remove(tmp_path)
-        except OSError:
-            pass
+    # Then overwrite latest.json (the Dashboard's read target).
+    # Doing history first means a Dashboard read mid-write sees
+    # the previous-good latest until the new one lands.
+    latest_uri = f"{prefix}latest.json"
+    latest_blob = _blob_for_path(client, latest_uri)
+    latest_blob.upload_from_string(payload, content_type="application/json")
 
     _log.info(
         "snapshot_write_complete",
@@ -277,39 +298,45 @@ def read_latest_snapshot(
     prefix = _snapshot_prefix(tenant, project_id, engine_name)
     latest_uri = f"{prefix}latest.json"
 
-    tmp_fd, tmp_path = tempfile.mkstemp(suffix=".json", prefix="mtagent-snap-r-")
-    os.close(tmp_fd)
+    # SDK-based read (PUI-1 SMOKE layer 5 fix): see write_snapshot for
+    # rationale. NotFound is the documented "engine never ran for
+    # this project" path -- return None, caller renders empty-state.
+    client = _get_gcs_client()
     try:
-        try:
-            _run_gcloud(["gcloud", "storage", "cp", latest_uri, tmp_path])
-        except subprocess.CalledProcessError as e:
-            # Most likely "object not found" -- engine hasn't run yet.
-            # Could also be perms / network. Either way, return None
-            # and let the caller render empty-state.
-            _log.info(
-                "snapshot_read_missing",
-                engine=engine_name,
-                tenant_id=tenant,
-                project_id=project_id,
-                latest_uri=latest_uri,
-                stderr=(e.stderr or "")[:200],
-            )
-            return None
+        blob = _blob_for_path(client, latest_uri)
+        raw = blob.download_as_text()
+    except gcs_exceptions.NotFound:
+        _log.info(
+            "snapshot_read_missing",
+            engine=engine_name,
+            tenant_id=tenant,
+            project_id=project_id,
+            latest_uri=latest_uri,
+        )
+        return None
+    except Exception as e:
+        # Network / perms / other transient failure. Same disposition
+        # as missing for the caller (None = "render empty state");
+        # log at warning so operators can spot recurring failures.
+        _log.warning(
+            "snapshot_read_failed",
+            engine=engine_name,
+            tenant_id=tenant,
+            project_id=project_id,
+            latest_uri=latest_uri,
+            error_type=type(e).__name__,
+            error=str(e)[:200],
+        )
+        return None
 
-        try:
-            with open(tmp_path, "r", encoding="utf-8") as fh:
-                return json.load(fh)
-        except (OSError, json.JSONDecodeError) as e:
-            _log.warning(
-                "snapshot_read_malformed",
-                engine=engine_name,
-                tenant_id=tenant,
-                project_id=project_id,
-                error=str(e),
-            )
-            return None
-    finally:
-        try:
-            os.remove(tmp_path)
-        except OSError:
-            pass
+    try:
+        return json.loads(raw)
+    except json.JSONDecodeError as e:
+        _log.warning(
+            "snapshot_read_malformed",
+            engine=engine_name,
+            tenant_id=tenant,
+            project_id=project_id,
+            error=str(e),
+        )
+        return None
