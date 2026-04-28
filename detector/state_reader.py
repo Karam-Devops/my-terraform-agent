@@ -53,6 +53,31 @@ class ManagedResource:
 
     @property
     def resource_name(self) -> Optional[str]:
+        # Most GCP types store the gcloud-friendly short name under
+        # `name` (e.g. google_compute_instance.name == "poc-vm",
+        # google_kms_key_ring.name == "poc-keyring") -- we pass that
+        # straight to `gcloud <type> describe <name>`.
+        #
+        # D-2 fix (2026-04-28): google_service_account is a known
+        # exception. Its `name` attribute is the canonical resource
+        # path (`projects/<P>/serviceAccounts/<email>`), but `gcloud
+        # iam service-accounts describe` expects JUST the email. Pre-
+        # fix, passing the full path made gcloud construct a malformed
+        # API URL, hit a 404 with an HTML error page, and the detector
+        # silently classified the resource as "missing from cloud" ->
+        # "in sync" (false positive drift mask). The importer side
+        # works because it extracts just the email during asset
+        # enumeration; the detector reads from state where the full
+        # path is stored.
+        #
+        # Per-type override is the right shape here -- broadening to
+        # `email or name` would risk surprises in any future resource
+        # that happens to have a stray top-level `email` attribute
+        # unrelated to the gcloud describe key.
+        if self.tf_type == "google_service_account":
+            email = self.attributes.get("email")
+            if email:
+                return email
         return self.attributes.get("name")
 
 
