@@ -407,13 +407,45 @@ def hydrate_workdir(
             local_path,
         ])
     except subprocess.CalledProcessError as e:
+        stderr = (e.stderr or "")
+        # First-run-for-this-project case: the GCS prefix has never
+        # been written to. gcloud signals this with phrasings like:
+        #   "Did not find existing container at: gs://..."
+        #   "no URLs matched"
+        #   "matched no objects"
+        # Treat these as "engine starts with empty workdir" -- a
+        # NORMAL situation, not an error. Confirmed via Cloud Logging
+        # on the first PUI-1 smoke (2026-04-28) where dev-proj-470211
+        # had never been persisted from Cloud Run.
+        not_found_signals = (
+            "did not find existing container",
+            "no urls matched",
+            "matched no objects",
+            "doesn't exist",
+            "does not exist",
+        )
+        stderr_lower = stderr.lower()
+        if any(sig in stderr_lower for sig in not_found_signals):
+            _log.info(
+                "storage_hydrate_skipped_source_missing",
+                tenant_id=tenant,
+                project_id=project_id,
+                src=src,
+                local_path=local_path,
+                stderr=stderr[:500],
+                reason="GCS source prefix doesn't exist yet; "
+                       "starting with empty workdir (first run for "
+                       "this project)",
+            )
+            return local_path
+
         _log.error(
             "storage_hydrate_failed",
             tenant_id=tenant,
             project_id=project_id,
             src=src,
             local_path=local_path,
-            stderr=(e.stderr or "")[:500],
+            stderr=stderr[:500],
         )
         raise
 

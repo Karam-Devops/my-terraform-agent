@@ -176,14 +176,61 @@ class HydrateWorkdirTests(unittest.TestCase):
         self.mock_run.assert_not_called()
 
     def test_hydrate_propagates_gcloud_failure(self):
+        """Genuine failures (auth, network, missing bucket) propagate."""
         self.mock_run.side_effect = subprocess.CalledProcessError(
             returncode=1, cmd=["gcloud", "storage", "rsync"],
-            stderr="bucket not found",
+            stderr="HTTPError 401: Unauthorized",
         )
         with self.assertRaises(subprocess.CalledProcessError):
             storage.hydrate_workdir(
                 "dev-proj-470211", local_root=self.local_root,
             )
+
+    def test_hydrate_tolerates_missing_source_prefix(self):
+        """First-run-for-this-project case: gcloud returns
+        "Did not find existing container at: gs://..."
+        That's NORMAL -- engine starts with empty workdir, NOT a
+        propagated error. Pinned because PUI-1 smoke (2026-04-28)
+        was the first time this branch fired in production: without
+        the tolerance, every brand-new project's first import would
+        crash before doing anything useful."""
+        self.mock_run.side_effect = subprocess.CalledProcessError(
+            returncode=1, cmd=["gcloud", "storage", "rsync"],
+            stderr="ERROR: (gcloud.storage.rsync) Did not find "
+                   "existing container at: gs://test-bucket/tenants/"
+                   "default/projects/dev-proj-470211/",
+        )
+        # Should NOT raise -- returns the empty local path.
+        result = storage.hydrate_workdir(
+            "dev-proj-470211", local_root=self.local_root,
+        )
+        self.assertEqual(
+            result, os.path.join(self.local_root, "dev-proj-470211"),
+        )
+
+    def test_hydrate_tolerates_other_not_found_phrasings(self):
+        """gcloud's exact phrasing for "source missing" varies by
+        version / command surface. Test multiple known patterns so
+        we don't regress when gcloud changes wording."""
+        for stderr_msg in (
+            "no URLs matched",
+            "matched no objects in cloud storage",
+            "Object doesn't exist",
+            "The bucket prefix does not exist",
+        ):
+            with self.subTest(stderr=stderr_msg):
+                self.mock_run.side_effect = subprocess.CalledProcessError(
+                    returncode=1, cmd=["gcloud", "storage", "rsync"],
+                    stderr=stderr_msg,
+                )
+                # Each iteration should land in the tolerant branch.
+                result = storage.hydrate_workdir(
+                    "dev-proj-470211", local_root=self.local_root,
+                )
+                self.assertEqual(
+                    result,
+                    os.path.join(self.local_root, "dev-proj-470211"),
+                )
 
     def test_hydrate_uses_env_var_local_root_when_unspecified(self):
         with patch.dict(os.environ, {
