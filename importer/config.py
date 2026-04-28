@@ -8,7 +8,13 @@ from common.terraform_path import resolve_terraform_path as _resolve_terraform
 # install path here, in translator/config.py, and in agent_nodes.py — that
 # broke on every machine where Terraform lived elsewhere or was only on PATH.
 # The resolver checks $TERRAFORM_BINARY → platform default → PATH → fail.
-GCLOUD_CMD_PATH = r"C:\Program Files (x86)\Google\Cloud SDK\google-cloud-sdk\bin\gcloud.cmd"
+#
+# GCLOUD_CMD_PATH was DELETED in PERF-T0 (PUI-1 SMOKE 2026-04-28). It
+# hardcoded a Windows-specific gcloud install path which broke immediately
+# in the Linux Cloud Run container. The two callers (gcp_client's
+# discover + describe) now use google-cloud-asset SDK calls via
+# importer/_asset_client.py -- no subprocess, no auth dance, ADC
+# straight from the metadata server.
 
 # --- Concurrency Settings ---
 MAX_DISCOVERY_WORKERS = 16

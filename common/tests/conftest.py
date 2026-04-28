@@ -68,8 +68,17 @@ def _install_google_cloud_stub() -> None:
     class Forbidden(Exception):
         """Mirror of google.api_core.exceptions.Forbidden for tests."""
 
+    class PermissionDenied(Exception):
+        """Mirror of google.api_core.exceptions.PermissionDenied for tests.
+
+        Importer tests for _asset_client need this -- conftest ordering
+        means common/tests/conftest.py installs the stub first, so it
+        must include every exception class that ANY downstream test
+        suite uses."""
+
     exc_stub.NotFound = NotFound
     exc_stub.Forbidden = Forbidden
+    exc_stub.PermissionDenied = PermissionDenied
     sys.modules["google.api_core.exceptions"] = exc_stub
 
 

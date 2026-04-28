@@ -3,6 +3,7 @@ import json
 import re
 from . import config
 from . import shell_runner
+from . import _asset_client
 from common.logging import get_logger
 
 log = get_logger(__name__)
@@ -149,78 +150,109 @@ def friendly_name_from_display(raw_display):
 
 
 def discover_resources_of_type(project_id, asset_type):
+    """List resources of an asset type via the Cloud Asset Inventory SDK.
+
+    PERF-T0 migration (PUI-1 SMOKE): replaces the legacy
+    ``gcloud asset search-all-resources`` subprocess call. The new
+    SDK path:
+      * Auto-uses ADC via Cloud Run's metadata server (no
+        ``gcloud auth login`` dance required)
+      * Returns the SAME dict shape downstream consumers expect
+        (handled inside _asset_client._asset_to_legacy_dict)
+      * Surfaces typed PermissionDenied / NotFound exceptions
+        instead of opaque non-zero subprocess exits
+
+    Empty list on any per-type failure preserves the importer's
+    historical best-effort behavior (one bad asset type doesn't
+    kill the whole run).
+    """
     log.info("discover_start", project_id=project_id, asset_type=asset_type)
-    command_args = (
-        config.GCLOUD_CMD_PATH, "--quiet", "asset", "search-all-resources",
-        f"--scope=projects/{project_id}", f"--asset-types={asset_type}", "--format=json"
-    )
-    output = shell_runner.run_command(command_args)
-    if not output: return []
     try:
-        resources = json.loads(output)
-        log.info("discover_complete", asset_type=asset_type, count=len(resources))
-        return resources
-    except json.JSONDecodeError:
-        log.error("discover_parse_failed", asset_type=asset_type,
-                  reason="gcloud returned non-JSON output")
+        resources = _asset_client.list_resources_of_type(
+            project_id, asset_type,
+        )
+    except Exception as e:
+        # PermissionDenied is the most likely failure mode in production
+        # (runtime SA missing roles/cloudasset.viewer on customer project).
+        # Log + return empty so the workflow doesn't crash on one bad
+        # asset type -- the inventory layer counts these as
+        # `inventory_asset_type_failed`.
+        log.error(
+            "discover_failed",
+            project_id=project_id,
+            asset_type=asset_type,
+            error_type=type(e).__name__,
+            error=str(e)[:300],
+        )
         return []
+    log.info("discover_complete", asset_type=asset_type, count=len(resources))
+    return resources
 
 def get_resource_details_json(mapping):
-    """Gets the full JSON configuration for a selected resource using 'gcloud describe'."""
+    """Get the full JSON configuration for a resource via the Cloud
+    Asset Inventory SDK.
+
+    PERF-T0 migration: replaces per-type ``gcloud <service> describe``
+    subprocess calls. The SDK lookup uses the asset_type + resource_name
+    to find the right asset in the project's inventory, then returns
+    the equivalent JSON shape so downstream snapshot_scrubber +
+    LLM-prompt building stay unchanged.
+
+    Why this can drop most of the location / parent-flag logic that
+    the old subprocess version needed:
+      * gcloud's ``--zone`` / ``--region`` flags were a CLI ergonomic;
+        the underlying API has always identified resources by their
+        full URN. Cloud Asset Inventory returns assets by URN, so the
+        location is implicit in the asset's name.
+      * Same for the ``--cluster`` / ``--keyring`` parent flags --
+        they were CLI-side disambiguation. The asset's URN encodes
+        the parent path natively.
+
+    Returns the SAME str-or-None contract: JSON-serialised dict on
+    success, None when no matching asset was found in the inventory.
+    """
     tf_type = mapping["tf_type"]
     log.info("describe_start",
              tf_type=tf_type,
              resource_name=mapping.get("resource_name"))
 
-    # Previously: a debug print dumping the entire TF_TYPE_TO_GCLOUD_INFO
-    # dictionary on every describe call. Phase 0 audit flagged this as
-    # noise-level output in the hot path (~30 lines of JSON per call, drowns
-    # the real narrative). Removed; the dict is static config loaded at
-    # import time, so if you need to inspect it, do so at the REPL rather
-    # than on every invocation.
-
     info = config.TF_TYPE_TO_GCLOUD_INFO.get(tf_type)
-
     if not info:
         log.error("describe_unsupported_type", tf_type=tf_type,
                   reason="no describe command configured")
         return None
 
-    command_args = [config.GCLOUD_CMD_PATH, "--quiet"]
-    command_args.extend(info["describe_command"].split())
-    
-    resource_name_to_pass = mapping["resource_name"]
-    if "name_format" in info:
-        resource_name_to_pass = info["name_format"].format(name=mapping["resource_name"])
-    
-    command_args.append(resource_name_to_pass)
-    command_args.append(f"--project={mapping['project_id']}")
-    
-    # Location flag (--zone OR --region) -- C5.1 picker handles
-    # zonal-only, regional-only, and dual-mode (GKE) resources via
-    # _resolve_location_flag. Previously this was three hardcoded
-    # branches that always emitted --zone for any resource declaring
-    # zone_flag, which broke regional GKE clusters (location shape
-    # "us-central1" rejected by `gcloud container ... describe`).
-    command_args.extend(_resolve_location_flag(info, mapping))
+    # Reverse-lookup the asset_type from tf_type. Necessary because the
+    # mapping dict (config.ASSET_TO_TERRAFORM_MAP) is asset->tf; the
+    # describe path knows tf and needs asset.
+    asset_type = None
+    for at, tt in config.ASSET_TO_TERRAFORM_MAP.items():
+        if tt == tf_type:
+            asset_type = at
+            break
+    if not asset_type:
+        log.error(
+            "describe_unsupported_type", tf_type=tf_type,
+            reason="no asset_type maps to this tf_type",
+        )
+        return None
 
-    # Parent-identifier flag for nested resources. Each nested resource
-    # type adds its own (flag, mapping_key) pair here. The pattern is
-    # always the same: the asset path includes the parent's URN segment
-    # (`/clusters/<name>/`, `/keyRings/<name>/`), run.py's mapper extracts
-    # the parent name into mapping["<key>"] via extract_path_segment(),
-    # and the describe call appends `<flag> <name>`. To add another
-    # nested type (DNS records inside a managed zone, BigQuery tables
-    # inside a dataset, etc.), follow the same three-step pattern -- no
-    # generic abstraction needed until we have 4+ instances of it.
-    if "cluster_flag" in info and "cluster" in mapping:  # C5: node_pool
-        command_args.extend([info["cluster_flag"], mapping["cluster"]])
-    if "keyring_flag" in info and "keyring" in mapping:  # P2-3: crypto_key
-        command_args.extend([info["keyring_flag"], mapping["keyring"]])
+    try:
+        json_output = _asset_client.get_resource_state_as_json(
+            project_id=mapping["project_id"],
+            asset_type=asset_type,
+            asset_name=mapping["resource_name"],
+        )
+    except Exception as e:
+        log.error(
+            "describe_failed",
+            tf_type=tf_type,
+            resource_name=mapping.get("resource_name"),
+            error_type=type(e).__name__,
+            error=str(e)[:300],
+        )
+        return None
 
-    command_args.append("--format=json")
-    
-    json_output = shell_runner.run_command(command_args)
     if json_output:
         log.info("describe_complete", tf_type=tf_type,
                  resource_name=mapping.get("resource_name"))
