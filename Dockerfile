@@ -112,10 +112,14 @@ RUN mkdir -p /tmp/imported
 # --- Process supervision + entrypoint ---
 ENTRYPOINT ["/usr/bin/tini", "--"]
 
-# Default command: Streamlit UI on $PORT.
-# Phase 6 (PUI-1) creates app/main.py; until then, this fails fast
-# at container start, which is the right signal for Phase 5A
-# integration testing. Override via `docker run ... <cmd>` for CLI
-# ad-hoc use:
-#   docker run --rm -it mtagent python -m my-terraform-agent.importer.run
-CMD ["sh", "-c", "streamlit run app/main.py --server.port=${PORT} --server.address=0.0.0.0 --server.headless=true"]
+# Default command: container_entrypoint.sh -- a small wrapper that
+# auto-configures `gcloud config set account/project` from the Cloud
+# Run metadata server, then exec's Streamlit. Without this wrapper,
+# subprocess `gcloud storage rsync` calls fail with "no active account
+# selected" because the gcloud CLI doesn't inherit ADC the way Python
+# SDKs do. Surfaced during PUI-1 SMOKE; see the script's docstring.
+#
+# The script is exec'd via `sh` (not direct invoke) so any future
+# scripts/ overlays / volume mounts can shadow it without rebuilding.
+RUN chmod +x /app/scripts/container_entrypoint.sh
+CMD ["/app/scripts/container_entrypoint.sh"]
