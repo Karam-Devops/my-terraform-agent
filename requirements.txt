@@ -27,7 +27,11 @@ google-cloud-iam==2.20.0
 google-cloud-kms==3.5.0
 google-cloud-pubsub==2.32.0
 google-cloud-resource-manager==1.17.0
-google-cloud-run==0.10.16
+# google-cloud-run dropped: 0.10.x required protobuf<6.0 which conflicts
+# with our pinned protobuf==6.33.6 (and everything else requires >=4.25.8).
+# Newer google-cloud-run versions exist but pinning to a specific one
+# risks future re-conflict. Cloud Run v2 describes use googleapiclient
+# (run/v2 discovery) -- same pattern as Cloud SQL Admin describes below.
 google-cloud-storage==3.10.1
 google-cloud-vectorsearch==0.10.0
 # google-api-python-client: for Cloud SQL Admin API (no first-class

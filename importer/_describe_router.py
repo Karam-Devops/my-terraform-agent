@@ -76,8 +76,10 @@ _kms_client = None
 _pubsub_publisher_client = None
 _pubsub_subscriber_client = None
 _iam_client = None
-_run_services_client = None
 _sql_admin_client = None  # googleapiclient discovery (no first-class SDK)
+_run_admin_client = None  # googleapiclient discovery (google-cloud-run
+                           # had protobuf<6.0 conflict with our pinned
+                           # protobuf 6.x; same pattern as SQL)
 
 
 def _get_storage_client():
@@ -192,12 +194,21 @@ def _get_iam_client():
     return _iam_client
 
 
-def _get_run_services_client():
-    global _run_services_client
-    if _run_services_client is None:
-        from google.cloud import run_v2
-        _run_services_client = run_v2.ServicesClient()
-    return _run_services_client
+def _get_run_admin_client():
+    """Cloud Run Admin API via googleapiclient discovery.
+
+    google-cloud-run was dropped due to a protobuf version conflict
+    with the rest of our google-cloud-* stack. Discovery client is
+    a stable fallback that hits the same run.googleapis.com endpoints
+    gcloud uses.
+    """
+    global _run_admin_client
+    if _run_admin_client is None:
+        from googleapiclient.discovery import build
+        _run_admin_client = build(
+            "run", "v2", cache_discovery=False,
+        )
+    return _run_admin_client
 
 
 def _get_sql_admin_client():
@@ -606,22 +617,30 @@ def _describe_cloud_run_v2_service(
 ) -> Optional[dict]:
     """Cloud Run v2 service (regional).
 
-    Requires ``location`` in extras.
+    Requires ``location`` in extras. Uses googleapiclient (run/v2
+    discovery API) -- google-cloud-run was dropped due to protobuf
+    version conflict with our pinned protobuf 6.x stack. Returns the
+    dict directly (already camelCase from the REST API).
     """
     location = extras.get("location") or extras.get("region")
     if not location:
         _log.error("describe_cloud_run_missing_location",
                    project_id=project_id, name=name)
         return None
-    client = _get_run_services_client()
+    client = _get_run_admin_client()
     svc_path = (
         f"projects/{project_id}/locations/{location}/services/{name}"
     )
     try:
-        svc = client.get_service(name=svc_path)
-    except gcs_exceptions.NotFound:
-        return None
-    return _proto_to_camel_dict(svc)
+        return client.projects().locations().services().get(
+            name=svc_path,
+        ).execute()
+    except Exception as e:
+        # googleapiclient raises HttpError on 404 -- treat as not-found.
+        # Other failures propagate to gcp_client's outer except.
+        if "404" in str(e) or "Not Found" in str(e):
+            return None
+        raise
 
 
 # ----------------------------------------------------------------------

@@ -95,12 +95,11 @@ def _install_google_cloud_asset_stub() -> None:
         iam_stub.IAMClient = MagicMock(name="iam.IAMClient")
         sys.modules["google.cloud.iam_admin_v1"] = iam_stub
 
-    if "google.cloud.run_v2" not in sys.modules:
-        run_stub = types.ModuleType("google.cloud.run_v2")
-        run_stub.ServicesClient = MagicMock(name="run.ServicesClient")
-        sys.modules["google.cloud.run_v2"] = run_stub
+    # google-cloud-run was dropped due to protobuf version conflict --
+    # _describe_cloud_run_v2_service uses googleapiclient instead.
 
-    # googleapiclient (for SQL Admin -- no first-class google-cloud-sql SDK)
+    # googleapiclient (for Cloud SQL Admin AND Cloud Run v2 -- both use
+    # discovery-based clients now after dropping google-cloud-run)
     if "googleapiclient" not in sys.modules:
         sys.modules["googleapiclient"] = types.ModuleType("googleapiclient")
     if "googleapiclient.discovery" not in sys.modules:
