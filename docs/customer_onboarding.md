@@ -61,11 +61,29 @@ Pick the path that fits your security posture:
 
 #### Path A — Quick setup (most customers, ~30 seconds)
 
-Single high-level role + the impersonation grant:
+Single high-level role + the impersonation grant + the one required API.
+
+**Easiest option — run our scripted version:**
+
+```bash
+# Download the script (or get it from your mtagent contact)
+# Then:
+CUSTOMER_PROJECT_ID=YOUR_PROJECT_ID \
+MTAGENT_SA=mtagent-runtime@<our-host-project>.iam.gserviceaccount.com \
+  ./onboard_customer_project.sh
+```
+
+The script is idempotent (safe to re-run), prints a summary, and
+includes the revoke commands at the end for your records.
+
+**Manual equivalent (if you want to inspect each step):**
 
 ```bash
 PROJECT=YOUR_PROJECT_ID
 SA=mtagent-runtime@<our-host-project>.iam.gserviceaccount.com
+
+# Enable the one required API (Cloud Asset; for resource discovery)
+gcloud services enable cloudasset.googleapis.com --project=$PROJECT
 
 # Grant project-wide read access (covers compute, GKE, storage, KMS,
 # pubsub, IAM viewer, etc. -- all the read-only verbs we need)
@@ -81,7 +99,7 @@ gcloud iam service-accounts add-iam-policy-binding $SA \
 ```
 
 `roles/viewer` is GCP's standard project-level read-only role. Two
-grants total. Done.
+grants + one API. Done.
 
 #### Path B — Least privilege (security-conscious customers, ~5 minutes)
 
