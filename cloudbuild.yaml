@@ -88,6 +88,11 @@ steps:
       - --set-env-vars=TRANSLATOR_TARGETS_ALLOWED=aws
       - --set-env-vars=MAX_TRANSLATION_WORKERS=4
       - --set-env-vars=MTAGENT_LOG_FORMAT=json
+      # PSA-5: route terraform state to GCS via the native gcs
+      # backend (vs local terraform.tfstate). The seed_backend_config
+      # helper in common/storage.py is gated on this env var so
+      # local-dev runs without the var keep using local state.
+      - --set-env-vars=MTAGENT_USE_GCS_BACKEND=1
       - --set-env-vars=MTAGENT_LOG_LEVEL=INFO
       - --set-env-vars=PYTHONUNBUFFERED=1
     waitFor: [push-sha]

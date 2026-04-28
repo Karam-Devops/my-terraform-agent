@@ -169,6 +169,22 @@ def init(workdir=None, upgrade=False):
             # without grounding -> hallucinated cluster fields.
             if seed_providers_stub(workdir):
                 log.info("providers_stub_seeded", workdir=workdir)
+            # PSA-5 (2026-04-28): also seed a backend "gcs" block so
+            # terraform init initializes state directly against GCS
+            # (no local terraform.tfstate). Gated on
+            # MTAGENT_USE_GCS_BACKEND env var (set by Cloud Run via
+            # cloudbuild.yaml). Local-dev runs without the env var
+            # see this as a no-op and keep using local state.
+            #
+            # project_id is the LAST path segment of workdir per the
+            # common.workdir.resolve_project_workdir convention --
+            # avoids changing init()'s signature for production-only
+            # behaviour.
+            from common.storage import seed_backend_config
+            project_id = os.path.basename(workdir.rstrip("/\\"))
+            if seed_backend_config(workdir, project_id):
+                log.info("backend_config_seeded",
+                         workdir=workdir, project_id=project_id)
         except OSError as seed_err:
             # Non-fatal: terraform init will create a fresh lock if the
             # seed copy failed (permissions, disk). Log so it's visible.

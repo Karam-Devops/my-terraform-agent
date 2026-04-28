@@ -278,5 +278,185 @@ class PersistWorkdirTests(unittest.TestCase):
             storage.persist_workdir(self.local_path, "dev-proj-470211")
 
 
+class GcsBackendEnabledTests(unittest.TestCase):
+    """Pin the MTAGENT_USE_GCS_BACKEND env-var gate.
+
+    Default OFF preserves local-dev behaviour (no GCS auth required for
+    `terraform init`). Cloud Run cloudbuild.yaml sets it ON.
+    """
+
+    def test_unset_returns_false(self):
+        env = {k: v for k, v in os.environ.items()
+               if k != "MTAGENT_USE_GCS_BACKEND"}
+        with patch.dict(os.environ, env, clear=True):
+            self.assertFalse(storage.gcs_backend_enabled())
+
+    def test_set_to_1_returns_true(self):
+        with patch.dict(os.environ, {"MTAGENT_USE_GCS_BACKEND": "1"}):
+            self.assertTrue(storage.gcs_backend_enabled())
+
+    def test_set_to_true_returns_true(self):
+        with patch.dict(os.environ, {"MTAGENT_USE_GCS_BACKEND": "true"}):
+            self.assertTrue(storage.gcs_backend_enabled())
+
+    def test_truthy_aliases_all_work(self):
+        for val in ("yes", "on", "TRUE", "On", "Yes"):
+            with self.subTest(val=val):
+                with patch.dict(os.environ,
+                                {"MTAGENT_USE_GCS_BACKEND": val}):
+                    self.assertTrue(storage.gcs_backend_enabled(),
+                                    f"value {val!r} should enable")
+
+    def test_falsy_values_return_false(self):
+        for val in ("0", "false", "no", "off", "", "FALSE"):
+            with self.subTest(val=val):
+                with patch.dict(os.environ,
+                                {"MTAGENT_USE_GCS_BACKEND": val}):
+                    self.assertFalse(storage.gcs_backend_enabled(),
+                                     f"value {val!r} should disable")
+
+
+class GenerateBackendConfigTests(unittest.TestCase):
+    """Pin the HCL output shape -- terraform parses this verbatim."""
+
+    def test_output_contains_backend_block(self):
+        with patch.dict(os.environ, {"MTAGENT_STATE_BUCKET": "test-bucket"}):
+            hcl = storage.generate_backend_config("dev-proj-470211")
+        # Required terraform block markers
+        self.assertIn("terraform {", hcl)
+        self.assertIn('backend "gcs" {', hcl)
+        self.assertIn('bucket = "test-bucket"', hcl)
+        self.assertIn(
+            'prefix = "tenants/default/projects/dev-proj-470211/terraform-state"',
+            hcl,
+        )
+
+    def test_output_uses_tenant_id_when_provided(self):
+        with patch.dict(os.environ, {"MTAGENT_STATE_BUCKET": "b"}):
+            hcl = storage.generate_backend_config(
+                "dev-proj-470211", tenant_id="acme-corp",
+            )
+        self.assertIn(
+            'prefix = "tenants/acme-corp/projects/dev-proj-470211/terraform-state"',
+            hcl,
+        )
+
+    def test_validates_project_id(self):
+        with patch.dict(os.environ, {"MTAGENT_STATE_BUCKET": "b"}):
+            with self.assertRaises(ValueError):
+                storage.generate_backend_config("BAD-PROJECT")
+
+    def test_output_starts_with_warning_comment(self):
+        """Operators reading the file should immediately see it's
+        auto-generated + understand the regen path."""
+        with patch.dict(os.environ, {"MTAGENT_STATE_BUCKET": "b"}):
+            hcl = storage.generate_backend_config("dev-proj-470211")
+        self.assertTrue(hcl.startswith("# AUTO-GENERATED"),
+                        "first line must be the warning comment")
+        self.assertIn("seed_backend_config", hcl,
+                      "should reference the regen helper by name")
+
+
+class SeedBackendConfigTests(unittest.TestCase):
+    """Pin the seed_backend_config contract: gate, idempotency, write."""
+
+    def setUp(self):
+        self._tmpdir = tempfile.TemporaryDirectory()
+        self.workdir = self._tmpdir.name
+
+    def tearDown(self):
+        self._tmpdir.cleanup()
+
+    def test_no_op_when_env_disabled(self):
+        """Local-dev path: env unset -> no file written."""
+        env = {k: v for k, v in os.environ.items()
+               if k != "MTAGENT_USE_GCS_BACKEND"}
+        with patch.dict(os.environ, env, clear=True):
+            result = storage.seed_backend_config(
+                self.workdir, "dev-proj-470211",
+            )
+        self.assertFalse(result, "should return False when gated off")
+        self.assertFalse(
+            os.path.isfile(os.path.join(self.workdir,
+                                        "_backend_seed.tf")),
+            "no file should be written when env disabled",
+        )
+
+    def test_writes_file_when_env_enabled(self):
+        with patch.dict(os.environ, {
+            "MTAGENT_USE_GCS_BACKEND": "1",
+            "MTAGENT_STATE_BUCKET": "test-bucket",
+        }):
+            result = storage.seed_backend_config(
+                self.workdir, "dev-proj-470211",
+            )
+        self.assertTrue(result)
+        target = os.path.join(self.workdir, "_backend_seed.tf")
+        self.assertTrue(os.path.isfile(target))
+        # Verify content is the expected HCL
+        with open(target, encoding="utf-8") as f:
+            content = f.read()
+        self.assertIn('backend "gcs"', content)
+        self.assertIn('bucket = "test-bucket"', content)
+
+    def test_no_op_when_file_already_exists(self):
+        """Operator may have customized the backend config; never
+        silently overwrite. Same shape as seed_lock_file +
+        seed_providers_stub (D-6 fix)."""
+        existing = "# operator's custom backend; do not touch\n"
+        target = os.path.join(self.workdir, "_backend_seed.tf")
+        with open(target, "w", encoding="utf-8") as f:
+            f.write(existing)
+        with patch.dict(os.environ, {
+            "MTAGENT_USE_GCS_BACKEND": "1",
+            "MTAGENT_STATE_BUCKET": "test-bucket",
+        }):
+            result = storage.seed_backend_config(
+                self.workdir, "dev-proj-470211",
+            )
+        self.assertFalse(result, "no-op when existing file present")
+        # Confirm we didn't overwrite it
+        with open(target, encoding="utf-8") as f:
+            self.assertEqual(f.read(), existing)
+
+    def test_validates_project_id_when_enabled(self):
+        with patch.dict(os.environ, {
+            "MTAGENT_USE_GCS_BACKEND": "1",
+            "MTAGENT_STATE_BUCKET": "b",
+        }):
+            with self.assertRaises(ValueError):
+                storage.seed_backend_config(self.workdir, "BAD-PROJECT")
+
+    def test_no_validation_when_env_disabled(self):
+        """Bad project_id passed when env is off should NOT raise --
+        the function returns early before validation. Defensive
+        against accidental local-dev calls with sloppy IDs."""
+        env = {k: v for k, v in os.environ.items()
+               if k != "MTAGENT_USE_GCS_BACKEND"}
+        with patch.dict(os.environ, env, clear=True):
+            # Should NOT raise; returns False (no-op)
+            result = storage.seed_backend_config(self.workdir, "BAD-PROJECT")
+        self.assertFalse(result)
+
+
+class PersistExcludesTests(unittest.TestCase):
+    """PSA-5: terraform.tfstate must be excluded from persist.
+
+    With the GCS backend, terraform owns its state directly in the
+    bucket; we must NEVER rsync a stray local terraform.tfstate
+    because that would clobber the canonical backend state.
+    """
+
+    def test_persist_excludes_terraform_tfstate(self):
+        """terraform.tfstate must be in the exclude list."""
+        self.assertIn("terraform.tfstate", storage._PERSIST_EXCLUDES,
+                      "terraform.tfstate must be excluded; otherwise GCS "
+                      "backend state could be clobbered by stale local file")
+
+    def test_persist_excludes_lock_info(self):
+        self.assertIn("terraform.tfstate.lock.info",
+                      storage._PERSIST_EXCLUDES)
+
+
 if __name__ == "__main__":
     unittest.main()
