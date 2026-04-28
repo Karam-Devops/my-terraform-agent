@@ -1094,12 +1094,25 @@ def run_workflow() -> WorkflowResult:
             # Re-verify the survivors (previously blocked-by-sibling).
             # Most should now pass since the broken .tf files are out
             # of the workdir.
+            #
+            # D-5 fix (2026-04-28): the previous code did
+            #     replan_rc = terraform_client.plan_for_resource(mapping)
+            #     if replan_rc == 0: ...
+            # but plan_for_resource returns a (is_success, plan_text)
+            # TUPLE, not an int return code. A tuple is never == 0, so
+            # the success branch never fired -- every re-verification
+            # was forced into still_failing regardless of actual
+            # outcome. The workflow then reported `imported=0` even
+            # when ~12 resources had actually plan-passed during
+            # re-verification. Aligns this caller with the 4 other
+            # plan_for_resource callers in this file (lines ~362, 817,
+            # 1025, 1288), all of which correctly unpack the tuple.
             still_failing = []
             for failed_item in list(failed_imports):
                 mapping = failed_item['mapping']
                 tf_address = f"{mapping['tf_type']}.{mapping['hcl_name']}"
-                replan_rc = terraform_client.plan_for_resource(mapping)
-                if replan_rc == 0:
+                is_success, _plan_output = terraform_client.plan_for_resource(mapping)
+                if is_success:
                     # Auto-promoted to imported.
                     successful_imports.append(failed_item)
                     failed_imports.remove(failed_item)
