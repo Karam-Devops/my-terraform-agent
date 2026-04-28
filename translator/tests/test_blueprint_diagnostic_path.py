@@ -26,14 +26,17 @@ import unittest
 PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
 
 
-# yaml_engine.py uses `from .. import llm_provider` -- a relative import
-# that crosses ONE MORE package boundary than translator/run.py's
-# `from . import ...` pattern handled in test_output_path.py. To make
-# the relative import resolve, we need a SYNTHETIC PARENT PACKAGE
-# (`_p33_parent`) with `translator` registered as a sub-package and
-# `llm_provider` registered as a sibling module. Loaded module gets
-# `__package__ = "_p33_parent.translator"` so `..` resolves to
-# `_p33_parent`, where the stub `llm_provider` lives.
+# yaml_engine.py historically used `from .. import llm_provider`,
+# requiring an elaborate synthetic-parent-package dance to satisfy the
+# relative import. PUI-1 SMOKE flipped that to absolute `import
+# llm_provider` (the relative form broke under Cloud Run / pytest
+# sys.path layouts). The synthetic parent package below is now
+# REDUNDANT for satisfying the import itself, but kept because it
+# also loads yaml_engine under a unique fully-qualified name, which
+# avoids cache collisions with the sibling test_output_path.py that
+# stubs `translator.yaml_engine`. We additionally stub plain
+# `llm_provider` in sys.modules so the absolute import resolves to
+# our empty stub (not the real module, which pulls in vertexai).
 _PARENT_PKG = "_p33_parent"
 _TRANSLATOR_PKG = f"{_PARENT_PKG}.translator"
 _YAML_ENGINE_MOD = f"{_TRANSLATOR_PKG}.yaml_engine"
@@ -66,10 +69,17 @@ def _load_yaml_engine():
         parent.__path__ = [PROJECT_ROOT]
         sys.modules[_PARENT_PKG] = parent
 
-    # Stub llm_provider as a sibling of the translator sub-package.
+    # Stub llm_provider as a sibling of the translator sub-package
+    # (kept for historical relative-import compat) AND as a top-level
+    # module (what yaml_engine actually uses post-PUI-1-SMOKE). The
+    # top-level stub MUST be present before yaml_engine loads,
+    # otherwise the absolute `import llm_provider` finds the real
+    # module and crashes on `import vertexai`.
     llm_provider_name = f"{_PARENT_PKG}.llm_provider"
     if llm_provider_name not in sys.modules:
         sys.modules[llm_provider_name] = types.ModuleType(llm_provider_name)
+    if "llm_provider" not in sys.modules:
+        sys.modules["llm_provider"] = types.ModuleType("llm_provider")
 
     # Synthetic translator sub-package.
     if _TRANSLATOR_PKG not in sys.modules:

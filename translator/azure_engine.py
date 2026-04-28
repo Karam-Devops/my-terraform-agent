@@ -4,7 +4,10 @@ import re
 import logging
 from typing import Optional, Dict
 from langchain_core.messages import SystemMessage, HumanMessage, AIMessage
-from .. import llm_provider
+# Absolute import: top-level llm_provider module at the repo root.
+# See importer/hcl_generator.py for the rationale on why parent-
+# relative imports break under Cloud Run / pytest sys.path layouts.
+import llm_provider
 from . import config
 
 # Initialize standard logger for enterprise observability

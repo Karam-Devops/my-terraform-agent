@@ -56,7 +56,11 @@ def _error_signature(error_message: str, resource_type: str) -> str:
 # the project-ID concepts (HOST/TARGET/DEMO) and the resolver that enforces
 # the demo-lock safety gate. Aliased to `app_config` to avoid shadowing the
 # importer-local `config` module imported above.
-from .. import config as app_config
+# Absolute import: top-level config module at the repo root. See
+# hcl_generator.py for the rationale -- the prior `from .. import` form
+# assumed importer was a sub-package which doesn't hold under the
+# Cloud Run / pytest sys.path layout.
+import config as app_config
 from common.workdir import resolve_project_workdir
 from common.errors import EngineError, PreflightError, UpstreamTimeout
 from common.logging import get_logger

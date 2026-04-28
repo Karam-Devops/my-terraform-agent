@@ -2,7 +2,13 @@
 
 from common.logging import get_logger
 
-from .. import llm_provider
+# Absolute import: llm_provider is a top-level module at the repo root
+# (= /app in the Cloud Run container with PYTHONPATH=/app). Old form
+# `from .. import llm_provider` assumed `importer` was a sub-package
+# of an outer `my-terraform-agent` package, which only resolves under
+# specific CWD layouts. Absolute import is portable across CLI / Cloud
+# Run / pytest.
+import llm_provider
 from . import config
 from . import post_llm_overrides
 from . import post_llm_validation

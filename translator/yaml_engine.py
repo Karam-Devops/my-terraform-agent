@@ -6,7 +6,11 @@ import logging
 import uuid
 from typing import Optional
 from langchain_core.messages import SystemMessage, HumanMessage
-from .. import llm_provider
+
+# Absolute import: top-level llm_provider module at the repo root.
+# See importer/hcl_generator.py for the rationale on why parent-
+# relative imports break under Cloud Run / pytest sys.path layouts.
+import llm_provider
 
 # Initialize standard logger for enterprise observability
 logger = logging.getLogger(__name__)
