@@ -1,70 +1,84 @@
 # app/main.py
-"""mtagent Streamlit UI — PSA-2 placeholder.
+"""mtagent Streamlit landing page (PUI-1).
 
-This is the entrypoint Cloud Run hits via the Dockerfile CMD:
+Entry point Cloud Run hits via the Dockerfile CMD:
 
     streamlit run app/main.py --server.port=$PORT --server.address=0.0.0.0
 
-PSA-2 (Phase 5A) ships this as a minimal status page that:
-  * Returns HTTP 200 so Cloud Run health checks pass
-  * Renders the host project + state bucket env vars so operators
-    can verify the deploy is wired correctly
-  * Includes a no-op /healthz indicator (Streamlit just needs an
-    OK response on / to be healthy)
+Streamlit treats ``app/main.py`` as the home page and auto-discovers
+files under ``app/pages/`` as additional pages, ordered by their
+numeric prefix and shown in the sidebar nav. Each page calls
+``render_sidebar()`` from ``app.ui.sidebar`` so the global project
+picker is consistent everywhere.
 
-Phase 6 PUI-1 replaces the body with the multi-page Firefly-parity
-shell (Dashboard / Inventory / Codify / Drift / Policy / Settings).
-The placeholder keeps Cloud Run live during the gap so we can iterate
-on the UI without re-deploying the container every time.
+Why this file is small: the per-engine work lives in the page files
+(``app/pages/N_*.py``). Keeping main.py minimal means the cold-start
+import cost is just Streamlit + the sidebar helper -- engine modules
+are imported lazily by the pages that need them.
 """
 
-import os
-
 import streamlit as st
+
+from app.ui.sidebar import render_sidebar
 
 
 st.set_page_config(
     page_title="mtagent",
     page_icon="🚀",
-    layout="centered",
-    initial_sidebar_state="collapsed",
+    layout="wide",
+    initial_sidebar_state="expanded",
 )
+
+# Render the sidebar (project picker + runtime info). Returns the
+# selected project_id, but the landing page itself doesn't use it
+# directly -- it's persisted to st.session_state for the per-engine
+# pages to read.
+render_sidebar()
 
 st.title("🚀 mtagent")
-st.caption("Multi-cloud Terraform automation — Round-1 SaaS")
+st.caption("Multi-cloud Terraform automation — Round-1 SaaS POC")
 
 st.markdown("---")
-
-st.success("✅ Cloud Run deploy successful")
 
 st.markdown(
-    "**Status:** Phase 5A scaffolding online. The full Streamlit UI is "
-    "under construction — Phase 6 (PUI-1..PUI-10) replaces this "
-    "placeholder with the Firefly-parity multi-page shell."
+    "**Pick an engine from the left sidebar** to get started. "
+    "Each engine reads from / writes to the per-project workdir "
+    "stored in GCS, so all four engines see a consistent view."
 )
 
-st.markdown("### Runtime configuration")
-
-# Show env vars so operators can verify the deploy picked up the
-# right values. Uses .get with explicit default for clarity in the UI
-# (vs the actual fallback chain in config.py).
-config_rows = [
-    ("Host project", os.environ.get("HOST_PROJECT_ID", "(unset)")),
-    ("State bucket", f"gs://{os.environ.get('MTAGENT_STATE_BUCKET', '(unset)')}/"),
-    ("Region", os.environ.get("GCP_LOCATION", "(unset)")),
-    ("Translator targets", os.environ.get("TRANSLATOR_TARGETS_ALLOWED", "(unset)")),
-    ("Persist blueprints", os.environ.get("MTAGENT_PERSIST_BLUEPRINTS", "(unset)")),
-    ("Auto-quarantine", os.environ.get("IMPORTER_AUTO_QUARANTINE", "(unset)")),
-    ("Max translation workers", os.environ.get("MAX_TRANSLATION_WORKERS", "(unset)")),
-    ("Import base", os.environ.get("MTAGENT_IMPORT_BASE", "(unset)")),
-]
-
-st.table({"Setting": [r[0] for r in config_rows],
-          "Value": [r[1] for r in config_rows]})
+# Quick orientation grid -- mirrors the page nav so first-time
+# operators see what each engine does at a glance.
+col1, col2 = st.columns(2)
+with col1:
+    st.markdown("#### 📥 Importer")
+    st.caption(
+        "Discover GCP resources and generate Terraform code. "
+        "Run this first on a new project."
+    )
+    st.markdown("#### 🔄 Translator")
+    st.caption(
+        "Convert imported `google_*` HCL into AWS / Azure equivalents. "
+        "*(PUI-3 — coming soon)*"
+    )
+    st.markdown("#### 🔍 Detector")
+    st.caption(
+        "Compare cloud state vs Terraform state to find unmanaged drift. "
+        "*(PUI-4 — coming soon)*"
+    )
+with col2:
+    st.markdown("#### 🛡️ Policy")
+    st.caption(
+        "Scan resources against vendored Rego policies; report violations. "
+        "*(PUI-5 — coming soon)*"
+    )
+    st.markdown("#### 📊 Dashboard")
+    st.caption(
+        "Cached snapshots of every engine's last run. "
+        "*(PUI-2 — coming soon)*"
+    )
 
 st.markdown("---")
-
 st.caption(
-    "Built from `app/main.py` (PSA-2 placeholder). Replace this body "
-    "during Phase 6 PUI-1 with the Streamlit multi-page shell."
+    "Phase 6 PUI-1 ships the Importer surface. The remaining engines "
+    "land as PUI-2..PUI-5 once the per-page UX is settled."
 )
