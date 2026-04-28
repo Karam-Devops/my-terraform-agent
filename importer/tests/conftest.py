@@ -76,16 +76,28 @@ def _install_google_cloud_asset_stub() -> None:
         sys.modules["google.protobuf"] = types.ModuleType("google.protobuf")
     if "google.protobuf.json_format" not in sys.modules:
         jf_stub = types.ModuleType("google.protobuf.json_format")
+        import json as _json
 
         def _stub_message_to_dict(msg, **_kwargs):
             # Tests that need real conversion patch this; default returns
-            # an empty dict so _asset_to_legacy_dict's logic doesn't
-            # crash on a non-dict result.
+            # the input as-is when it's already a dict (covers the
+            # _asset_to_legacy_dict pattern).
             if isinstance(msg, dict):
                 return msg
             return {}
 
+        def _stub_message_to_json(msg, **_kwargs):
+            # MessageToJson is the bulletproof path used by
+            # _struct_to_dict (PUI-1 SMOKE 2026-04-28 fix). For tests,
+            # if the input is already a dict (most test fixtures), JSON-
+            # serialize it directly. Otherwise return "{}" so the
+            # downstream json.loads doesn't crash.
+            if isinstance(msg, dict):
+                return _json.dumps(msg)
+            return "{}"
+
         jf_stub.MessageToDict = _stub_message_to_dict
+        jf_stub.MessageToJson = _stub_message_to_json
         sys.modules["google.protobuf.json_format"] = jf_stub
 
 

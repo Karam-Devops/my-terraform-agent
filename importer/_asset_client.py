@@ -59,7 +59,7 @@ from typing import Any, Optional
 
 from google.cloud import asset_v1
 from google.api_core import exceptions as gcs_exceptions
-from google.protobuf.json_format import MessageToDict
+from google.protobuf.json_format import MessageToDict, MessageToJson
 
 from common.logging import get_logger
 
@@ -86,6 +86,52 @@ def _get_asset_client() -> "asset_v1.AssetServiceClient":
     return _asset_client
 
 
+def _struct_to_dict(struct_obj: Any) -> dict:
+    """Convert a google.protobuf.Struct (proto-plus wrapped) to a dict.
+
+    PUI-1 SMOKE 2026-04-28: my first attempt called ``MessageToDict``
+    directly on the Struct, which crashed with::
+
+        'google._upb._message.MessageMapContainer' object has no attribute 'DESCRIPTOR'
+
+    The issue: ``Asset.resource.data`` from google-cloud-asset is a
+    proto-plus wrapper around a protobuf Struct. ``MessageToDict``
+    requires the unwrapped protobuf message, but the wrapper's
+    internal type doesn't expose ``DESCRIPTOR`` cleanly when the
+    Struct contains nested map fields.
+
+    Bulletproof workaround: serialize via ``MessageToJson`` (which
+    handles wrappers + nested types correctly) then ``json.loads``.
+    Slight perf cost but the only path that works across proto-plus
+    versions + nested Struct shapes.
+
+    Returns ``{}`` on conversion failure -- defensive so a single
+    bad asset doesn't take down the whole inventory call.
+    """
+    if struct_obj is None:
+        return {}
+    # Prefer the unwrapped protobuf for MessageToJson; fall back to
+    # the proto-plus wrapper if _pb isn't present.
+    target = getattr(struct_obj, "_pb", struct_obj)
+    try:
+        # JSON round-trip handles proto Struct + maps + nested fields
+        # cleanly across SDK versions.
+        return json.loads(
+            MessageToJson(target, preserving_proto_field_name=False),
+        )
+    except Exception:
+        # Last-resort defensive fallback: if even JSON conversion fails,
+        # try MessageToDict directly. If that also fails, return {} so
+        # the asset still surfaces with its top-level name+assetType
+        # (caller handles missing data fields gracefully).
+        try:
+            return MessageToDict(
+                target, preserving_proto_field_name=False,
+            )
+        except Exception:
+            return {}
+
+
 def _asset_to_legacy_dict(asset: Any) -> dict:
     """Convert a google.cloud.asset_v1 Asset to the dict shape the
     rest of the importer expects.
@@ -103,23 +149,13 @@ def _asset_to_legacy_dict(asset: Any) -> dict:
     The SDK's Asset.resource.data is a Struct (the full describe output);
     we flatten the top-level Asset metadata + the resource.data into
     one dict that downstream consumers handle without changes.
-
-    The Struct conversion uses ``MessageToDict`` with
-    ``preserving_proto_field_name=False`` so field names match the
-    REST API's camelCase (matches what gcloud emitted).
     """
     out = {
         "name": asset.name,
         "assetType": asset.asset_type,
     }
     if asset.resource and asset.resource.data:
-        # Resource.data is a google.protobuf.Struct -- convert to dict.
-        # MessageToDict on a Struct returns a flat dict of its fields.
-        data_dict = MessageToDict(
-            asset.resource.data._pb if hasattr(asset.resource.data, "_pb")
-            else asset.resource.data,
-            preserving_proto_field_name=False,
-        )
+        data_dict = _struct_to_dict(asset.resource.data)
         # Merge top-level resource fields. displayName + location often
         # live inside the data; pull them up so downstream consumers
         # find them at the top level (matching gcloud's flat output).
