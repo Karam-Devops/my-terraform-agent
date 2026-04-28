@@ -157,12 +157,24 @@ def init(workdir=None, upgrade=False):
              upgrade=upgrade)
     if not upgrade and workdir:
         try:
-            from common.workdir import seed_lock_file
+            from common.workdir import seed_lock_file, seed_providers_stub
             if seed_lock_file(workdir):
                 log.info("lock_file_seeded", workdir=workdir)
+            # D-6 fix (2026-04-28): also seed a tiny providers stub so
+            # `terraform init` actually downloads providers on the very
+            # first call against an empty workdir. Without this, init
+            # creates `.terraform/` but skips provider download (no .tf
+            # files declare any providers yet), and the KB-bootstrap
+            # step that fires later sees an empty schema -> LLM operates
+            # without grounding -> hallucinated cluster fields.
+            if seed_providers_stub(workdir):
+                log.info("providers_stub_seeded", workdir=workdir)
         except OSError as seed_err:
             # Non-fatal: terraform init will create a fresh lock if the
             # seed copy failed (permissions, disk). Log so it's visible.
+            # Note: a missing providers stub will silently re-trigger
+            # the D-6 broken state -- we log as warning so operators
+            # spot it in incident retros.
             log.warning("lock_file_seed_failed",
                         workdir=workdir,
                         error=str(seed_err),

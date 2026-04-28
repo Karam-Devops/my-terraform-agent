@@ -100,6 +100,17 @@ _DEFAULT_BASE_RELATIVE = "imported"
 _PROVIDER_LOCK_RELATIVE = os.path.join("provider_versions", ".terraform.lock.hcl")
 _PROVIDER_LOCK_FILENAME = ".terraform.lock.hcl"
 
+# Companion to the lock file: a minimal `terraform { required_providers
+# { ... } }` block, also copied into every fresh workdir. Without this,
+# the importer's preflight `terraform init` runs against an empty
+# workdir (no .tf files yet), which creates `.terraform/` but does NOT
+# download any providers. The KB-bootstrap step that fires later then
+# queries an empty provider schema and the LLM operates without
+# grounding. See `seed_providers_stub()` and `provider_versions/
+# _providers_seed.tf` for the full rationale (D-6, 2026-04-28).
+_PROVIDERS_SEED_RELATIVE = os.path.join("provider_versions", "_providers_seed.tf")
+_PROVIDERS_SEED_FILENAME = "_providers_seed.tf"
+
 # Cached absolute base dir. Reset via reset_cache().
 _cached_base: Optional[str] = None
 
@@ -255,6 +266,59 @@ def seed_lock_file(workdir: str) -> bool:
     if os.path.isfile(target):
         return False
     source = canonical_lock_file_path()
+    if not os.path.isfile(source):
+        return False
+    shutil.copy2(source, target)
+    return True
+
+
+def canonical_providers_seed_path() -> str:
+    """Absolute path to ``provider_versions/_providers_seed.tf``.
+
+    Companion to :func:`canonical_lock_file_path`. See the
+    ``_PROVIDERS_SEED_RELATIVE`` constant comment for why this seed
+    file exists (D-6 fix, 2026-04-28: ensures `terraform init` actually
+    downloads providers on first run against an empty workdir).
+    """
+    return os.path.join(_repo_root(), _PROVIDERS_SEED_RELATIVE)
+
+
+def seed_providers_stub(workdir: str) -> bool:
+    """Copy the canonical providers-seed `.tf` file into ``workdir`` if absent.
+
+    Called by ``importer.terraform_client.init()`` immediately after
+    :func:`seed_lock_file`. The two seeds work together: the lock pins
+    the version+hash, the providers stub declares the source so
+    ``terraform init`` actually pulls the provider into ``.terraform/``.
+
+    Behaviour mirrors :func:`seed_lock_file`:
+
+      * If ``workdir/_providers_seed.tf`` already exists -> no-op
+        (operator's existing file wins; we never silently overwrite).
+      * If the canonical seed at ``provider_versions/_providers_seed.tf``
+        does not exist -> no-op (clean fallback; ``terraform init``
+        will create or skip provider download as it would normally).
+      * Otherwise, copy the seed into ``workdir``.
+
+    Args:
+        workdir: Absolute path to a per-project working directory. Must
+            already exist (caller's responsibility, typically via
+            :func:`resolve_project_workdir` with ``create=True``).
+
+    Returns:
+        ``True`` if the seed was copied; ``False`` if the seed was a
+        no-op (already present, or no canonical seed available).
+
+    Raises:
+        OSError: Copy failed (permissions, disk full). Propagated so the
+            init path fails fast rather than silently running without a
+            provider declaration -- which would put us right back into
+            the D-6 broken state.
+    """
+    target = os.path.join(workdir, _PROVIDERS_SEED_FILENAME)
+    if os.path.isfile(target):
+        return False
+    source = canonical_providers_seed_path()
     if not os.path.isfile(source):
         return False
     shutil.copy2(source, target)

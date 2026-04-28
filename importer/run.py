@@ -893,8 +893,38 @@ def run_workflow() -> WorkflowResult:
             reason=str(e),
         ) from e
     print(f"   - 📁 Per-project workdir: {workdir}")
-    if not os.path.isdir(os.path.join(workdir, ".terraform")):
-        if terraform_client.init(workdir=workdir) is None:
+    # D-6 fix (2026-04-28): the prior check (`.terraform/` exists ->
+    # skip init) was insufficient. A workdir whose first `terraform
+    # init` ran against an empty directory ends up with `.terraform/`
+    # present BUT no providers under `.terraform/providers/`. The KB
+    # bootstrap later fails because the schema query returns nothing,
+    # the LLM operates without grounding, and complex resources (GKE
+    # clusters, compute instances) get hallucinated HCL.
+    #
+    # Detect that incomplete state by checking whether ANY provider
+    # has been installed. If not, force a re-init with -upgrade so the
+    # newly-seeded `_providers_seed.tf` (see seed_providers_stub) gets
+    # acted on. The seed file is a no-op when seed_lock_file already
+    # ran -- only the provider download is forced.
+    needs_init = not os.path.isdir(os.path.join(workdir, ".terraform"))
+    if not needs_init:
+        # `.terraform/` exists -- check if providers are actually installed.
+        providers_dir = os.path.join(workdir, ".terraform", "providers")
+        if not os.path.isdir(providers_dir) or not os.listdir(providers_dir):
+            _log.warning("workdir_init_incomplete",
+                         workdir=workdir,
+                         reason=("`.terraform/` present but `.terraform/providers/`"
+                                 " is missing or empty -- forcing re-init to"
+                                 " recover from D-6 broken state"))
+            needs_init = True
+
+    if needs_init:
+        # upgrade=True ensures the providers stub gets acted on even
+        # if a stale `.terraform.lock.hcl` is present. Necessary for
+        # the broken-existing-workdir recovery path.
+        upgrade_flag = os.path.isdir(os.path.join(workdir, ".terraform"))
+        if terraform_client.init(workdir=workdir,
+                                 upgrade=upgrade_flag) is None:
             # terraform init returns None on failure (current contract).
             # Without a usable plugin cache nothing downstream will work,
             # so this is a preflight failure -- raise, don't return.

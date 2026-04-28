@@ -126,5 +126,123 @@ class SeedLockFileTests(unittest.TestCase):
         self.assertEqual(path, expected)
 
 
+class SeedProvidersStubTests(unittest.TestCase):
+    """Pin the seed_providers_stub() contract.
+
+    Why this gets dedicated tests (D-6 fix, 2026-04-28):
+    Without the providers stub seeded into a fresh workdir, the
+    importer's preflight `terraform init` runs against an empty
+    directory, creates `.terraform/` but downloads NO providers, and
+    the KB-bootstrap that fires later sees an empty provider schema.
+    The LLM then operates without grounding and hallucinates fields
+    on complex resources (clusters, instances). The three behaviours
+    pinned below mirror seed_lock_file's contract -- they prevent
+    regressing the silent-no-provider-download failure mode.
+    """
+
+    def setUp(self):
+        # Mirror SeedLockFileTests setup -- isolated tmp + patched
+        # _repo_root so canonical_providers_seed_path() resolves
+        # inside the sandbox.
+        self._tmpdir = tempfile.TemporaryDirectory()
+        self.tmp = self._tmpdir.name
+
+        self.workdir = os.path.join(self.tmp, "imported", "test-proj-002")
+        os.makedirs(self.workdir, exist_ok=True)
+
+        self.canonical_dir = os.path.join(self.tmp, "provider_versions")
+        os.makedirs(self.canonical_dir, exist_ok=True)
+        self.canonical = os.path.join(self.canonical_dir,
+                                      "_providers_seed.tf")
+
+        self._patcher = patch.object(workdir, "_repo_root",
+                                     return_value=self.tmp)
+        self._patcher.start()
+
+    def tearDown(self):
+        self._patcher.stop()
+        self._tmpdir.cleanup()
+
+    # -- behaviour 1: never overwrite an existing seed ---------------------
+
+    def test_existing_stub_is_never_overwritten(self):
+        """If the workdir already has a `_providers_seed.tf`, the seed
+        must NOT touch it. An operator that's pinned a custom provider
+        version (e.g. for a beta feature test) must keep their pin --
+        same logic as seed_lock_file's no-overwrite contract."""
+        existing_contents = b'# operator-pinned providers; do not touch\n'
+        target = os.path.join(self.workdir, "_providers_seed.tf")
+        with open(target, "wb") as f:
+            f.write(existing_contents)
+
+        with open(self.canonical, "wb") as f:
+            f.write(b"# canonical seed with DIFFERENT version\n")
+
+        result = workdir.seed_providers_stub(self.workdir)
+
+        self.assertFalse(result, "no-op should return False")
+        with open(target, "rb") as f:
+            self.assertEqual(f.read(), existing_contents,
+                             "existing seed must be untouched")
+
+    # -- behaviour 2: seed when stub is absent -----------------------------
+
+    def test_absent_stub_gets_seeded_from_canonical(self):
+        """Empty workdir + canonical present -> canonical is copied in.
+
+        This is the D-6 happy path: a fresh per-project workdir gets
+        the providers stub seeded so the upcoming `terraform init`
+        actually downloads providers."""
+        canonical_contents = (
+            b'terraform {\n'
+            b'  required_providers {\n'
+            b'    google = {\n'
+            b'      source  = "hashicorp/google"\n'
+            b'      version = "7.29.0"\n'
+            b'    }\n'
+            b'  }\n'
+            b'}\n'
+        )
+        with open(self.canonical, "wb") as f:
+            f.write(canonical_contents)
+
+        result = workdir.seed_providers_stub(self.workdir)
+
+        self.assertTrue(result, "successful seed should return True")
+        target = os.path.join(self.workdir, "_providers_seed.tf")
+        self.assertTrue(os.path.isfile(target))
+        with open(target, "rb") as f:
+            self.assertEqual(f.read(), canonical_contents,
+                             "seeded file must be byte-identical to canonical")
+
+    # -- behaviour 3: clean fallback when canonical is absent --------------
+
+    def test_missing_canonical_is_clean_fallback(self):
+        """No canonical -> no-op, no exception. Mirrors seed_lock_file's
+        deployment-shapes fallback (Cloud Run image without provider_versions/
+        bundled, etc.). The contract is "no canonical means terraform init
+        falls back to its default provider-resolution behaviour" -- which
+        for D-6's purposes means the user will see the broken state again
+        and need to debug it, but the seed function itself must not raise."""
+        self.assertFalse(os.path.isfile(self.canonical))
+
+        result = workdir.seed_providers_stub(self.workdir)
+
+        self.assertFalse(result, "no-canonical fallback returns False")
+        target = os.path.join(self.workdir, "_providers_seed.tf")
+        self.assertFalse(os.path.isfile(target),
+                         "no file should have been created in the workdir")
+
+    # -- canonical path resolves correctly ---------------------------------
+
+    def test_canonical_providers_seed_path_resolves_under_repo_root(self):
+        """canonical_providers_seed_path() must point at
+        provider_versions/_providers_seed.tf under repo root."""
+        path = workdir.canonical_providers_seed_path()
+        expected = os.path.join(self.tmp, "provider_versions",
+                                "_providers_seed.tf")
+        self.assertEqual(path, expected)
+
+
 if __name__ == "__main__":
     unittest.main()
