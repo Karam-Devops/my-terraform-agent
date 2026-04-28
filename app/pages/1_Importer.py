@@ -285,6 +285,90 @@ if last_result and not import_button:
     with st.expander("Full result (structured)", expanded=False):
         st.json(last_result)
 
+# --- PUI-1B v2: Generated HCL viewer (Option A) -------------------------
+# Always shown when the project has any persisted .tf files, NOT gated
+# on `last_result`. Reasons:
+#   * Operator returns to the page after closing the tab -- session_state
+#     is gone, last_result is None, but the .tf files are still in GCS.
+#     They want to see what was generated last time.
+#   * Multi-step demo: pick + import resource A, then come back later
+#     to pick + import resource B. The files from A should still be
+#     visible in the meantime.
+#
+# Cost concern: list_workdir_tf_files makes 1 GCS API call per page
+# render. For a project with N .tf files, expanding each makes another
+# call. Cheap (KB-scale objects, ms latency) and only fires when the
+# operator opens the section. Cached via session_state below to avoid
+# re-listing on data_editor click reruns.
+st.markdown("---")
+_SS_TF_FILES = f"_importer_tf_files_{project_id}"
+with st.expander(
+    "📄 Generated Terraform files (from last successful import)",
+    expanded=False,
+):
+    refresh_col, _spacer_col = st.columns([1, 4])
+    with refresh_col:
+        if st.button("↻ Refresh list", key="refresh_tf_files_btn"):
+            st.session_state.pop(_SS_TF_FILES, None)
+
+    # Lazy fetch: only call GCS if we don't have a cached list this session.
+    if _SS_TF_FILES not in st.session_state:
+        try:
+            from common.storage import list_workdir_tf_files  # noqa: E402
+            st.session_state[_SS_TF_FILES] = list_workdir_tf_files(
+                project_id,
+            )
+        except Exception as e:  # noqa: BLE001
+            st.warning(
+                f"Couldn't list generated files: "
+                f"`{type(e).__name__}: {e}`",
+                icon="⚠️",
+            )
+            st.session_state[_SS_TF_FILES] = []
+
+    tf_files = st.session_state.get(_SS_TF_FILES, [])
+    if not tf_files:
+        st.caption(
+            "No generated files yet. Run an import above to populate "
+            "this section."
+        )
+    else:
+        st.caption(
+            f"{len(tf_files)} file(s). Click any name to view its "
+            "HCL content."
+        )
+        # Per-file accordion: name + size + content + download.
+        # Lazy-loads file content only when expander is opened (one
+        # GCS GET per opened file).
+        from common.storage import read_workdir_file  # noqa: E402
+        for tf_file in tf_files:
+            fname = tf_file["name"]
+            size_kb = tf_file["size_bytes"] / 1024
+            with st.expander(
+                f"`{fname}`  ({size_kb:.1f} KB)",
+                expanded=False,
+            ):
+                try:
+                    content = read_workdir_file(project_id, fname)
+                except Exception as e:  # noqa: BLE001
+                    st.error(
+                        f"Failed to read `{fname}`: "
+                        f"`{type(e).__name__}: {e}`",
+                    )
+                    continue
+                # HCL syntax highlighting via st.code's language hint.
+                # Streamlit's HCL highlighter is rough but adequate.
+                st.code(content, language="hcl")
+                # Download button: per-file. Streamlit handles MIME +
+                # file-name correctly for text/plain content.
+                st.download_button(
+                    label=f"📥 Download {fname}",
+                    data=content,
+                    file_name=fname,
+                    mime="text/plain",
+                    key=f"dl_{fname}",
+                )
+
 if not import_button:
     st.stop()
 

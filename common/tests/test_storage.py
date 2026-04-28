@@ -425,6 +425,113 @@ class PersistWorkdirTests(unittest.TestCase):
             storage.persist_workdir(self.local_path, "dev-proj-470211")
 
 
+class ListWorkdirTfFilesTests(unittest.TestCase):
+    """PUI-1B v2: pin the read-back helper that powers the UI's
+    Generated Files viewer.
+
+    Filters out infrastructure files (.terraform.lock.hcl,
+    _backend_seed.tf, _providers_seed.tf) and nested paths
+    (.terraform/, _quarantine/, snapshots/). Returns alphabetical
+    sort so the UI's expander order is deterministic across renders.
+    """
+
+    def setUp(self):
+        self._patcher = patch.object(storage, "_get_gcs_client")
+        self.mock_get = self._patcher.start()
+        self.mock_client = MagicMock(name="gcs_client")
+        self.mock_get.return_value = self.mock_client
+
+    def tearDown(self):
+        self._patcher.stop()
+
+    def _make_blob(self, name: str, size: int = 100):
+        b = MagicMock(name=f"blob:{name}")
+        b.name = name
+        b.size = size
+        return b
+
+    def test_returns_only_tf_files_alphabetical(self):
+        prefix = "tenants/default/projects/dev-proj-470211/"
+        self.mock_client.list_blobs.return_value = iter([
+            self._make_blob(prefix + "google_compute_disk_b.tf", 200),
+            self._make_blob(prefix + "google_compute_disk_a.tf", 100),
+            self._make_blob(prefix + ".terraform.lock.hcl", 50),  # skipped
+            self._make_blob(prefix + "_backend_seed.tf", 30),     # skipped
+            self._make_blob(prefix + "_providers_seed.tf", 40),   # skipped
+            self._make_blob(prefix + ".terraform/providers/", 0),  # nested skip
+            self._make_blob(prefix + "_quarantine/old.tf", 100),   # nested skip
+        ])
+        with patch.dict(os.environ, {"MTAGENT_STATE_BUCKET": "b"}):
+            result = storage.list_workdir_tf_files("dev-proj-470211")
+        # Only the two real .tf files, alphabetical
+        self.assertEqual(
+            [f["name"] for f in result],
+            ["google_compute_disk_a.tf", "google_compute_disk_b.tf"],
+        )
+        self.assertEqual(result[0]["size_bytes"], 100)
+
+    def test_returns_empty_when_no_files(self):
+        self.mock_client.list_blobs.return_value = iter([])
+        with patch.dict(os.environ, {"MTAGENT_STATE_BUCKET": "b"}):
+            self.assertEqual(
+                storage.list_workdir_tf_files("dev-proj-470211"), [],
+            )
+
+    def test_validates_project_id(self):
+        with self.assertRaises(ValueError):
+            storage.list_workdir_tf_files("BAD-PROJECT")
+        self.mock_client.list_blobs.assert_not_called()
+
+
+class ReadWorkdirFileTests(unittest.TestCase):
+    """PUI-1B v2: pin the per-file read helper that powers the
+    HCL code blocks + download buttons."""
+
+    def setUp(self):
+        self._patcher = patch.object(storage, "_get_gcs_client")
+        self.mock_get = self._patcher.start()
+        self.mock_client = MagicMock(name="gcs_client")
+        self.mock_get.return_value = self.mock_client
+        self.mock_blob = MagicMock(name="blob")
+        self.mock_blob.download_as_text.return_value = (
+            'resource "google_storage_bucket" "x" {}'
+        )
+        self.mock_client.bucket.return_value.blob.return_value = (
+            self.mock_blob
+        )
+
+    def tearDown(self):
+        self._patcher.stop()
+
+    def test_reads_file_content(self):
+        with patch.dict(os.environ, {"MTAGENT_STATE_BUCKET": "test-bucket"}):
+            content = storage.read_workdir_file(
+                "dev-proj-470211", "google_storage_bucket_x.tf",
+            )
+        self.assertEqual(content, 'resource "google_storage_bucket" "x" {}')
+        # Blob path includes the canonical prefix
+        called_path = self.mock_client.bucket.return_value.blob.call_args[0][0]
+        self.assertEqual(
+            called_path,
+            "tenants/default/projects/dev-proj-470211/"
+            "google_storage_bucket_x.tf",
+        )
+
+    def test_rejects_path_traversal_in_filename(self):
+        """Defensive: even though GCS would reject, validate at our
+        layer to prevent malformed paths from reaching the API."""
+        for bad in ("../../etc/passwd", "subdir/file.tf", ".hidden"):
+            with self.subTest(filename=bad):
+                with self.assertRaises(ValueError):
+                    storage.read_workdir_file(
+                        "dev-proj-470211", bad,
+                    )
+
+    def test_validates_project_id(self):
+        with self.assertRaises(ValueError):
+            storage.read_workdir_file("BAD-PROJECT", "x.tf")
+
+
 class GcsBackendEnabledTests(unittest.TestCase):
     """Pin the MTAGENT_USE_GCS_BACKEND env-var gate.
 

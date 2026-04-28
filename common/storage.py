@@ -642,3 +642,130 @@ def persist_workdir(
         objects_uploaded=uploaded,
         objects_deleted=deleted,
     )
+
+
+# ----------------------------------------------------------------------
+# PUI-1B v2: read-back helpers for the UI's "Generated files" view.
+#
+# After a successful import the operator wants to SEE the generated
+# .tf files (review, copy, download). The UI doesn't have access to
+# the per-request /tmp workdir (Cloud Run's filesystem is per-container,
+# ephemeral), so we read from the persisted GCS state.
+# ----------------------------------------------------------------------
+
+def list_workdir_tf_files(
+    project_id: str,
+    *,
+    tenant_id: Optional[str] = None,
+) -> List[dict]:
+    """List the .tf files persisted for a (tenant, project).
+
+    Returns a list of dicts ordered alphabetically by name::
+
+        [{"name": "google_storage_bucket_x.tf", "size_bytes": 1234}, ...]
+
+    Filters to user-relevant .tf files only -- excludes infrastructure
+    files (.terraform.lock.hcl, _backend_seed.tf, _providers_seed.tf)
+    that the operator didn't author and shouldn't see in the
+    "Generated files" view.
+
+    Args:
+        project_id: GCP project (path-traversal-validated).
+        tenant_id: Multi-tenant identifier (defaults "default").
+
+    Returns:
+        List of file metadata dicts. Empty list if no .tf files
+        exist (e.g., before the first successful import).
+
+    Raises:
+        ValueError: project_id / tenant_id failed validation.
+        Other google.api_core exceptions for genuine API failures.
+    """
+    tenant = tenant_id or _DEFAULT_TENANT_ID
+    _validate_ids(tenant, project_id)
+
+    bucket_name = state_bucket()
+    prefix = f"tenants/{tenant}/projects/{project_id}/"
+
+    # Files we DON'T want to surface as "generated HCL" in the UI:
+    #   * .terraform.lock.hcl: provider lock file (auto-managed by terraform)
+    #   * _backend_seed.tf: PSA-5 GCS-backend declaration (infrastructure)
+    #   * _providers_seed.tf: D-6 fix providers stub (infrastructure)
+    # Everything else ending in .tf is a user-relevant generated file.
+    _INFRA_FILES = frozenset((
+        ".terraform.lock.hcl",
+        "_backend_seed.tf",
+        "_providers_seed.tf",
+    ))
+
+    client = _get_gcs_client()
+    bucket = client.bucket(bucket_name)
+    results: List[dict] = []
+    for blob in client.list_blobs(bucket, prefix=prefix):
+        if blob.name == prefix or blob.name.endswith("/"):
+            continue
+        rel = blob.name[len(prefix):]
+        # Only top-level .tf files (skip nested .terraform/, _quarantine/,
+        # snapshots/ etc).
+        if "/" in rel:
+            continue
+        if not rel.endswith(".tf"):
+            continue
+        if rel in _INFRA_FILES:
+            continue
+        results.append({
+            "name": rel,
+            "size_bytes": blob.size or 0,
+        })
+    results.sort(key=lambda f: f["name"])
+    return results
+
+
+def read_workdir_file(
+    project_id: str,
+    filename: str,
+    *,
+    tenant_id: Optional[str] = None,
+) -> str:
+    """Download a single file's content from the persisted workdir.
+
+    Used by the UI's "Generated files" expander to show .tf content
+    inline (st.code with HCL syntax highlighting).
+
+    Args:
+        project_id: GCP project.
+        filename: BARE filename (e.g. "google_storage_bucket_x.tf").
+            Must NOT contain path separators -- the function only reads
+            top-level files in the project workdir, never nested
+            (.terraform/, _quarantine/, etc). Path-traversal guard.
+        tenant_id: Multi-tenant identifier (defaults "default").
+
+    Returns:
+        File content as a string (UTF-8 decoded).
+
+    Raises:
+        ValueError: project_id / tenant_id failed validation, OR
+            filename contains a path separator (defensive against
+            "../../etc/passwd" style traversal even though the GCS
+            blob name validation would also reject it).
+        google.api_core.exceptions.NotFound: file doesn't exist.
+    """
+    tenant = tenant_id or _DEFAULT_TENANT_ID
+    _validate_ids(tenant, project_id)
+
+    if "/" in filename or "\\" in filename or filename.startswith("."):
+        # Strict path-traversal guard. Filename is operator-supplied
+        # via UI clicks but we still defend against client-side
+        # tampering (custom URL params, replayed requests).
+        # Allow leading-underscore-prefixed files (none today; the
+        # _INFRA_FILES filter in list_workdir_tf_files keeps those
+        # out of the UI list, but reads of those would still be safe).
+        raise ValueError(
+            f"filename must be a bare basename, got {filename!r}",
+        )
+
+    bucket_name = state_bucket()
+    blob_path = f"tenants/{tenant}/projects/{project_id}/{filename}"
+    client = _get_gcs_client()
+    blob = client.bucket(bucket_name).blob(blob_path)
+    return blob.download_as_text()
