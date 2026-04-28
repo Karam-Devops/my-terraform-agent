@@ -62,9 +62,14 @@ import vertexai
 # note.
 from langchain_google_vertexai import ChatVertexAI
 
-from .config import config
-from .common.errors import PreflightError, UpstreamTimeout
-from .common.logging import get_logger
+# Absolute imports: llm_provider.py runs as a top-level module under
+# PYTHONPATH=/app (Cloud Run / pytest layout). The prior `from .X`
+# form assumed an outer parent package which doesn't exist in our
+# sys.path. See importer/hcl_generator.py for the matching rationale
+# at the package level.
+from config import config
+from common.errors import PreflightError, UpstreamTimeout
+from common.logging import get_logger
 
 _log = get_logger(__name__)
 

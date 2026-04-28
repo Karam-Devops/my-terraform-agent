@@ -7,9 +7,15 @@ import shutil
 import time
 from langchain_core.messages import HumanMessage, ToolMessage
 
-from .llm_provider import llm
-from .config import config
-from .agent_state import AgentState
+# Absolute imports (PYTHONPATH=/app layout). agent_nodes is part of
+# the legacy LangGraph entrypoint (root main.py), not reached by the
+# importer/translator/detector/policy chain today. Converted for
+# consistency so a future caller doesn't trip the same
+# `attempted relative import` error. See llm_provider.py for the
+# matching rationale at the top-level module layer.
+from llm_provider import llm
+from config import config
+from agent_state import AgentState
 
 def create_generation_prompt(user_request: str) -> str:
     """Creates the initial instruction prompt for the LLM."""

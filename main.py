@@ -2,8 +2,11 @@
 
 import os
 from langchain_core.messages import HumanMessage
-from .config import config  # Import the unified config object
-from .graph_builder import build_agent_graph
+# Absolute imports (PYTHONPATH=/app layout). See agent_nodes.py for
+# rationale -- this is the legacy LangGraph CLI entrypoint, distinct
+# from app/main.py (the Streamlit entrypoint).
+from config import config  # Import the unified config object
+from graph_builder import build_agent_graph
 
 def main():
     """

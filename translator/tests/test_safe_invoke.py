@@ -229,10 +229,13 @@ class SafeInvokeTests(unittest.TestCase):
                     client, ["msg"], max_attempts=3, base_delay_s=0.0,
                 )
 
-        # Resolve UpstreamTimeout from the synthetic-parent common.errors.
-        from importlib import import_module
-        errors_mod = import_module(f"{_PARENT_PKG}.common.errors")
-        self.assertIsInstance(ctx.exception, errors_mod.UpstreamTimeout)
+        # PUI-1 SMOKE: llm_provider now uses absolute imports
+        # (`from common.errors import UpstreamTimeout`), so the
+        # raised class is the real common.errors.UpstreamTimeout --
+        # NOT the duplicate that the synthetic-parent loader would
+        # have produced. Assert against the real class.
+        from common.errors import UpstreamTimeout
+        self.assertIsInstance(ctx.exception, UpstreamTimeout)
         # Original transient exception preserved in __cause__
         self.assertIsNotNone(ctx.exception.__cause__)
         self.assertIn("429", str(ctx.exception.__cause__))
@@ -279,11 +282,11 @@ class SafeInvokeTests(unittest.TestCase):
                 )
 
         # Permanent error propagates with original message intact, NOT
-        # wrapped in UpstreamTimeout.
+        # wrapped in UpstreamTimeout. Same absolute-import note as
+        # test_exhausted_retries_raise_upstream_timeout above.
         self.assertIn("401", str(ctx.exception))
-        from importlib import import_module
-        errors_mod = import_module(f"{_PARENT_PKG}.common.errors")
-        self.assertNotIsInstance(ctx.exception, errors_mod.UpstreamTimeout)
+        from common.errors import UpstreamTimeout
+        self.assertNotIsInstance(ctx.exception, UpstreamTimeout)
 
 
 if __name__ == "__main__":
