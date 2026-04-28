@@ -989,17 +989,42 @@ def run_workflow(
         return _build_empty_result(
             project_id=project_id, selected=0, started=started,
         )
-    # Re-sort by displayName for the human-friendly selection menu order.
-    # inventory() returns sorted by (tf_type, cloud_name); for the menu
-    # we want the historical alphabetical-by-displayName order so the
-    # operator's muscle memory still works.
-    all_discovered_resources.sort(key=lambda r: r.get('displayName', r.get('name')))
+    # PUI-1B SMOKE 2026-04-28: the displayName re-sort that USED TO
+    # live here has moved into _present_selection_menu (CLI-only). The
+    # bug it caused: UI's selected_indices were built against inventory()'s
+    # natural (tf_type, cloud_name) order, but this sort re-ordered the
+    # list BEFORE indices were applied -- so picking the "bucket" row in
+    # the UI ended up importing whatever ended up at that index after
+    # re-sort (e.g. a node pool). Keeping the engine's selected_indices
+    # contract aligned with what inventory() returns is the cleanest fix;
+    # CLI menu display still gets the alphabetical order via its own
+    # local sort in _present_selection_menu.
 
     # PUI-1: selection source is now decided by the helper -- CLI callers
     # see the original interactive menu; UI callers pass "all" (PUI-1 v1
     # default) or an explicit index list and skip the menu entirely.
     selected_assets = _resolve_selection_input(
         selected_indices, all_discovered_resources,
+    )
+    # PUI-1B SMOKE 2026-04-28: structured log of what got selected.
+    # Without this, debugging "I picked X but Y was processed" requires
+    # correlating the UI click with subsequent describe_start events --
+    # painful. The log line shows the resolved (name, asset_type) tuples
+    # so the operator can verify selection matched intent.
+    _log.info(
+        "selection_resolved",
+        project_id=project_id,
+        requested_indices=str(selected_indices)[:200],
+        discovered_count=len(all_discovered_resources),
+        selected_count=len(selected_assets),
+        selected_resources=[
+            {
+                "name": a.get("name", "")[:200],
+                "displayName": a.get("displayName", "")[:100],
+                "assetType": a.get("assetType", ""),
+            }
+            for a in selected_assets[:20]  # cap at 20 to bound log size
+        ],
     )
     if not selected_assets:
         # Operator cancelled the selection menu (CLI), passed an empty

@@ -48,9 +48,24 @@ def _present_selection_menu(resources):
 
     Returns the chosen subset of ``resources``, or [] if the operator
     entered ``0`` to cancel.
+
+    Local-only sort by displayName for human-friendly menu order:
+    the operator's muscle memory is alphabetical-by-name. Pre-PUI-1B
+    this sort lived in run_workflow itself, but that re-ordered the
+    list BEFORE selected_indices were applied -- causing the UI's
+    indices (built from inventory()'s natural (tf_type, cloud_name)
+    order) to point at different resources than the operator picked.
+    Moving the sort here makes it CLI-display-only; UI gets the
+    inventory() order verbatim, and the indices it sends actually
+    match the rows it rendered.
     """
+    sorted_for_menu = sorted(
+        resources,
+        key=lambda r: r.get('displayName', r.get('name', '')),
+    )
+
     print("\n--- Stage 2: Select Resources to Import ---")
-    for i, resource in enumerate(resources):
+    for i, resource in enumerate(sorted_for_menu):
         display_name = resource.get('displayName', resource.get('name'))
         asset_type_short = resource.get('assetType').split('/')[-1]
         print(f"  [{i + 1}] {display_name:<40} (Type: {asset_type_short:<10})")
@@ -62,8 +77,8 @@ def _present_selection_menu(resources):
                 return []
             choices = [int(i.strip()) for i in raw_input.split(',')]
             selected_assets = [
-                resources[c - 1] for c in choices
-                if 1 <= c <= len(resources)
+                sorted_for_menu[c - 1] for c in choices
+                if 1 <= c <= len(sorted_for_menu)
             ]
             if selected_assets:
                 return selected_assets
