@@ -1,2 +1,3 @@
-Remove-Item .terraform_schema_cache.json
-Remove-Item -Recurse -Force imported -ErrorAction SilentlyContinue
+Remove-Item .terraform_schema_cache.json -ErrorAction SilentlyContinue
+Remove-Item importer\knowledge_base\*.json -ErrorAction SilentlyContinue
+Remove-Item -Recurse -Force imported\dev-proj-470211 -ErrorAction SilentlyContinue
