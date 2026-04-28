@@ -1,443 +1,63 @@
-Enter resource numbers separated by commas (e.g., 1, 5), or 0 to cancel: 2,49,63,64,65,66,67,68,69,70,71,72,77,78,79,80
+Enter your Google Cloud Project ID: dev-proj-470211
+   - Scanning project: dev-proj-470211
+   - 📁 Per-project workdir: C:\Users\41708\my-terraform-agent\imported\dev-proj-470211
+2026-04-28T09:17:25.521389Z [info     ] terraform_init_start           [my-terraform-agent.importer.terraform_client] upgrade=False workdir=C:\Users\41708\my-terraform-agent\imported\dev-proj-470211
+2026-04-28T09:17:25.529049Z [info     ] lock_file_seeded               [my-terraform-agent.importer.terraform_client] workdir=C:\Users\41708\my-terraform-agent\imported\dev-proj-470211
+2026-04-28T09:17:25.534307Z [info     ] providers_stub_seeded          [my-terraform-agent.importer.terraform_client] workdir=C:\Users\41708\my-terraform-agent\imported\dev-proj-470211
 
---- Stage 3: Mapping All Selected Assets ---
+--- Stage 1: Discovering All Supported Resources in Parallel ---
+2026-04-28T09:17:32.952770Z [info     ] inventory_start                [my-terraform-agent.importer.inventory] asset_types_count=17 op=inventory project_id=dev-proj-470211
+2026-04-28T09:17:32.953519Z [info     ] discover_start                 [my-terraform-agent.importer.gcp_client] asset_type=compute.googleapis.com/Instance project_id=dev-proj-470211
+2026-04-28T09:17:32.953881Z [info     ] subprocess_start               [my-terraform-agent.importer.shell_runner] cmd="'C:\\Program Files (x86)\\Google\\Cloud SDK\\google-cloud-sdk\\bin\\gcloud.cmd' --quiet asset search-all-resources --scope=projects/dev-proj-470211 --asset-types=compute.googleapis.com/Instance --format=json" timeout_s=60.0
+2026-04-28T09:17:32.954041Z [info     ] discover_start                 [my-terraform-agent.importer.gcp_client] asset_type=compute.googleapis.com/Disk project_id=dev-proj-470211
+2026-04-28T09:17:32.954500Z [info     ] discover_start                 [my-terraform-agent.importer.gcp_client] asset_type=compute.googleapis.com/Firewall project_id=dev-proj-470211
+2026-04-28T09:17:32.955216Z [info     ] subprocess_start               [my-terraform-agent.importer.shell_runner] cmd="'C:\\Program Files (x86)\\Google\\Cloud SDK\\google-cloud-sdk\\bin\\gcloud.cmd' --quiet asset search-all-resources --scope=projects/dev-proj-470211 --asset-types=compute.googleapis.com/Disk --format=json" timeout_s=60.0
+2026-04-28T09:17:32.955449Z [info     ] discover_start                 [my-terraform-agent.importer.gcp_client] asset_type=compute.googleapis.com/Address project_id=dev-proj-470211
+2026-04-28T09:17:32.955756Z [info     ] subprocess_start               [my-terraform-agent.importer.shell_runner] cmd="'C:\\Program Files (x86)\\Google\\Cloud SDK\\google-cloud-sdk\\bin\\gcloud.cmd' --quiet asset search-all-resources --scope=projects/dev-proj-470211 --asset-types=compute.googleapis.com/Firewall --format=json" timeout_s=60.0
+2026-04-28T09:17:32.955901Z [info     ] discover_start                 [my-terraform-agent.importer.gcp_client] asset_type=compute.googleapis.com/Network project_id=dev-proj-470211
+2026-04-28T09:17:32.956343Z [info     ] discover_start                 [my-terraform-agent.importer.gcp_client] asset_type=compute.googleapis.com/Subnetwork project_id=dev-proj-470211
+2026-04-28T09:17:32.956599Z [info     ] subprocess_start               [my-terraform-agent.importer.shell_runner] cmd="'C:\\Program Files (x86)\\Google\\Cloud SDK\\google-cloud-sdk\\bin\\gcloud.cmd' --quiet asset search-all-resources --scope=projects/dev-proj-470211 --asset-types=compute.googleapis.com/Address --format=json" timeout_s=60.0
+2026-04-28T09:17:32.957122Z [info     ] discover_start                 [my-terraform-agent.importer.gcp_client] asset_type=compute.googleapis.com/InstanceTemplate project_id=dev-proj-470211
+2026-04-28T09:17:32.957727Z [info     ] subprocess_start               [my-terraform-agent.importer.shell_runner] cmd="'C:\\Program Files (x86)\\Google\\Cloud SDK\\google-cloud-sdk\\bin\\gcloud.cmd' --quiet asset search-all-resources --scope=projects/dev-proj-470211 --asset-types=compute.googleapis.com/Network --format=json" timeout_s=60.0
+2026-04-28T09:17:32.958177Z [info     ] discover_start                 [my-terraform-agent.importer.gcp_client] asset_type=container.googleapis.com/Cluster project_id=dev-proj-470211
+2026-04-28T09:17:32.959050Z [info     ] discover_start                 [my-terraform-agent.importer.gcp_client] asset_type=container.googleapis.com/NodePool project_id=dev-proj-470211
+2026-04-28T09:17:32.959295Z [info     ] subprocess_start               [my-terraform-agent.importer.shell_runner] cmd="'C:\\Program Files (x86)\\Google\\Cloud SDK\\google-cloud-sdk\\bin\\gcloud.cmd' --quiet asset search-all-resources --scope=projects/dev-proj-470211 --asset-types=compute.googleapis.com/Subnetwork --format=json" timeout_s=60.0
+2026-04-28T09:17:32.960147Z [info     ] discover_start                 [my-terraform-agent.importer.gcp_client] asset_type=iam.googleapis.com/ServiceAccount project_id=dev-proj-470211
+2026-04-28T09:17:32.960422Z [info     ] subprocess_start               [my-terraform-agent.importer.shell_runner] cmd="'C:\\Program Files (x86)\\Google\\Cloud SDK\\google-cloud-sdk\\bin\\gcloud.cmd' --quiet asset search-all-resources --scope=projects/dev-proj-470211 --asset-types=compute.googleapis.com/InstanceTemplate --format=json" timeout_s=60.0
+2026-04-28T09:17:32.961161Z [info     ] discover_start                 [my-terraform-agent.importer.gcp_client] asset_type=storage.googleapis.com/Bucket project_id=dev-proj-470211
+2026-04-28T09:17:32.961801Z [info     ] subprocess_start               [my-terraform-agent.importer.shell_runner] cmd="'C:\\Program Files (x86)\\Google\\Cloud SDK\\google-cloud-sdk\\bin\\gcloud.cmd' --quiet asset search-all-resources --scope=projects/dev-proj-470211 --asset-types=container.googleapis.com/Cluster --format=json" timeout_s=60.0
+2026-04-28T09:17:32.962343Z [info     ] discover_start                 [my-terraform-agent.importer.gcp_client] asset_type=sqladmin.googleapis.com/Instance project_id=dev-proj-470211
+2026-04-28T09:17:32.968064Z [info     ] subprocess_start               [my-terraform-agent.importer.shell_runner] cmd="'C:\\Program Files (x86)\\Google\\Cloud SDK\\google-cloud-sdk\\bin\\gcloud.cmd' --quiet asset search-all-resources --scope=projects/dev-proj-470211 --asset-types=sqladmin.googleapis.com/Instance --format=json" timeout_s=60.0
+2026-04-28T09:17:32.964546Z [info     ] subprocess_start               [my-terraform-agent.importer.shell_runner] cmd="'C:\\Program Files (x86)\\Google\\Cloud SDK\\google-cloud-sdk\\bin\\gcloud.cmd' --quiet asset search-all-resources --scope=projects/dev-proj-470211 --asset-types=iam.googleapis.com/ServiceAccount --format=json" timeout_s=60.0
+2026-04-28T09:17:32.964775Z [info     ] discover_start                 [my-terraform-agent.importer.gcp_client] asset_type=cloudkms.googleapis.com/KeyRing project_id=dev-proj-470211
+2026-04-28T09:17:32.966149Z [info     ] subprocess_start               [my-terraform-agent.importer.shell_runner] cmd="'C:\\Program Files (x86)\\Google\\Cloud SDK\\google-cloud-sdk\\bin\\gcloud.cmd' --quiet asset search-all-resources --scope=projects/dev-proj-470211 --asset-types=storage.googleapis.com/Bucket --format=json" timeout_s=60.0
+2026-04-28T09:17:32.966437Z [info     ] discover_start                 [my-terraform-agent.importer.gcp_client] asset_type=cloudkms.googleapis.com/CryptoKey project_id=dev-proj-470211
+2026-04-28T09:17:32.967535Z [info     ] discover_start                 [my-terraform-agent.importer.gcp_client] asset_type=run.googleapis.com/Service project_id=dev-proj-470211
+2026-04-28T09:17:32.962702Z [info     ] subprocess_start               [my-terraform-agent.importer.shell_runner] cmd="'C:\\Program Files (x86)\\Google\\Cloud SDK\\google-cloud-sdk\\bin\\gcloud.cmd' --quiet asset search-all-resources --scope=projects/dev-proj-470211 --asset-types=container.googleapis.com/NodePool --format=json" timeout_s=60.0
+2026-04-28T09:17:32.973804Z [info     ] discover_start                 [my-terraform-agent.importer.gcp_client] asset_type=pubsub.googleapis.com/Topic project_id=dev-proj-470211
+2026-04-28T09:17:32.974142Z [info     ] subprocess_start               [my-terraform-agent.importer.shell_runner] cmd="'C:\\Program Files (x86)\\Google\\Cloud SDK\\google-cloud-sdk\\bin\\gcloud.cmd' --quiet asset search-all-resources --scope=projects/dev-proj-470211 --asset-types=cloudkms.googleapis.com/KeyRing --format=json" timeout_s=60.0
+2026-04-28T09:17:32.976925Z [info     ] subprocess_start               [my-terraform-agent.importer.shell_runner] cmd="'C:\\Program Files (x86)\\Google\\Cloud SDK\\google-cloud-sdk\\bin\\gcloud.cmd' --quiet asset search-all-resources --scope=projects/dev-proj-470211 --asset-types=cloudkms.googleapis.com/CryptoKey --format=json" timeout_s=60.0
+2026-04-28T09:17:32.977851Z [info     ] subprocess_start               [my-terraform-agent.importer.shell_runner] cmd="'C:\\Program Files (x86)\\Google\\Cloud SDK\\google-cloud-sdk\\bin\\gcloud.cmd' --quiet asset search-all-resources --scope=projects/dev-proj-470211 --asset-types=run.googleapis.com/Service --format=json" timeout_s=60.0
+2026-04-28T09:17:32.978693Z [info     ] subprocess_start               [my-terraform-agent.importer.shell_runner] cmd="'C:\\Program Files (x86)\\Google\\Cloud SDK\\google-cloud-sdk\\bin\\gcloud.cmd' --quiet asset search-all-resources --scope=projects/dev-proj-470211 --asset-types=pubsub.googleapis.com/Topic --format=json" timeout_s=60.0
+2026-04-28T09:17:41.531015Z [info     ] discover_complete              [my-terraform-agent.importer.gcp_client] asset_type=compute.googleapis.com/Address count=0
+2026-04-28T09:17:41.538107Z [info     ] discover_start                 [my-terraform-agent.importer.gcp_client] asset_type=pubsub.googleapis.com/Subscription project_id=dev-proj-470211
+2026-04-28T09:17:41.545667Z [info     ] subprocess_start               [my-terraform-agent.importer.shell_runner] cmd="'C:\\Program Files (x86)\\Google\\Cloud SDK\\google-cloud-sdk\\bin\\gcloud.cmd' --quiet asset search-all-resources --scope=projects/dev-proj-470211 --asset-types=pubsub.googleapis.com/Subscription --format=json" timeout_s=60.0
+2026-04-28T09:17:41.906273Z [info     ] discover_complete              [my-terraform-agent.importer.gcp_client] asset_type=compute.googleapis.com/Firewall count=13
+2026-04-28T09:17:41.907053Z [info     ] discover_complete              [my-terraform-agent.importer.gcp_client] asset_type=iam.googleapis.com/ServiceAccount count=2
+2026-04-28T09:17:41.985704Z [info     ] discover_complete              [my-terraform-agent.importer.gcp_client] asset_type=compute.googleapis.com/Instance count=2
+2026-04-28T09:17:42.020276Z [info     ] discover_complete              [my-terraform-agent.importer.gcp_client] asset_type=compute.googleapis.com/Network count=2
+2026-04-28T09:17:42.116041Z [info     ] discover_complete              [my-terraform-agent.importer.gcp_client] asset_type=pubsub.googleapis.com/Topic count=1
+2026-04-28T09:17:42.141306Z [info     ] discover_complete              [my-terraform-agent.importer.gcp_client] asset_type=run.googleapis.com/Service count=1
+2026-04-28T09:17:42.237274Z [info     ] discover_complete              [my-terraform-agent.importer.gcp_client] asset_type=cloudkms.googleapis.com/CryptoKey count=1
+2026-04-28T09:17:42.398660Z [info     ] discover_complete              [my-terraform-agent.importer.gcp_client] asset_type=container.googleapis.com/NodePool count=6
+2026-04-28T09:17:42.506670Z [info     ] discover_complete              [my-terraform-agent.importer.gcp_client] asset_type=container.googleapis.com/Cluster count=2
+2026-04-28T09:17:42.555741Z [info     ] discover_complete              [my-terraform-agent.importer.gcp_client] asset_type=compute.googleapis.com/InstanceTemplate count=1
+2026-04-28T09:17:42.694165Z [info     ] discover_complete              [my-terraform-agent.importer.gcp_client] asset_type=compute.googleapis.com/Disk count=3
+2026-04-28T09:17:42.822677Z [info     ] discover_complete              [my-terraform-agent.importer.gcp_client] asset_type=cloudkms.googleapis.com/KeyRing count=1
+2026-04-28T09:17:42.835024Z [info     ] discover_complete              [my-terraform-agent.importer.gcp_client] asset_type=sqladmin.googleapis.com/Instance count=0
+2026-04-28T09:17:43.122273Z [info     ] discover_complete              [my-terraform-agent.importer.gcp_client] asset_type=compute.googleapis.com/Subnetwork count=43
+2026-04-28T09:17:45.034930Z [info     ] discover_complete              [my-terraform-agent.importer.gcp_client] asset_type=pubsub.googleapis.com/Subscription count=1
+2026-04-28T09:17:52.747938Z [info     ] discover_complete              [my-terraform-agent.importer.gcp_client] asset_type=storage.googleapis.com/Bucket count=1
+2026-04-28T09:17:52.749613Z [info     ] inventory_complete             [my-terraform-agent.importer.inventory] duration_s=19.8 error_count=0 op=inventory project_id=dev-proj-470211 resource_count=80
 
---- Pre-loading all required documentation schemas ---
-2026-04-28T09:22:11.403126Z [info     ] kb_cache_miss                  [my-terraform-agent.importer.knowledge_base] next=attempting_bootstrap path=C:\Users\41708\my-terraform-agent\importer\knowledge_base\google_service_account.json resource_type=google_service_account
-2026-04-28T09:22:11.414740Z [info     ] kb_bootstrap_start             [my-terraform-agent.importer.knowledge_base] resource_type=google_service_account source=terraform_providers_schema
-2026-04-28T09:22:11.416372Z [warning  ] kb_bootstrap_skipped           [my-terraform-agent.importer.knowledge_base] error='"Provider schema does not contain \'google_service_account\'. The resource type may not exist, or the relevant provider may not be installed. Run `terraform init` and retry with --refresh."' reason=not_in_provider_schema resource_type=google_service_account
-2026-04-28T09:22:11.416971Z [warning  ] kb_unavailable                 [my-terraform-agent.importer.knowledge_base] fallback=no_context_mode resource_type=google_service_account
-2026-04-28T09:22:11.417849Z [info     ] kb_cache_miss                  [my-terraform-agent.importer.knowledge_base] next=attempting_bootstrap path=C:\Users\41708\my-terraform-agent\importer\knowledge_base\google_compute_firewall.json resource_type=google_compute_firewall
-2026-04-28T09:22:11.418455Z [info     ] kb_bootstrap_start             [my-terraform-agent.importer.knowledge_base] resource_type=google_compute_firewall source=terraform_providers_schema
-2026-04-28T09:22:11.418988Z [warning  ] kb_bootstrap_skipped           [my-terraform-agent.importer.knowledge_base] error='"Provider schema does not contain \'google_compute_firewall\'. The resource type may not exist, or the relevant provider may not be installed. Run `terraform init` and retry with --refresh."' reason=not_in_provider_schema resource_type=google_compute_firewall
-2026-04-28T09:22:11.419624Z [warning  ] kb_unavailable                 [my-terraform-agent.importer.knowledge_base] fallback=no_context_mode resource_type=google_compute_firewall
-2026-04-28T09:22:11.420842Z [info     ] kb_cache_miss                  [my-terraform-agent.importer.knowledge_base] next=attempting_bootstrap path=C:\Users\41708\my-terraform-agent\importer\knowledge_base\google_cloud_run_v2_service.json resource_type=google_cloud_run_v2_service
-2026-04-28T09:22:11.421553Z [info     ] kb_bootstrap_start             [my-terraform-agent.importer.knowledge_base] resource_type=google_cloud_run_v2_service source=terraform_providers_schema
-2026-04-28T09:22:11.422613Z [warning  ] kb_bootstrap_skipped           [my-terraform-agent.importer.knowledge_base] error='"Provider schema does not contain \'google_cloud_run_v2_service\'. The resource type may not exist, or the relevant provider may not be installed. Run `terraform init` and retry with --refresh."' reason=not_in_provider_schema resource_type=google_cloud_run_v2_service
-2026-04-28T09:22:11.423301Z [warning  ] kb_unavailable                 [my-terraform-agent.importer.knowledge_base] fallback=no_context_mode resource_type=google_cloud_run_v2_service
-2026-04-28T09:22:11.424167Z [info     ] kb_cache_miss                  [my-terraform-agent.importer.knowledge_base] next=attempting_bootstrap path=C:\Users\41708\my-terraform-agent\importer\knowledge_base\google_container_cluster.json resource_type=google_container_cluster
-2026-04-28T09:22:11.424751Z [info     ] kb_bootstrap_start             [my-terraform-agent.importer.knowledge_base] resource_type=google_container_cluster source=terraform_providers_schema
-2026-04-28T09:22:11.425486Z [warning  ] kb_bootstrap_skipped           [my-terraform-agent.importer.knowledge_base] error='"Provider schema does not contain \'google_container_cluster\'. The resource type may not exist, or the relevant provider may not be installed. Run `terraform init` and retry with --refresh."' reason=not_in_provider_schema resource_type=google_container_cluster
-2026-04-28T09:22:11.426091Z [warning  ] kb_unavailable                 [my-terraform-agent.importer.knowledge_base] fallback=no_context_mode resource_type=google_container_cluster
-2026-04-28T09:22:11.426962Z [info     ] kb_cache_miss                  [my-terraform-agent.importer.knowledge_base] next=attempting_bootstrap path=C:\Users\41708\my-terraform-agent\importer\knowledge_base\google_container_cluster.json resource_type=google_container_cluster
-2026-04-28T09:22:11.427575Z [info     ] kb_bootstrap_start             [my-terraform-agent.importer.knowledge_base] resource_type=google_container_cluster source=terraform_providers_schema
-2026-04-28T09:22:11.428129Z [warning  ] kb_bootstrap_skipped           [my-terraform-agent.importer.knowledge_base] error='"Provider schema does not contain \'google_container_cluster\'. The resource type may not exist, or the relevant provider may not be installed. Run `terraform init` and retry with --refresh."' reason=not_in_provider_schema resource_type=google_container_cluster
-2026-04-28T09:22:11.428747Z [warning  ] kb_unavailable                 [my-terraform-agent.importer.knowledge_base] fallback=no_context_mode resource_type=google_container_cluster
-2026-04-28T09:22:11.430083Z [info     ] kb_cache_miss                  [my-terraform-agent.importer.knowledge_base] next=attempting_bootstrap path=C:\Users\41708\my-terraform-agent\importer\knowledge_base\google_compute_disk.json resource_type=google_compute_disk
-2026-04-28T09:22:11.430919Z [info     ] kb_bootstrap_start             [my-terraform-agent.importer.knowledge_base] resource_type=google_compute_disk source=terraform_providers_schema
-2026-04-28T09:22:11.433388Z [warning  ] kb_bootstrap_skipped           [my-terraform-agent.importer.knowledge_base] error='"Provider schema does not contain \'google_compute_disk\'. The resource type may not exist, or the relevant provider may not be installed. Run `terraform init` and retry with --refresh."' reason=not_in_provider_schema resource_type=google_compute_disk
-2026-04-28T09:22:11.434499Z [warning  ] kb_unavailable                 [my-terraform-agent.importer.knowledge_base] fallback=no_context_mode resource_type=google_compute_disk
-2026-04-28T09:22:11.435770Z [info     ] kb_cache_miss                  [my-terraform-agent.importer.knowledge_base] next=attempting_bootstrap path=C:\Users\41708\my-terraform-agent\importer\knowledge_base\google_compute_firewall.json resource_type=google_compute_firewall
-2026-04-28T09:22:11.436337Z [info     ] kb_bootstrap_start             [my-terraform-agent.importer.knowledge_base] resource_type=google_compute_firewall source=terraform_providers_schema
-2026-04-28T09:22:11.436822Z [warning  ] kb_bootstrap_skipped           [my-terraform-agent.importer.knowledge_base] error='"Provider schema does not contain \'google_compute_firewall\'. The resource type may not exist, or the relevant provider may not be installed. Run `terraform init` and retry with --refresh."' reason=not_in_provider_schema resource_type=google_compute_firewall
-2026-04-28T09:22:11.437751Z [warning  ] kb_unavailable                 [my-terraform-agent.importer.knowledge_base] fallback=no_context_mode resource_type=google_compute_firewall
-2026-04-28T09:22:11.438707Z [info     ] kb_cache_miss                  [my-terraform-agent.importer.knowledge_base] next=attempting_bootstrap path=C:\Users\41708\my-terraform-agent\importer\knowledge_base\google_storage_bucket.json resource_type=google_storage_bucket
-2026-04-28T09:22:11.439554Z [info     ] kb_bootstrap_start             [my-terraform-agent.importer.knowledge_base] resource_type=google_storage_bucket source=terraform_providers_schema
-2026-04-28T09:22:11.440257Z [warning  ] kb_bootstrap_skipped           [my-terraform-agent.importer.knowledge_base] error='"Provider schema does not contain \'google_storage_bucket\'. The resource type may not exist, or the relevant provider may not be installed. Run `terraform init` and retry with --refresh."' reason=not_in_provider_schema resource_type=google_storage_bucket
-2026-04-28T09:22:11.440813Z [warning  ] kb_unavailable                 [my-terraform-agent.importer.knowledge_base] fallback=no_context_mode resource_type=google_storage_bucket
-2026-04-28T09:22:11.441617Z [info     ] kb_cache_miss                  [my-terraform-agent.importer.knowledge_base] next=attempting_bootstrap path=C:\Users\41708\my-terraform-agent\importer\knowledge_base\google_compute_subnetwork.json resource_type=google_compute_subnetwork
-2026-04-28T09:22:11.442111Z [info     ] kb_bootstrap_start             [my-terraform-agent.importer.knowledge_base] resource_type=google_compute_subnetwork source=terraform_providers_schema
-2026-04-28T09:22:11.442666Z [warning  ] kb_bootstrap_skipped           [my-terraform-agent.importer.knowledge_base] error='"Provider schema does not contain \'google_compute_subnetwork\'. The resource type may not exist, or the relevant provider may not be installed. Run `terraform init` and retry with --refresh."' reason=not_in_provider_schema resource_type=google_compute_subnetwork
-2026-04-28T09:22:11.443265Z [warning  ] kb_unavailable                 [my-terraform-agent.importer.knowledge_base] fallback=no_context_mode resource_type=google_compute_subnetwork
-2026-04-28T09:22:11.444015Z [info     ] kb_cache_miss                  [my-terraform-agent.importer.knowledge_base] next=attempting_bootstrap path=C:\Users\41708\my-terraform-agent\importer\knowledge_base\google_compute_disk.json resource_type=google_compute_disk
-2026-04-28T09:22:11.444629Z [info     ] kb_bootstrap_start             [my-terraform-agent.importer.knowledge_base] resource_type=google_compute_disk source=terraform_providers_schema
-2026-04-28T09:22:11.445149Z [warning  ] kb_bootstrap_skipped           [my-terraform-agent.importer.knowledge_base] error='"Provider schema does not contain \'google_compute_disk\'. The resource type may not exist, or the relevant provider may not be installed. Run `terraform init` and retry with --refresh."' reason=not_in_provider_schema resource_type=google_compute_disk
-2026-04-28T09:22:11.445610Z [warning  ] kb_unavailable                 [my-terraform-agent.importer.knowledge_base] fallback=no_context_mode resource_type=google_compute_disk
-2026-04-28T09:22:11.446158Z [info     ] kb_cache_miss                  [my-terraform-agent.importer.knowledge_base] next=attempting_bootstrap path=C:\Users\41708\my-terraform-agent\importer\knowledge_base\google_compute_instance.json resource_type=google_compute_instance
-2026-04-28T09:22:11.446631Z [info     ] kb_bootstrap_start             [my-terraform-agent.importer.knowledge_base] resource_type=google_compute_instance source=terraform_providers_schema
-2026-04-28T09:22:11.447124Z [warning  ] kb_bootstrap_skipped           [my-terraform-agent.importer.knowledge_base] error='"Provider schema does not contain \'google_compute_instance\'. The resource type may not exist, or the relevant provider may not be installed. Run `terraform init` and retry with --refresh."' reason=not_in_provider_schema resource_type=google_compute_instance
-2026-04-28T09:22:11.447626Z [warning  ] kb_unavailable                 [my-terraform-agent.importer.knowledge_base] fallback=no_context_mode resource_type=google_compute_instance
-2026-04-28T09:22:11.448303Z [info     ] kb_cache_miss                  [my-terraform-agent.importer.knowledge_base] next=attempting_bootstrap path=C:\Users\41708\my-terraform-agent\importer\knowledge_base\google_compute_network.json resource_type=google_compute_network
-2026-04-28T09:22:11.448738Z [info     ] kb_bootstrap_start             [my-terraform-agent.importer.knowledge_base] resource_type=google_compute_network source=terraform_providers_schema
-2026-04-28T09:22:11.449155Z [warning  ] kb_bootstrap_skipped           [my-terraform-agent.importer.knowledge_base] error='"Provider schema does not contain \'google_compute_network\'. The resource type may not exist, or the relevant provider may not be installed. Run `terraform init` and retry with --refresh."' reason=not_in_provider_schema resource_type=google_compute_network
-2026-04-28T09:22:11.449621Z [warning  ] kb_unavailable                 [my-terraform-agent.importer.knowledge_base] fallback=no_context_mode resource_type=google_compute_network
-2026-04-28T09:22:11.450390Z [info     ] kb_cache_miss                  [my-terraform-agent.importer.knowledge_base] next=attempting_bootstrap path=C:\Users\41708\my-terraform-agent\importer\knowledge_base\google_kms_key_ring.json resource_type=google_kms_key_ring
-2026-04-28T09:22:11.450770Z [info     ] kb_bootstrap_start             [my-terraform-agent.importer.knowledge_base] resource_type=google_kms_key_ring source=terraform_providers_schema
-2026-04-28T09:22:11.451203Z [warning  ] kb_bootstrap_skipped           [my-terraform-agent.importer.knowledge_base] error='"Provider schema does not contain \'google_kms_key_ring\'. The resource type may not exist, or the relevant provider may not be installed. Run `terraform init` and retry with --refresh."' reason=not_in_provider_schema resource_type=google_kms_key_ring
-2026-04-28T09:22:11.451616Z [warning  ] kb_unavailable                 [my-terraform-agent.importer.knowledge_base] fallback=no_context_mode resource_type=google_kms_key_ring
-2026-04-28T09:22:11.452190Z [info     ] kb_cache_miss                  [my-terraform-agent.importer.knowledge_base] next=attempting_bootstrap path=C:\Users\41708\my-terraform-agent\importer\knowledge_base\google_kms_crypto_key.json resource_type=google_kms_crypto_key
-2026-04-28T09:22:11.452595Z [info     ] kb_bootstrap_start             [my-terraform-agent.importer.knowledge_base] resource_type=google_kms_crypto_key source=terraform_providers_schema
-2026-04-28T09:22:11.453057Z [warning  ] kb_bootstrap_skipped           [my-terraform-agent.importer.knowledge_base] error='"Provider schema does not contain \'google_kms_crypto_key\'. The resource type may not exist, or the relevant provider may not be installed. Run `terraform init` and retry with --refresh."' reason=not_in_provider_schema resource_type=google_kms_crypto_key
-2026-04-28T09:22:11.453763Z [warning  ] kb_unavailable                 [my-terraform-agent.importer.knowledge_base] fallback=no_context_mode resource_type=google_kms_crypto_key
-2026-04-28T09:22:11.454407Z [info     ] kb_cache_miss                  [my-terraform-agent.importer.knowledge_base] next=attempting_bootstrap path=C:\Users\41708\my-terraform-agent\importer\knowledge_base\google_pubsub_subscription.json resource_type=google_pubsub_subscription
-2026-04-28T09:22:11.455089Z [info     ] kb_bootstrap_start             [my-terraform-agent.importer.knowledge_base] resource_type=google_pubsub_subscription source=terraform_providers_schema
-2026-04-28T09:22:11.455601Z [warning  ] kb_bootstrap_skipped           [my-terraform-agent.importer.knowledge_base] error='"Provider schema does not contain \'google_pubsub_subscription\'. The resource type may not exist, or the relevant provider may not be installed. Run `terraform init` and retry with --refresh."' reason=not_in_provider_schema resource_type=google_pubsub_subscription
-2026-04-28T09:22:11.456538Z [warning  ] kb_unavailable                 [my-terraform-agent.importer.knowledge_base] fallback=no_context_mode resource_type=google_pubsub_subscription
-2026-04-28T09:22:11.457265Z [info     ] kb_cache_miss                  [my-terraform-agent.importer.knowledge_base] next=attempting_bootstrap path=C:\Users\41708\my-terraform-agent\importer\knowledge_base\google_pubsub_topic.json resource_type=google_pubsub_topic
-2026-04-28T09:22:11.457748Z [info     ] kb_bootstrap_start             [my-terraform-agent.importer.knowledge_base] resource_type=google_pubsub_topic source=terraform_providers_schema
-2026-04-28T09:22:11.458325Z [warning  ] kb_bootstrap_skipped           [my-terraform-agent.importer.knowledge_base] error='"Provider schema does not contain \'google_pubsub_topic\'. The resource type may not exist, or the relevant provider may not be installed. Run `terraform init` and retry with --refresh."' reason=not_in_provider_schema resource_type=google_pubsub_topic
-2026-04-28T09:22:11.458718Z [warning  ] kb_unavailable                 [my-terraform-agent.importer.knowledge_base] fallback=no_context_mode resource_type=google_pubsub_topic
-
---- Generating Initial HCL Files in Parallel ---
-
-⚙️  Generating HCL for 'poc-sa@dev-proj-470211.iam.gserviceaccount.com'...
-
-⚙️  Generating HCL for 'default-allow-ssh'...
-2026-04-28T09:22:11.460534Z [info     ] describe_start                 [my-terraform-agent.importer.gcp_client] resource_name=poc-sa@dev-proj-470211.iam.gserviceaccount.com tf_type=google_service_account
-
-⚙️  Generating HCL for 'poc-cloudrun'...
-
-⚙️  Generating HCL for 'poc-cluster-std'...
-
-⚙️  Generating HCL for 'poc-disk'...
-
-⚙️  Generating HCL for 'poc-cluster'...2026-04-28T09:22:11.461630Z [info     ] describe_start                 [my-terraform-agent.importer.gcp_client] resource_name=default-allow-ssh tf_type=google_compute_firewall
-
-⚙️  Generating HCL for 'poc-fw-allow-icmp'...
-
-
-⚙️  Generating HCL for 'poc-smoke-bucket-dev-proj-470211'...
-2026-04-28T09:22:11.462381Z [info     ] subprocess_start               [my-terraform-agent.importer.shell_runner] cmd="'C:\\Program Files (x86)\\Google\\Cloud SDK\\google-cloud-sdk\\bin\\gcloud.cmd' --quiet iam service-accounts describe poc-sa@dev-proj-470211.iam.gserviceaccount.com --project=dev-proj-470211 --format=json" timeout_s=60.0
-2026-04-28T09:22:11.463170Z [info     ] describe_start                 [my-terraform-agent.importer.gcp_client] resource_name=poc-cloudrun tf_type=google_cloud_run_v2_service
-2026-04-28T09:22:11.463941Z [info     ] describe_start                 [my-terraform-agent.importer.gcp_client] resource_name=poc-cluster-std tf_type=google_container_cluster
-2026-04-28T09:22:11.465228Z [info     ] describe_start                 [my-terraform-agent.importer.gcp_client] resource_name=poc-disk tf_type=google_compute_disk
-2026-04-28T09:22:11.465580Z [info     ] describe_start                 [my-terraform-agent.importer.gcp_client] resource_name=poc-cluster tf_type=google_container_cluster
-2026-04-28T09:22:11.466018Z [info     ] describe_start                 [my-terraform-agent.importer.gcp_client] resource_name=poc-smoke-bucket-dev-proj-470211 tf_type=google_storage_bucket
-2026-04-28T09:22:11.466246Z [info     ] describe_start                 [my-terraform-agent.importer.gcp_client] resource_name=poc-fw-allow-icmp tf_type=google_compute_firewall
-2026-04-28T09:22:11.466527Z [info     ] subprocess_start               [my-terraform-agent.importer.shell_runner] cmd="'C:\\Program Files (x86)\\Google\\Cloud SDK\\google-cloud-sdk\\bin\\gcloud.cmd' --quiet compute firewall-rules describe default-allow-ssh --project=dev-proj-470211 --format=json" timeout_s=60.0
-2026-04-28T09:22:11.467155Z [info     ] subprocess_start               [my-terraform-agent.importer.shell_runner] cmd="'C:\\Program Files (x86)\\Google\\Cloud SDK\\google-cloud-sdk\\bin\\gcloud.cmd' --quiet run services describe poc-cloudrun --project=dev-proj-470211 --region us-central1 --format=json" timeout_s=60.0
-2026-04-28T09:22:11.467670Z [info     ] subprocess_start               [my-terraform-agent.importer.shell_runner] cmd="'C:\\Program Files (x86)\\Google\\Cloud SDK\\google-cloud-sdk\\bin\\gcloud.cmd' --quiet container clusters describe poc-cluster-std --project=dev-proj-470211 --zone us-central1-a --format=json" timeout_s=60.0
-2026-04-28T09:22:11.468451Z [info     ] subprocess_start               [my-terraform-agent.importer.shell_runner] cmd="'C:\\Program Files (x86)\\Google\\Cloud SDK\\google-cloud-sdk\\bin\\gcloud.cmd' --quiet compute disks describe poc-disk --project=dev-proj-470211 --zone us-central1-a --format=json" timeout_s=60.0
-2026-04-28T09:22:11.469100Z [info     ] subprocess_start               [my-terraform-agent.importer.shell_runner] cmd="'C:\\Program Files (x86)\\Google\\Cloud SDK\\google-cloud-sdk\\bin\\gcloud.cmd' --quiet container clusters describe poc-cluster --project=dev-proj-470211 --region us-central1 --format=json" timeout_s=60.0
-2026-04-28T09:22:11.469657Z [info     ] subprocess_start               [my-terraform-agent.importer.shell_runner] cmd="'C:\\Program Files (x86)\\Google\\Cloud SDK\\google-cloud-sdk\\bin\\gcloud.cmd' --quiet storage buckets describe gs://poc-smoke-bucket-dev-proj-470211 --project=dev-proj-470211 --format=json" timeout_s=60.0
-2026-04-28T09:22:11.470241Z [info     ] subprocess_start               [my-terraform-agent.importer.shell_runner] cmd="'C:\\Program Files (x86)\\Google\\Cloud SDK\\google-cloud-sdk\\bin\\gcloud.cmd' --quiet compute firewall-rules describe poc-fw-allow-icmp --project=dev-proj-470211 --format=json" timeout_s=60.0
-2026-04-28T09:22:16.453902Z [info     ] describe_complete              [my-terraform-agent.importer.gcp_client] resource_name=default-allow-ssh tf_type=google_compute_firewall
-2026-04-28T09:22:16.454285Z [info     ] snapshot_inject_project        [my-terraform-agent.importer.gcp_client] project_id=dev-proj-470211 reason='gcloud describe omits it; needed for self-contained HCL'
-   - 🛡️  Auto-scrubbed 1 computed-only field(s) from cloud snapshot:
-       - id
-2026-04-28T09:22:16.455553Z [info     ] llm_invoke_start               [my-terraform-agent.importer.hcl_generator] attempt=1 hcl_name=default_allow_ssh max_retries=5 tf_type=google_compute_firewall
-2026-04-28T09:22:16.455979Z [info     ] vertex_init_start              [my-terraform-agent.llm_provider] location=us-central1 project=prod-470211
-2026-04-28T09:22:16.456277Z [info     ] vertex_init_ok                 [my-terraform-agent.llm_provider] location=us-central1 project=prod-470211
-2026-04-28T09:22:16.456537Z [info     ] llm_client_create_start        [my-terraform-agent.llm_provider] max_retries=3 mode=text model=gemini-2.5-pro timeout_s=120
-C:\Users\41708\my-terraform-agent\llm_provider.py:218: LangChainDeprecationWarning: The class `ChatVertexAI` was deprecated in LangChain 3.2.0 and will be removed in 4.0.0. An updated version of the class exists in the `langchain-google-genai package and should be used instead. To use it run `pip install -U `langchain-google-genai` and import as `from `langchain_google_genai import ChatGoogleGenerativeAI``.
-  _llm_text_client = ChatVertexAI(
-2026-04-28T09:22:16.458544Z [info     ] llm_client_create_ok           [my-terraform-agent.llm_provider] mode=text
-2026-04-28T09:22:16.516240Z [info     ] describe_complete              [my-terraform-agent.importer.gcp_client] resource_name=poc-fw-allow-icmp tf_type=google_compute_firewall
-2026-04-28T09:22:16.516626Z [info     ] snapshot_inject_project        [my-terraform-agent.importer.gcp_client] project_id=dev-proj-470211 reason='gcloud describe omits it; needed for self-contained HCL'
-   - 🛡️  Auto-scrubbed 1 computed-only field(s) from cloud snapshot:
-       - id
-2026-04-28T09:22:16.517410Z [info     ] llm_invoke_start               [my-terraform-agent.importer.hcl_generator] attempt=1 hcl_name=poc_fw_allow_icmp max_retries=5 tf_type=google_compute_firewall
-2026-04-28T09:22:17.195874Z [info     ] describe_complete              [my-terraform-agent.importer.gcp_client] resource_name=poc-sa@dev-proj-470211.iam.gserviceaccount.com tf_type=google_service_account
-2026-04-28T09:22:17.196488Z [info     ] snapshot_inject_project        [my-terraform-agent.importer.gcp_client] project_id=dev-proj-470211 reason='gcloud describe omits it; needed for self-contained HCL'
-2026-04-28T09:22:17.196933Z [info     ] snapshot_inject_account_id     [my-terraform-agent.importer.gcp_client] account_id=poc-sa reason='derived from email; email gets scrubbed downstream'
-2026-04-28T09:22:17.197660Z [info     ] llm_invoke_start               [my-terraform-agent.importer.hcl_generator] attempt=1 hcl_name=poc_sa max_retries=5 tf_type=google_service_account
-2026-04-28T09:22:17.198870Z [info     ] golden_example_injected        [my-terraform-agent.importer.hcl_generator] example_size_chars=1734 hcl_name=poc_sa modes=[] tf_type=google_service_account
-2026-04-28T09:22:17.513903Z [info     ] describe_complete              [my-terraform-agent.importer.gcp_client] resource_name=poc-smoke-bucket-dev-proj-470211 tf_type=google_storage_bucket
-2026-04-28T09:22:17.515670Z [info     ] snapshot_inject_project        [my-terraform-agent.importer.gcp_client] project_id=dev-proj-470211 reason='gcloud describe omits it; needed for self-contained HCL'
-2026-04-28T09:22:17.517027Z [info     ] llm_invoke_start               [my-terraform-agent.importer.hcl_generator] attempt=1 hcl_name=poc_smoke_bucket_dev_proj_470211 max_retries=5 tf_type=google_storage_bucket
-2026-04-28T09:22:17.518520Z [info     ] golden_example_injected        [my-terraform-agent.importer.hcl_generator] example_size_chars=1981 hcl_name=poc_smoke_bucket_dev_proj_470211 modes=[] tf_type=google_storage_bucket
-2026-04-28T09:22:17.758072Z [info     ] describe_complete              [my-terraform-agent.importer.gcp_client] resource_name=poc-disk tf_type=google_compute_disk
-2026-04-28T09:22:17.759372Z [info     ] snapshot_inject_project        [my-terraform-agent.importer.gcp_client] project_id=dev-proj-470211 reason='gcloud describe omits it; needed for self-contained HCL'
-   - 🛡️  Auto-scrubbed 1 computed-only field(s) from cloud snapshot:
-       - id
-2026-04-28T09:22:17.760801Z [info     ] llm_invoke_start               [my-terraform-agent.importer.hcl_generator] attempt=1 hcl_name=poc_disk max_retries=5 tf_type=google_compute_disk
-2026-04-28T09:22:17.829551Z [info     ] describe_complete              [my-terraform-agent.importer.gcp_client] resource_name=poc-cluster-std tf_type=google_container_cluster
-2026-04-28T09:22:17.830332Z [info     ] snapshot_inject_project        [my-terraform-agent.importer.gcp_client] project_id=dev-proj-470211 reason='gcloud describe omits it; needed for self-contained HCL'
-   - 🛡️  Auto-scrubbed 1 computed-only field(s) from cloud snapshot:
-       - id
-   - 🏷️  Stripped 2 provider-managed label(s):
-       - nodeConfig.resourceLabels.goog-gke-node-pool-provisioning-model
-       - nodePools[0].config.resourceLabels.goog-gke-node-pool-provisioning-model
-   - 🧽 Stripped 7 provider-dropped path(s):
-       - addonsConfig.kubernetesDashboard
-       - ipAllocationPolicy.clusterIpv4Cidr
-       - ipAllocationPolicy.servicesIpv4Cidr
-       - ipAllocationPolicy.clusterIpv4CidrBlock
-       - ipAllocationPolicy.servicesIpv4CidrBlock
-       - ipAllocationPolicy.useIpAliases
-       - maintenancePolicy.resourceVersion
-   - 🧭 Detected resource mode(s): ['gke_standard']
-   - 🧹 Mode-pruned 1 top-level key(s) from snapshot:
-       - clusterIpv4Cidr
-   - 🫥 Dropped 5 empty top-level key(s) after prune passes:
-       - autopilot
-       - legacyAbac
-       - maintenancePolicy
-       - masterAuthorizedNetworksConfig
-       - userManagedKeysConfig
-2026-04-28T09:22:17.856853Z [info     ] llm_invoke_start               [my-terraform-agent.importer.hcl_generator] attempt=1 hcl_name=poc_cluster_std max_retries=5 tf_type=google_container_cluster
-2026-04-28T09:22:17.858224Z [info     ] golden_example_injected        [my-terraform-agent.importer.hcl_generator] example_size_chars=1925 hcl_name=poc_cluster_std modes=['gke_standard'] tf_type=google_container_cluster
-2026-04-28T09:22:17.968032Z [info     ] describe_complete              [my-terraform-agent.importer.gcp_client] resource_name=poc-cluster tf_type=google_container_cluster
-2026-04-28T09:22:17.969332Z [info     ] snapshot_inject_project        [my-terraform-agent.importer.gcp_client] project_id=dev-proj-470211 reason='gcloud describe omits it; needed for self-contained HCL'
-   - 🛡️  Auto-scrubbed 1 computed-only field(s) from cloud snapshot:
-       - id
-   - 🏷️  Stripped 6 provider-managed label(s):
-       - nodeConfig.resourceLabels.goog-gke-node-pool-provisioning-model
-       - nodePools[0].config.resourceLabels.goog-gke-node-pool-provisioning-model
-       - nodePools[1].config.resourceLabels.goog-gke-node-pool-provisioning-model
-       - nodePools[2].config.resourceLabels.goog-gke-node-pool-provisioning-model
-       - nodePools[3].config.resourceLabels.goog-gke-node-pool-provisioning-model
-       - nodePools[4].config.resourceLabels.goog-gke-node-pool-provisioning-model
-   - 🧽 Stripped 7 provider-dropped path(s):
-       - addonsConfig.kubernetesDashboard
-       - ipAllocationPolicy.clusterIpv4Cidr
-       - ipAllocationPolicy.servicesIpv4Cidr
-       - ipAllocationPolicy.clusterIpv4CidrBlock
-       - ipAllocationPolicy.servicesIpv4CidrBlock
-       - ipAllocationPolicy.useIpAliases
-       - maintenancePolicy.resourceVersion
-   - 🧭 Detected resource mode(s): ['gke_autopilot']
-   - 🧹 Mode-pruned 12 top-level key(s) from snapshot:
-       - addonsConfig.dnsCacheConfig
-       - addonsConfig.networkPolicyConfig
-       - addonsConfig.statefulHaConfig
-       - clusterIpv4Cidr
-       - defaultMaxPodsConstraint
-       - loggingService
-       - monitoringConfig.advancedDatapathObservabilityConfig
-       - monitoringService
-       - nodeConfig
-       - nodePoolAutoConfig
-       - nodePoolDefaults
-       - nodePools
-   - 🫥 Dropped 4 empty top-level key(s) after prune passes:
-       - legacyAbac
-       - maintenancePolicy
-       - masterAuthorizedNetworksConfig
-       - userManagedKeysConfig
-2026-04-28T09:22:17.984882Z [info     ] llm_invoke_start               [my-terraform-agent.importer.hcl_generator] attempt=1 hcl_name=poc_cluster max_retries=5 tf_type=google_container_cluster
-2026-04-28T09:22:17.986353Z [info     ] golden_example_injected        [my-terraform-agent.importer.hcl_generator] example_size_chars=1647 hcl_name=poc_cluster modes=['gke_autopilot'] tf_type=google_container_cluster
-2026-04-28T09:22:18.012763Z [info     ] describe_complete              [my-terraform-agent.importer.gcp_client] resource_name=poc-cloudrun tf_type=google_cloud_run_v2_service
-2026-04-28T09:22:18.013267Z [info     ] snapshot_inject_project        [my-terraform-agent.importer.gcp_client] project_id=dev-proj-470211 reason='gcloud describe omits it; needed for self-contained HCL'
-   - 🧭 Detected resource mode(s): ['cloud_run_v2_default']
-2026-04-28T09:22:18.015453Z [info     ] llm_invoke_start               [my-terraform-agent.importer.hcl_generator] attempt=1 hcl_name=poc_cloudrun max_retries=5 tf_type=google_cloud_run_v2_service
-2026-04-28T09:22:18.017328Z [info     ] golden_example_injected        [my-terraform-agent.importer.hcl_generator] example_size_chars=2406 hcl_name=poc_cloudrun modes=['cloud_run_v2_default'] tf_type=google_cloud_run_v2_service
-2026-04-28T09:22:27.585671Z [info     ] hcl_validation_ok              [my-terraform-agent.importer.hcl_generator] hcl_name=poc_disk tf_type=google_compute_disk
-✅ HCL file saved for 'poc-disk' -> C:\Users\41708\my-terraform-agent\imported\dev-proj-470211\google_compute_disk_poc_disk.tf
-
-⚙️  Generating HCL for 'poc-subnet'...
-2026-04-28T09:22:27.592481Z [info     ] describe_start                 [my-terraform-agent.importer.gcp_client] resource_name=poc-subnet tf_type=google_compute_subnetwork
-2026-04-28T09:22:27.593730Z [info     ] subprocess_start               [my-terraform-agent.importer.shell_runner] cmd="'C:\\Program Files (x86)\\Google\\Cloud SDK\\google-cloud-sdk\\bin\\gcloud.cmd' --quiet compute networks subnets describe poc-subnet --project=dev-proj-470211 --region us-central1 --format=json" timeout_s=60.0
-2026-04-28T09:22:29.317522Z [info     ] hcl_validation_ok              [my-terraform-agent.importer.hcl_generator] hcl_name=default_allow_ssh tf_type=google_compute_firewall
-✅ HCL file saved for 'default-allow-ssh' -> C:\Users\41708\my-terraform-agent\imported\dev-proj-470211\google_compute_firewall_default_allow_ssh.tf
-
-⚙️  Generating HCL for 'poc-vm'...
-2026-04-28T09:22:29.327104Z [info     ] describe_start                 [my-terraform-agent.importer.gcp_client] resource_name=poc-vm tf_type=google_compute_disk
-2026-04-28T09:22:29.327440Z [info     ] subprocess_start               [my-terraform-agent.importer.shell_runner] cmd="'C:\\Program Files (x86)\\Google\\Cloud SDK\\google-cloud-sdk\\bin\\gcloud.cmd' --quiet compute disks describe poc-vm --project=dev-proj-470211 --zone us-central1-a --format=json" timeout_s=60.0
-2026-04-28T09:22:32.089227Z [info     ] describe_complete              [my-terraform-agent.importer.gcp_client] resource_name=poc-subnet tf_type=google_compute_subnetwork
-2026-04-28T09:22:32.089613Z [info     ] snapshot_inject_project        [my-terraform-agent.importer.gcp_client] project_id=dev-proj-470211 reason='gcloud describe omits it; needed for self-contained HCL'
-   - 🛡️  Auto-scrubbed 1 computed-only field(s) from cloud snapshot:
-       - id
-2026-04-28T09:22:32.090284Z [info     ] llm_invoke_start               [my-terraform-agent.importer.hcl_generator] attempt=1 hcl_name=poc_subnet max_retries=5 tf_type=google_compute_subnetwork
-2026-04-28T09:22:32.090941Z [info     ] golden_example_injected        [my-terraform-agent.importer.hcl_generator] example_size_chars=1657 hcl_name=poc_subnet modes=[] tf_type=google_compute_subnetwork
-2026-04-28T09:22:32.198746Z [info     ] hcl_validation_ok              [my-terraform-agent.importer.hcl_generator] hcl_name=poc_fw_allow_icmp tf_type=google_compute_firewall
-✅ HCL file saved for 'poc-fw-allow-icmp' -> C:\Users\41708\my-terraform-agent\imported\dev-proj-470211\google_compute_firewall_poc_fw_allow_icmp.tf
-
-⚙️  Generating HCL for 'poc-vm'...
-2026-04-28T09:22:32.202606Z [info     ] describe_start                 [my-terraform-agent.importer.gcp_client] resource_name=poc-vm tf_type=google_compute_instance
-2026-04-28T09:22:32.203244Z [info     ] subprocess_start               [my-terraform-agent.importer.shell_runner] cmd="'C:\\Program Files (x86)\\Google\\Cloud SDK\\google-cloud-sdk\\bin\\gcloud.cmd' --quiet compute instances describe poc-vm --project=dev-proj-470211 --zone us-central1-a --format=json" timeout_s=60.0
-2026-04-28T09:22:33.005085Z [info     ] hcl_validation_ok              [my-terraform-agent.importer.hcl_generator] hcl_name=poc_smoke_bucket_dev_proj_470211 tf_type=google_storage_bucket
-2026-04-28T09:22:33.006523Z [info     ] hcl_validation_ok              [my-terraform-agent.importer.hcl_generator] hcl_name=poc_sa tf_type=google_service_account
-✅ HCL file saved for 'poc-smoke-bucket-dev-proj-470211' -> C:\Users\41708\my-terraform-agent\imported\dev-proj-470211\google_storage_bucket_poc_smoke_bucket_dev_proj_470211.tf
-
-⚙️  Generating HCL for 'poc-vpc'...
-2026-04-28T09:22:33.011525Z [info     ] describe_start                 [my-terraform-agent.importer.gcp_client] resource_name=poc-vpc tf_type=google_compute_network
-✅ HCL file saved for 'poc-sa@dev-proj-470211.iam.gserviceaccount.com' -> C:\Users\41708\my-terraform-agent\imported\dev-proj-470211\google_service_account_poc_sa.tf
-2026-04-28T09:22:33.012257Z [info     ] subprocess_start               [my-terraform-agent.importer.shell_runner] cmd="'C:\\Program Files (x86)\\Google\\Cloud SDK\\google-cloud-sdk\\bin\\gcloud.cmd' --quiet compute networks describe poc-vpc --project=dev-proj-470211 --format=json" timeout_s=60.0
-
-⚙️  Generating HCL for 'poc-keyring'...
-2026-04-28T09:22:33.013349Z [info     ] describe_start                 [my-terraform-agent.importer.gcp_client] resource_name=poc-keyring tf_type=google_kms_key_ring
-2026-04-28T09:22:33.013817Z [info     ] subprocess_start               [my-terraform-agent.importer.shell_runner] cmd="'C:\\Program Files (x86)\\Google\\Cloud SDK\\google-cloud-sdk\\bin\\gcloud.cmd' --quiet kms keyrings describe poc-keyring --project=dev-proj-470211 --location us-central1 --format=json" timeout_s=60.0
-2026-04-28T09:22:33.480398Z [info     ] describe_complete              [my-terraform-agent.importer.gcp_client] resource_name=poc-vm tf_type=google_compute_disk
-2026-04-28T09:22:33.480794Z [info     ] snapshot_inject_project        [my-terraform-agent.importer.gcp_client] project_id=dev-proj-470211 reason='gcloud describe omits it; needed for self-contained HCL'
-   - 🛡️  Auto-scrubbed 1 computed-only field(s) from cloud snapshot:
-       - id
-2026-04-28T09:22:33.481648Z [info     ] llm_invoke_start               [my-terraform-agent.importer.hcl_generator] attempt=1 hcl_name=poc_vm max_retries=5 tf_type=google_compute_disk
-2026-04-28T09:22:36.705684Z [info     ] hcl_validation_ok              [my-terraform-agent.importer.hcl_generator] hcl_name=poc_cloudrun tf_type=google_cloud_run_v2_service
-✅ HCL file saved for 'poc-cloudrun' -> C:\Users\41708\my-terraform-agent\imported\dev-proj-470211\google_cloud_run_v2_service_poc_cloudrun.tf
-
-⚙️  Generating HCL for 'poc-key'...
-2026-04-28T09:22:36.708177Z [info     ] describe_start                 [my-terraform-agent.importer.gcp_client] resource_name=poc-key tf_type=google_kms_crypto_key
-2026-04-28T09:22:36.708539Z [info     ] subprocess_start               [my-terraform-agent.importer.shell_runner] cmd="'C:\\Program Files (x86)\\Google\\Cloud SDK\\google-cloud-sdk\\bin\\gcloud.cmd' --quiet kms keys describe poc-key --project=dev-proj-470211 --location us-central1 --keyring poc-keyring --format=json" timeout_s=60.0
-2026-04-28T09:22:36.722810Z [info     ] describe_complete              [my-terraform-agent.importer.gcp_client] resource_name=poc-vpc tf_type=google_compute_network
-2026-04-28T09:22:36.723174Z [info     ] snapshot_inject_project        [my-terraform-agent.importer.gcp_client] project_id=dev-proj-470211 reason='gcloud describe omits it; needed for self-contained HCL'
-   - 🛡️  Auto-scrubbed 1 computed-only field(s) from cloud snapshot:
-       - id
-2026-04-28T09:22:36.723904Z [info     ] llm_invoke_start               [my-terraform-agent.importer.hcl_generator] attempt=1 hcl_name=poc_vpc max_retries=5 tf_type=google_compute_network
-2026-04-28T09:22:36.826010Z [info     ] describe_complete              [my-terraform-agent.importer.gcp_client] resource_name=poc-vm tf_type=google_compute_instance
-2026-04-28T09:22:36.826347Z [info     ] snapshot_inject_project        [my-terraform-agent.importer.gcp_client] project_id=dev-proj-470211 reason='gcloud describe omits it; needed for self-contained HCL'
-   - 🛡️  Auto-scrubbed 1 computed-only field(s) from cloud snapshot:
-       - id
-   - 🧭 Detected resource mode(s): ['compute_instance_default']
-2026-04-28T09:22:36.827535Z [info     ] llm_invoke_start               [my-terraform-agent.importer.hcl_generator] attempt=1 hcl_name=poc_vm max_retries=5 tf_type=google_compute_instance
-2026-04-28T09:22:36.828173Z [info     ] golden_example_injected        [my-terraform-agent.importer.hcl_generator] example_size_chars=2498 hcl_name=poc_vm modes=['compute_instance_default'] tf_type=google_compute_instance
-2026-04-28T09:22:37.193373Z [info     ] describe_complete              [my-terraform-agent.importer.gcp_client] resource_name=poc-keyring tf_type=google_kms_key_ring
-2026-04-28T09:22:37.193722Z [info     ] snapshot_inject_project        [my-terraform-agent.importer.gcp_client] project_id=dev-proj-470211 reason='gcloud describe omits it; needed for self-contained HCL'
-2026-04-28T09:22:37.194124Z [info     ] llm_invoke_start               [my-terraform-agent.importer.hcl_generator] attempt=1 hcl_name=poc_keyring max_retries=5 tf_type=google_kms_key_ring
-2026-04-28T09:22:40.910489Z [info     ] describe_complete              [my-terraform-agent.importer.gcp_client] resource_name=poc-key tf_type=google_kms_crypto_key
-2026-04-28T09:22:40.910852Z [info     ] snapshot_inject_project        [my-terraform-agent.importer.gcp_client] project_id=dev-proj-470211 reason='gcloud describe omits it; needed for self-contained HCL'
-2026-04-28T09:22:40.911300Z [info     ] llm_invoke_start               [my-terraform-agent.importer.hcl_generator] attempt=1 hcl_name=poc_key max_retries=5 tf_type=google_kms_crypto_key
-2026-04-28T09:22:40.912077Z [info     ] golden_example_injected        [my-terraform-agent.importer.hcl_generator] example_size_chars=1596 hcl_name=poc_key modes=[] tf_type=google_kms_crypto_key
-2026-04-28T09:22:41.774733Z [info     ] hcl_validation_ok              [my-terraform-agent.importer.hcl_generator] hcl_name=poc_keyring tf_type=google_kms_key_ring
-✅ HCL file saved for 'poc-keyring' -> C:\Users\41708\my-terraform-agent\imported\dev-proj-470211\google_kms_key_ring_poc_keyring.tf
-
-⚙️  Generating HCL for 'poc-subscription'...
-2026-04-28T09:22:41.779268Z [info     ] describe_start                 [my-terraform-agent.importer.gcp_client] resource_name=poc-subscription tf_type=google_pubsub_subscription
-2026-04-28T09:22:41.779908Z [info     ] subprocess_start               [my-terraform-agent.importer.shell_runner] cmd="'C:\\Program Files (x86)\\Google\\Cloud SDK\\google-cloud-sdk\\bin\\gcloud.cmd' --quiet pubsub subscriptions describe poc-subscription --project=dev-proj-470211 --format=json" timeout_s=60.0
-2026-04-28T09:22:42.180866Z [info     ] hcl_validation_ok              [my-terraform-agent.importer.hcl_generator] hcl_name=poc_vpc tf_type=google_compute_network
-✅ HCL file saved for 'poc-vpc' -> C:\Users\41708\my-terraform-agent\imported\dev-proj-470211\google_compute_network_poc_vpc.tf
-
-⚙️  Generating HCL for 'poc-topic'...
-2026-04-28T09:22:42.185220Z [info     ] describe_start                 [my-terraform-agent.importer.gcp_client] resource_name=poc-topic tf_type=google_pubsub_topic
-2026-04-28T09:22:42.185781Z [info     ] subprocess_start               [my-terraform-agent.importer.shell_runner] cmd="'C:\\Program Files (x86)\\Google\\Cloud SDK\\google-cloud-sdk\\bin\\gcloud.cmd' --quiet pubsub topics describe poc-topic --project=dev-proj-470211 --format=json" timeout_s=60.0
-2026-04-28T09:22:43.758279Z [info     ] hcl_validation_ok              [my-terraform-agent.importer.hcl_generator] hcl_name=poc_subnet tf_type=google_compute_subnetwork
-✅ HCL file saved for 'poc-subnet' -> C:\Users\41708\my-terraform-agent\imported\dev-proj-470211\google_compute_subnetwork_poc_subnet.tf
-2026-04-28T09:22:44.288306Z [info     ] hcl_validation_ok              [my-terraform-agent.importer.hcl_generator] hcl_name=poc_vm tf_type=google_compute_disk
-✅ HCL file saved for 'poc-vm' -> C:\Users\41708\my-terraform-agent\imported\dev-proj-470211\google_compute_disk_poc_vm.tf
-2026-04-28T09:22:46.249166Z [info     ] describe_complete              [my-terraform-agent.importer.gcp_client] resource_name=poc-topic tf_type=google_pubsub_topic
-2026-04-28T09:22:46.249637Z [info     ] snapshot_inject_project        [my-terraform-agent.importer.gcp_client] project_id=dev-proj-470211 reason='gcloud describe omits it; needed for self-contained HCL'
-2026-04-28T09:22:46.250232Z [info     ] llm_invoke_start               [my-terraform-agent.importer.hcl_generator] attempt=1 hcl_name=poc_topic max_retries=5 tf_type=google_pubsub_topic
-2026-04-28T09:22:46.267823Z [info     ] describe_complete              [my-terraform-agent.importer.gcp_client] resource_name=poc-subscription tf_type=google_pubsub_subscription
-2026-04-28T09:22:46.268185Z [info     ] snapshot_inject_project        [my-terraform-agent.importer.gcp_client] project_id=dev-proj-470211 reason='gcloud describe omits it; needed for self-contained HCL'
-   - 🫥 Dropped 1 empty top-level key(s) after prune passes:
-       - pushConfig
-2026-04-28T09:22:46.269006Z [info     ] llm_invoke_start               [my-terraform-agent.importer.hcl_generator] attempt=1 hcl_name=poc_subscription max_retries=5 tf_type=google_pubsub_subscription
-2026-04-28T09:22:46.269734Z [info     ] golden_example_injected        [my-terraform-agent.importer.hcl_generator] example_size_chars=2004 hcl_name=poc_subscription modes=[] tf_type=google_pubsub_subscription
-2026-04-28T09:22:48.260312Z [info     ] hcl_validation_ok              [my-terraform-agent.importer.hcl_generator] hcl_name=poc_topic tf_type=google_pubsub_topic
-✅ HCL file saved for 'poc-topic' -> C:\Users\41708\my-terraform-agent\imported\dev-proj-470211\google_pubsub_topic_poc_topic.tf
-2026-04-28T09:22:53.897224Z [info     ] hcl_validation_ok              [my-terraform-agent.importer.hcl_generator] hcl_name=poc_subscription tf_type=google_pubsub_subscription
-✅ HCL file saved for 'poc-subscription' -> C:\Users\41708\my-terraform-agent\imported\dev-proj-470211\google_pubsub_subscription_poc_subscription.tf
-2026-04-28T09:22:54.613258Z [info     ] hcl_validation_ok              [my-terraform-agent.importer.hcl_generator] hcl_name=poc_key tf_type=google_kms_crypto_key
-✅ HCL file saved for 'poc-key' -> C:\Users\41708\my-terraform-agent\imported\dev-proj-470211\google_kms_crypto_key_poc_key.tf
-2026-04-28T09:23:16.121266Z [info     ] hcl_validation_ok              [my-terraform-agent.importer.hcl_generator] hcl_name=poc_cluster_std tf_type=google_container_cluster
-✅ HCL file saved for 'poc-cluster-std' -> C:\Users\41708\my-terraform-agent\imported\dev-proj-470211\google_container_cluster_poc_cluster_std.tf
-2026-04-28T09:23:17.567842Z [info     ] hcl_validation_ok              [my-terraform-agent.importer.hcl_generator] hcl_name=poc_cluster tf_type=google_container_cluster
-✅ HCL file saved for 'poc-cluster' -> C:\Users\41708\my-terraform-agent\imported\dev-proj-470211\google_container_cluster_poc_cluster.tf
-2026-04-28T09:23:19.088338Z [info     ] hcl_validation_ok              [my-terraform-agent.importer.hcl_generator] hcl_name=poc_vm tf_type=google_compute_instance
-✅ HCL file saved for 'poc-vm' -> C:\Users\41708\my-terraform-agent\imported\dev-proj-470211\google_compute_instance_poc_vm.tf
-2026-04-28T09:23:19.096980Z [info     ] terraform_init_start           [my-terraform-agent.importer.terraform_client] upgrade=False workdir=C:\Users\41708\my-terraform-agent\imported\dev-proj-470211
-2026-04-28T09:23:21.345120Z [info     ] import_start                   [my-terraform-agent.importer.terraform_client] resource_name=poc-disk tf_address=google_compute_disk.poc_disk workdir=C:\Users\41708\my-terraform-agent\imported\dev-proj-470211
-2026-04-28T09:23:30.220697Z [info     ] import_complete                [my-terraform-agent.importer.terraform_client] resource_name=poc-disk tf_address=google_compute_disk.poc_disk
-2026-04-28T09:23:30.221294Z [info     ] import_start                   [my-terraform-agent.importer.terraform_client] resource_name=default-allow-ssh tf_address=google_compute_firewall.default_allow_ssh workdir=C:\Users\41708\my-terraform-agent\imported\dev-proj-470211
-2026-04-28T09:23:34.317062Z [info     ] import_complete                [my-terraform-agent.importer.terraform_client] resource_name=default-allow-ssh tf_address=google_compute_firewall.default_allow_ssh
-2026-04-28T09:23:34.317715Z [info     ] import_start                   [my-terraform-agent.importer.terraform_client] resource_name=poc-fw-allow-icmp tf_address=google_compute_firewall.poc_fw_allow_icmp workdir=C:\Users\41708\my-terraform-agent\imported\dev-proj-470211
-2026-04-28T09:23:38.281437Z [info     ] import_complete                [my-terraform-agent.importer.terraform_client] resource_name=poc-fw-allow-icmp tf_address=google_compute_firewall.poc_fw_allow_icmp
-2026-04-28T09:23:38.282006Z [info     ] import_start                   [my-terraform-agent.importer.terraform_client] resource_name=poc-smoke-bucket-dev-proj-470211 tf_address=google_storage_bucket.poc_smoke_bucket_dev_proj_470211 workdir=C:\Users\41708\my-terraform-agent\imported\dev-proj-470211
-2026-04-28T09:23:42.403417Z [info     ] import_complete                [my-terraform-agent.importer.terraform_client] resource_name=poc-smoke-bucket-dev-proj-470211 tf_address=google_storage_bucket.poc_smoke_bucket_dev_proj_470211
-2026-04-28T09:23:42.403917Z [info     ] import_start                   [my-terraform-agent.importer.terraform_client] resource_name=poc-sa@dev-proj-470211.iam.gserviceaccount.com tf_address=google_service_account.poc_sa workdir=C:\Users\41708\my-terraform-agent\imported\dev-proj-470211
-2026-04-28T09:23:47.541821Z [info     ] import_complete                [my-terraform-agent.importer.terraform_client] resource_name=poc-sa@dev-proj-470211.iam.gserviceaccount.com tf_address=google_service_account.poc_sa
-2026-04-28T09:23:47.542284Z [info     ] import_start                   [my-terraform-agent.importer.terraform_client] resource_name=poc-cloudrun tf_address=google_cloud_run_v2_service.poc_cloudrun workdir=C:\Users\41708\my-terraform-agent\imported\dev-proj-470211
-2026-04-28T09:23:52.777213Z [info     ] import_complete                [my-terraform-agent.importer.terraform_client] resource_name=poc-cloudrun tf_address=google_cloud_run_v2_service.poc_cloudrun
-2026-04-28T09:23:52.777895Z [info     ] import_start                   [my-terraform-agent.importer.terraform_client] resource_name=poc-keyring tf_address=google_kms_key_ring.poc_keyring workdir=C:\Users\41708\my-terraform-agent\imported\dev-proj-470211
-2026-04-28T09:23:57.966154Z [info     ] import_complete                [my-terraform-agent.importer.terraform_client] resource_name=poc-keyring tf_address=google_kms_key_ring.poc_keyring
-2026-04-28T09:23:57.966830Z [info     ] import_start                   [my-terraform-agent.importer.terraform_client] resource_name=poc-vpc tf_address=google_compute_network.poc_vpc workdir=C:\Users\41708\my-terraform-agent\imported\dev-proj-470211
-2026-04-28T09:24:02.785955Z [info     ] import_complete                [my-terraform-agent.importer.terraform_client] resource_name=poc-vpc tf_address=google_compute_network.poc_vpc
-2026-04-28T09:24:02.786498Z [info     ] import_start                   [my-terraform-agent.importer.terraform_client] resource_name=poc-subnet tf_address=google_compute_subnetwork.poc_subnet workdir=C:\Users\41708\my-terraform-agent\imported\dev-proj-470211
-2026-04-28T09:24:07.977484Z [info     ] import_complete                [my-terraform-agent.importer.terraform_client] resource_name=poc-subnet tf_address=google_compute_subnetwork.poc_subnet
-2026-04-28T09:24:07.977971Z [info     ] import_start                   [my-terraform-agent.importer.terraform_client] resource_name=poc-vm tf_address=google_compute_disk.poc_vm workdir=C:\Users\41708\my-terraform-agent\imported\dev-proj-470211
-2026-04-28T09:24:13.271902Z [info     ] import_complete                [my-terraform-agent.importer.terraform_client] resource_name=poc-vm tf_address=google_compute_disk.poc_vm
-2026-04-28T09:24:13.272699Z [info     ] import_start                   [my-terraform-agent.importer.terraform_client] resource_name=poc-topic tf_address=google_pubsub_topic.poc_topic workdir=C:\Users\41708\my-terraform-agent\imported\dev-proj-470211
-2026-04-28T09:24:17.218160Z [info     ] import_complete                [my-terraform-agent.importer.terraform_client] resource_name=poc-topic tf_address=google_pubsub_topic.poc_topic
-2026-04-28T09:24:17.218690Z [info     ] import_start                   [my-terraform-agent.importer.terraform_client] resource_name=poc-subscription tf_address=google_pubsub_subscription.poc_subscription workdir=C:\Users\41708\my-terraform-agent\imported\dev-proj-470211
-2026-04-28T09:24:22.623309Z [info     ] import_complete                [my-terraform-agent.importer.terraform_client] resource_name=poc-subscription tf_address=google_pubsub_subscription.poc_subscription
-2026-04-28T09:24:22.623875Z [info     ] import_start                   [my-terraform-agent.importer.terraform_client] resource_name=poc-key tf_address=google_kms_crypto_key.poc_key workdir=C:\Users\41708\my-terraform-agent\imported\dev-proj-470211
-2026-04-28T09:24:27.995142Z [info     ] import_complete                [my-terraform-agent.importer.terraform_client] resource_name=poc-key tf_address=google_kms_crypto_key.poc_key
-2026-04-28T09:24:27.995731Z [info     ] import_start                   [my-terraform-agent.importer.terraform_client] resource_name=poc-cluster-std tf_address=google_container_cluster.poc_cluster_std workdir=C:\Users\41708\my-terraform-agent\imported\dev-proj-470211
-2026-04-28T09:24:36.441017Z [info     ] import_complete                [my-terraform-agent.importer.terraform_client] resource_name=poc-cluster-std tf_address=google_container_cluster.poc_cluster_std
-2026-04-28T09:24:36.441501Z [info     ] import_start                   [my-terraform-agent.importer.terraform_client] resource_name=poc-cluster tf_address=google_container_cluster.poc_cluster workdir=C:\Users\41708\my-terraform-agent\imported\dev-proj-470211
-2026-04-28T09:25:06.225501Z [info     ] import_complete                [my-terraform-agent.importer.terraform_client] resource_name=poc-cluster tf_address=google_container_cluster.poc_cluster
-2026-04-28T09:25:06.226215Z [info     ] import_start                   [my-terraform-agent.importer.terraform_client] resource_name=poc-vm tf_address=google_compute_instance.poc_vm workdir=C:\Users\41708\my-terraform-agent\imported\dev-proj-470211
-2026-04-28T09:25:11.913754Z [info     ] import_complete                [my-terraform-agent.importer.terraform_client] resource_name=poc-vm tf_address=google_compute_instance.poc_vm
-
---- Initial Verification of All Generated Files (per-resource scoped plans) ---
-2026-04-28T09:25:11.914485Z [info     ] plan_verify_start              [my-terraform-agent.importer.terraform_client] tf_address=google_compute_disk.poc_disk workdir=C:\Users\41708\my-terraform-agent\imported\dev-proj-470211
-2026-04-28T09:25:14.631186Z [error    ] plan_nonzero_exit              [my-terraform-agent.importer.terraform_client] returncode=1 tf_address=google_compute_disk.poc_disk
-2026-04-28T09:25:14.632821Z [info     ] plan_verify_start              [my-terraform-agent.importer.terraform_client] tf_address=google_compute_firewall.default_allow_ssh workdir=C:\Users\41708\my-terraform-agent\imported\dev-proj-470211
-2026-04-28T09:25:17.265281Z [error    ] plan_nonzero_exit              [my-terraform-agent.importer.terraform_client] returncode=1 tf_address=google_compute_firewall.default_allow_ssh
-2026-04-28T09:25:17.266978Z [info     ] plan_verify_start              [my-terraform-agent.importer.terraform_client] tf_address=google_compute_firewall.poc_fw_allow_icmp workdir=C:\Users\41708\my-terraform-agent\imported\dev-proj-470211
-2026-04-28T09:25:20.064342Z [error    ] plan_nonzero_exit              [my-terraform-agent.importer.terraform_client] returncode=1 tf_address=google_compute_firewall.poc_fw_allow_icmp
-2026-04-28T09:25:20.066207Z [info     ] plan_verify_start              [my-terraform-agent.importer.terraform_client] tf_address=google_storage_bucket.poc_smoke_bucket_dev_proj_470211 workdir=C:\Users\41708\my-terraform-agent\imported\dev-proj-470211
-2026-04-28T09:25:22.779864Z [error    ] plan_nonzero_exit              [my-terraform-agent.importer.terraform_client] returncode=1 tf_address=google_storage_bucket.poc_smoke_bucket_dev_proj_470211
-2026-04-28T09:25:22.781502Z [info     ] plan_verify_start              [my-terraform-agent.importer.terraform_client] tf_address=google_service_account.poc_sa workdir=C:\Users\41708\my-terraform-agent\imported\dev-proj-470211
-2026-04-28T09:25:25.540819Z [error    ] plan_nonzero_exit              [my-terraform-agent.importer.terraform_client] returncode=1 tf_address=google_service_account.poc_sa
-2026-04-28T09:25:25.542465Z [info     ] plan_verify_start              [my-terraform-agent.importer.terraform_client] tf_address=google_cloud_run_v2_service.poc_cloudrun workdir=C:\Users\41708\my-terraform-agent\imported\dev-proj-470211
-2026-04-28T09:25:28.150209Z [error    ] plan_nonzero_exit              [my-terraform-agent.importer.terraform_client] returncode=1 tf_address=google_cloud_run_v2_service.poc_cloudrun
-2026-04-28T09:25:28.152112Z [info     ] plan_verify_start              [my-terraform-agent.importer.terraform_client] tf_address=google_kms_key_ring.poc_keyring workdir=C:\Users\41708\my-terraform-agent\imported\dev-proj-470211
-2026-04-28T09:25:30.928312Z [error    ] plan_nonzero_exit              [my-terraform-agent.importer.terraform_client] returncode=1 tf_address=google_kms_key_ring.poc_keyring
-2026-04-28T09:25:30.930096Z [info     ] plan_verify_start              [my-terraform-agent.importer.terraform_client] tf_address=google_compute_network.poc_vpc workdir=C:\Users\41708\my-terraform-agent\imported\dev-proj-470211
-2026-04-28T09:25:33.572298Z [error    ] plan_nonzero_exit              [my-terraform-agent.importer.terraform_client] returncode=1 tf_address=google_compute_network.poc_vpc
-2026-04-28T09:25:33.574331Z [info     ] plan_verify_start              [my-terraform-agent.importer.terraform_client] tf_address=google_compute_subnetwork.poc_subnet workdir=C:\Users\41708\my-terraform-agent\imported\dev-proj-470211
-2026-04-28T09:25:36.272541Z [error    ] plan_nonzero_exit              [my-terraform-agent.importer.terraform_client] returncode=1 tf_address=google_compute_subnetwork.poc_subnet
-2026-04-28T09:25:36.274165Z [info     ] plan_verify_start              [my-terraform-agent.importer.terraform_client] tf_address=google_compute_disk.poc_vm workdir=C:\Users\41708\my-terraform-agent\imported\dev-proj-470211
-2026-04-28T09:25:38.872609Z [error    ] plan_nonzero_exit              [my-terraform-agent.importer.terraform_client] returncode=1 tf_address=google_compute_disk.poc_vm
-2026-04-28T09:25:38.874164Z [info     ] plan_verify_start              [my-terraform-agent.importer.terraform_client] tf_address=google_pubsub_topic.poc_topic workdir=C:\Users\41708\my-terraform-agent\imported\dev-proj-470211
-2026-04-28T09:25:41.571048Z [error    ] plan_nonzero_exit              [my-terraform-agent.importer.terraform_client] returncode=1 tf_address=google_pubsub_topic.poc_topic
-2026-04-28T09:25:41.572725Z [info     ] plan_verify_start              [my-terraform-agent.importer.terraform_client] tf_address=google_pubsub_subscription.poc_subscription workdir=C:\Users\41708\my-terraform-agent\imported\dev-proj-470211
-2026-04-28T09:25:44.136101Z [error    ] plan_nonzero_exit              [my-terraform-agent.importer.terraform_client] returncode=1 tf_address=google_pubsub_subscription.poc_subscription
-2026-04-28T09:25:44.137832Z [info     ] plan_verify_start              [my-terraform-agent.importer.terraform_client] tf_address=google_kms_crypto_key.poc_key workdir=C:\Users\41708\my-terraform-agent\imported\dev-proj-470211
-2026-04-28T09:25:46.955748Z [error    ] plan_nonzero_exit              [my-terraform-agent.importer.terraform_client] returncode=1 tf_address=google_kms_crypto_key.poc_key
-2026-04-28T09:25:46.957365Z [info     ] plan_verify_start              [my-terraform-agent.importer.terraform_client] tf_address=google_container_cluster.poc_cluster_std workdir=C:\Users\41708\my-terraform-agent\imported\dev-proj-470211
-2026-04-28T09:25:49.586818Z [error    ] plan_nonzero_exit              [my-terraform-agent.importer.terraform_client] returncode=1 tf_address=google_container_cluster.poc_cluster_std
-2026-04-28T09:25:49.588527Z [info     ] plan_verify_start              [my-terraform-agent.importer.terraform_client] tf_address=google_container_cluster.poc_cluster workdir=C:\Users\41708\my-terraform-agent\imported\dev-proj-470211
-2026-04-28T09:25:52.464111Z [error    ] plan_nonzero_exit              [my-terraform-agent.importer.terraform_client] returncode=1 tf_address=google_container_cluster.poc_cluster
-2026-04-28T09:25:52.466665Z [info     ] plan_verify_start              [my-terraform-agent.importer.terraform_client] tf_address=google_compute_instance.poc_vm workdir=C:\Users\41708\my-terraform-agent\imported\dev-proj-470211
-2026-04-28T09:25:55.477540Z [error    ] plan_nonzero_exit              [my-terraform-agent.importer.terraform_client] returncode=1 tf_address=google_compute_instance.poc_vm
-
-======================================================================
---- CG-7 Headless Quarantine (16 failed resources) ---
-    2 self-broken · 14 blocked by sibling files
-    Quarantining self-broken; survivors will re-verify automatically.
-======================================================================
-2026-04-28T09:25:55.506213Z [info     ] state_rm_start                 [my-terraform-agent.importer.terraform_client] tf_address=google_container_cluster.poc_cluster_std workdir=C:\Users\41708\my-terraform-agent\imported\dev-proj-470211
-2026-04-28T09:25:58.683414Z [info     ] state_rm_complete              [my-terraform-agent.importer.terraform_client] tf_address=google_container_cluster.poc_cluster_std
-2026-04-28T09:25:58.684190Z [info     ] quarantine_complete            [my-terraform-agent.importer.quarantine] hcl_filename=google_container_cluster_poc_cluster_std.tf quarantine_path=C:\Users\41708\my-terraform-agent\imported\dev-proj-470211\_quarantine\google_container_cluster_poc_cluster_std.tf reason='Auto-quarantined after import + plan verification failed.\n\nTerraform error (truncated):\n\nError: Unsupported block type\n\n  on google_container_cluster_poc_cluster.tf line 56, in resource "google_contai' tf_address=google_container_cluster.poc_cluster_std workdir=C:\Users\41708\my-terraform-agent\imported\dev-proj-470211
-   ⚠  Quarantined google_container_cluster.poc_cluster_std -> _quarantine/google_container_cluster_poc_cluster_std.tf
-2026-04-28T09:25:58.689813Z [info     ] state_rm_start                 [my-terraform-agent.importer.terraform_client] tf_address=google_container_cluster.poc_cluster workdir=C:\Users\41708\my-terraform-agent\imported\dev-proj-470211
-2026-04-28T09:26:01.582698Z [info     ] state_rm_complete              [my-terraform-agent.importer.terraform_client] tf_address=google_container_cluster.poc_cluster
-2026-04-28T09:26:01.583153Z [info     ] quarantine_complete            [my-terraform-agent.importer.quarantine] hcl_filename=google_container_cluster_poc_cluster.tf quarantine_path=C:\Users\41708\my-terraform-agent\imported\dev-proj-470211\_quarantine\google_container_cluster_poc_cluster.tf reason='Auto-quarantined after import + plan verification failed.\n\nTerraform error (truncated):\n\nError: Unsupported block type\n\n  on google_container_cluster_poc_cluster.tf line 56, in resource "google_contai' tf_address=google_container_cluster.poc_cluster workdir=C:\Users\41708\my-terraform-agent\imported\dev-proj-470211
-   ⚠  Quarantined google_container_cluster.poc_cluster -> _quarantine/google_container_cluster_poc_cluster.tf
-2026-04-28T09:26:01.583671Z [info     ] plan_verify_start              [my-terraform-agent.importer.terraform_client] tf_address=google_compute_disk.poc_disk workdir=C:\Users\41708\my-terraform-agent\imported\dev-proj-470211
-2026-04-28T09:26:07.470769Z [info     ] plan_pass                      [my-terraform-agent.importer.terraform_client] tf_address=google_compute_disk.poc_disk verdict=matches_cloud
-2026-04-28T09:26:07.474589Z [info     ] plan_verify_start              [my-terraform-agent.importer.terraform_client] tf_address=google_compute_firewall.default_allow_ssh workdir=C:\Users\41708\my-terraform-agent\imported\dev-proj-470211
-2026-04-28T09:26:12.526462Z [info     ] plan_pass                      [my-terraform-agent.importer.terraform_client] tf_address=google_compute_firewall.default_allow_ssh verdict=matches_cloud
-2026-04-28T09:26:12.529683Z [info     ] plan_verify_start              [my-terraform-agent.importer.terraform_client] tf_address=google_compute_firewall.poc_fw_allow_icmp workdir=C:\Users\41708\my-terraform-agent\imported\dev-proj-470211
-2026-04-28T09:26:17.380650Z [info     ] plan_pass                      [my-terraform-agent.importer.terraform_client] tf_address=google_compute_firewall.poc_fw_allow_icmp verdict=matches_cloud
-2026-04-28T09:26:17.384294Z [info     ] plan_verify_start              [my-terraform-agent.importer.terraform_client] tf_address=google_storage_bucket.poc_smoke_bucket_dev_proj_470211 workdir=C:\Users\41708\my-terraform-agent\imported\dev-proj-470211
-2026-04-28T09:26:22.007807Z [info     ] plan_pass                      [my-terraform-agent.importer.terraform_client] tf_address=google_storage_bucket.poc_smoke_bucket_dev_proj_470211 verdict=matches_cloud
-2026-04-28T09:26:22.011933Z [info     ] plan_verify_start              [my-terraform-agent.importer.terraform_client] tf_address=google_service_account.poc_sa workdir=C:\Users\41708\my-terraform-agent\imported\dev-proj-470211
-2026-04-28T09:26:28.022921Z [info     ] plan_pass                      [my-terraform-agent.importer.terraform_client] tf_address=google_service_account.poc_sa verdict=matches_cloud
-2026-04-28T09:26:28.027464Z [info     ] plan_verify_start              [my-terraform-agent.importer.terraform_client] tf_address=google_cloud_run_v2_service.poc_cloudrun workdir=C:\Users\41708\my-terraform-agent\imported\dev-proj-470211
-2026-04-28T09:26:36.299467Z [warning  ] plan_real_diff                 [my-terraform-agent.importer.terraform_client] reason='diff contains mutations or removals; needs review' tf_address=google_cloud_run_v2_service.poc_cloudrun
-2026-04-28T09:26:36.303519Z [info     ] plan_verify_start              [my-terraform-agent.importer.terraform_client] tf_address=google_kms_key_ring.poc_keyring workdir=C:\Users\41708\my-terraform-agent\imported\dev-proj-470211
-2026-04-28T09:26:42.120317Z [info     ] plan_pass                      [my-terraform-agent.importer.terraform_client] tf_address=google_kms_key_ring.poc_keyring verdict=matches_cloud
-2026-04-28T09:26:42.123425Z [info     ] plan_verify_start              [my-terraform-agent.importer.terraform_client] tf_address=google_compute_network.poc_vpc workdir=C:\Users\41708\my-terraform-agent\imported\dev-proj-470211
-2026-04-28T09:26:46.936001Z [info     ] plan_pass                      [my-terraform-agent.importer.terraform_client] tf_address=google_compute_network.poc_vpc verdict=matches_cloud
-2026-04-28T09:26:46.939475Z [info     ] plan_verify_start              [my-terraform-agent.importer.terraform_client] tf_address=google_compute_subnetwork.poc_subnet workdir=C:\Users\41708\my-terraform-agent\imported\dev-proj-470211
-2026-04-28T09:26:52.892721Z [info     ] plan_pass                      [my-terraform-agent.importer.terraform_client] tf_address=google_compute_subnetwork.poc_subnet verdict=matches_cloud
-2026-04-28T09:26:52.895694Z [info     ] plan_verify_start              [my-terraform-agent.importer.terraform_client] tf_address=google_compute_disk.poc_vm workdir=C:\Users\41708\my-terraform-agent\imported\dev-proj-470211
-2026-04-28T09:27:00.979710Z [warning  ] plan_real_diff                 [my-terraform-agent.importer.terraform_client] reason='diff contains mutations or removals; needs review' tf_address=google_compute_disk.poc_vm
-2026-04-28T09:27:00.982433Z [info     ] plan_verify_start              [my-terraform-agent.importer.terraform_client] tf_address=google_pubsub_topic.poc_topic workdir=C:\Users\41708\my-terraform-agent\imported\dev-proj-470211
-2026-04-28T09:27:06.216268Z [info     ] plan_pass                      [my-terraform-agent.importer.terraform_client] tf_address=google_pubsub_topic.poc_topic verdict=matches_cloud
-2026-04-28T09:27:06.220334Z [info     ] plan_verify_start              [my-terraform-agent.importer.terraform_client] tf_address=google_pubsub_subscription.poc_subscription workdir=C:\Users\41708\my-terraform-agent\imported\dev-proj-470211
-2026-04-28T09:27:12.060056Z [info     ] plan_pass                      [my-terraform-agent.importer.terraform_client] tf_address=google_pubsub_subscription.poc_subscription verdict=matches_cloud
-2026-04-28T09:27:12.062949Z [info     ] plan_verify_start              [my-terraform-agent.importer.terraform_client] tf_address=google_kms_crypto_key.poc_key workdir=C:\Users\41708\my-terraform-agent\imported\dev-proj-470211
-2026-04-28T09:27:17.830860Z [info     ] plan_pass                      [my-terraform-agent.importer.terraform_client] tf_address=google_kms_crypto_key.poc_key verdict=matches_cloud
-2026-04-28T09:27:17.834268Z [info     ] plan_verify_start              [my-terraform-agent.importer.terraform_client] tf_address=google_compute_instance.poc_vm workdir=C:\Users\41708\my-terraform-agent\imported\dev-proj-470211
-2026-04-28T09:27:27.473223Z [warning  ] plan_real_diff                 [my-terraform-agent.importer.terraform_client] reason='diff contains mutations or removals; needs review' tf_address=google_compute_instance.poc_vm
-
-   14 resource(s) still failing after quarantine of self-broken siblings:
-     • google_compute_disk.poc_disk
-     • google_compute_firewall.default_allow_ssh
-     • google_compute_firewall.poc_fw_allow_icmp
-     • google_storage_bucket.poc_smoke_bucket_dev_proj_470211
-     • google_service_account.poc_sa
-     • google_cloud_run_v2_service.poc_cloudrun
-     • google_kms_key_ring.poc_keyring
-     • google_compute_network.poc_vpc
-     • google_compute_subnetwork.poc_subnet
-     • google_compute_disk.poc_vm
-     • google_pubsub_topic.poc_topic
-     • google_pubsub_subscription.poc_subscription
-     • google_kms_crypto_key.poc_key
-     • google_compute_instance.poc_vm
-
-   CG-7 quarantine summary: 2 quarantined, 14 hard-failed
-======================================================================
-
-
-
---- Bulk Import Complete ---
-
-Summary: 0 / 16 resources imported successfully.
-Workflow finished.
-2026-04-28T09:27:27.482879Z [info     ] workflow_complete              [__main__] duration_s=617.66 failed=0 imported=0 needs_attention=2 project_id=dev-proj-470211 selected=16 skipped=14
+--- Stage 2: Select Resources to Import ---
