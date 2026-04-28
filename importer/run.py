@@ -9,6 +9,7 @@ import concurrent.futures
 import threading
 import time
 import re
+from typing import List, Optional, Union
 from . import (
     config, gcp_client, terraform_client, hcl_generator, knowledge_base,
     snapshot_scrubber, lifecycle_planner, resource_mode,
@@ -393,22 +394,16 @@ def get_multiline_input():
     lines = sys.stdin.readlines()
     return "".join(lines) if lines else ""
 
-def _present_selection_menu(resources):
-    print("\n--- Stage 2: Select Resources to Import ---")
-    for i, resource in enumerate(resources):
-        display_name = resource.get('displayName', resource.get('name'))
-        asset_type_short = resource.get('assetType').split('/')[-1]
-        print(f"  [{i + 1}] {display_name:<40} (Type: {asset_type_short:<10})")
-    
-    while True:
-        try:
-            raw_input = input("\nEnter resource numbers separated by commas (e.g., 1, 5), or 0 to cancel: ")
-            if raw_input.strip() == '0': return []
-            choices = [int(i.strip()) for i in raw_input.split(',')]
-            selected_assets = [resources[c - 1] for c in choices if 1 <= c <= len(resources)]
-            if selected_assets: return selected_assets
-            else: print("❌ No valid selections made.")
-        except ValueError: print("❌ Invalid input.")
+# PUI-1: programmatic-input helpers live in importer/_input.py so they
+# can be unit-tested without dragging in run.py's full import chain
+# (hcl_generator -> llm_provider, which fails under pytest's flat
+# package layout). Re-imported here so call sites in this file don't
+# change shape.
+from ._input import (
+    _present_selection_menu,
+    _resolve_project_id_input,
+    _resolve_selection_input,
+)
 
 def _map_asset_to_terraform(selected_asset, project_id, workdir):
     """Build the per-resource mapping dict consumed by the rest of the importer.
@@ -818,7 +813,11 @@ def _attempt_correction(mapping, resource_json, previous_error, attempt_num, sch
 
     return (mapping, plan_output, is_success)
 
-def run_workflow() -> WorkflowResult:
+def run_workflow(
+    project_id: Optional[str] = None,
+    *,
+    selected_indices: Optional[Union[List[int], str]] = None,
+) -> WorkflowResult:
     """Main function with RAG-powered, parallel bulk import and self-correction.
 
     A+D return contract (CC-4):
@@ -836,6 +835,31 @@ def run_workflow() -> WorkflowResult:
     cancelled the selection menu) is NOT an error -- it returns a
     zeroed result with ``exit_code == 0``. Orchestrators that alert
     on non-zero exits therefore won't fire for empty projects.
+
+    PUI-1 (Phase 6) programmatic-input contract:
+
+        Both kwargs default to None, preserving the historical CLI
+        behaviour byte-for-byte (interactive prompts via stdin). The
+        Streamlit UI in Phase 6 passes both explicitly so the workflow
+        runs without a terminal.
+
+        Args:
+            project_id: GCP project ID. None (default) prompts via
+                stdin (CLI). Non-None skips the prompt and validates
+                the supplied value via ``app_config.resolve_target_project_id``.
+            selected_indices: One of:
+                * ``None`` -- CLI: interactive selection menu (default).
+                * ``"all"`` -- UI: import every discovered resource
+                    (PUI-1 v1 contract; PUI-6 polish can wire a per-
+                    resource picker later).
+                * ``list[int]`` -- 1-indexed positions matching the
+                    CLI menu numbering. Out-of-range silently dropped.
+                * ``[]`` -- explicit cancellation (zero-result, exit 0).
+
+        See ``_resolve_project_id_input`` and ``_resolve_selection_input``
+        for the input-source decision logic; both are unit-tested in
+        isolation so the programmatic path doesn't require mocking the
+        full terraform/gcloud/LLM stack.
     """
     started = time.monotonic()
     print("🚀 Starting Google Cloud to Terraform Import Workflow...")
@@ -858,11 +882,18 @@ def run_workflow() -> WorkflowResult:
     # DEMO_PROJECT_ID safety lock fires on a fat-finger scan, and so empty
     # input falls back to the TARGET_PROJECT_ID env var (the eventual UI
     # path will pre-fill from env without re-prompting).
+    #
+    # PUI-1: source of project_id is now decided by the helper -- CLI
+    # callers see the original input() prompt; UI callers pass the value
+    # through the function signature and skip the prompt entirely.
+    # default_hint is computed here (rather than in the helper) so the
+    # _input module stays free of the importer's parent-package imports
+    # -- keeps it cheap to unit-test.
     default_hint = (
         f" [{app_config.config.TARGET_PROJECT_ID}]"
         if app_config.config.TARGET_PROJECT_ID else ""
     )
-    raw = input(f"Enter your Google Cloud Project ID{default_hint}: ")
+    raw = _resolve_project_id_input(project_id, default_hint=default_hint)
     try:
         project_id = app_config.resolve_target_project_id(raw)
     except ValueError as e:
@@ -960,10 +991,17 @@ def run_workflow() -> WorkflowResult:
     # operator's muscle memory still works.
     all_discovered_resources.sort(key=lambda r: r.get('displayName', r.get('name')))
 
-    selected_assets = _present_selection_menu(all_discovered_resources)
+    # PUI-1: selection source is now decided by the helper -- CLI callers
+    # see the original interactive menu; UI callers pass "all" (PUI-1 v1
+    # default) or an explicit index list and skip the menu entirely.
+    selected_assets = _resolve_selection_input(
+        selected_indices, all_discovered_resources,
+    )
     if not selected_assets:
-        # Operator cancelled the selection menu -- workflow completed,
-        # nothing imported. Zeroed result, exit 0.
+        # Operator cancelled the selection menu (CLI), passed an empty
+        # indices list (UI), or all provided indices were out-of-range.
+        # All three are "workflow completed, nothing imported"; return
+        # a zeroed result so orchestrators don't alert.
         return _build_empty_result(
             project_id=project_id, selected=0, started=started,
         )
