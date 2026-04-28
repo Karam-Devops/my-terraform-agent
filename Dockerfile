@@ -97,7 +97,14 @@ ENV PORT=8080 \
     MAX_TRANSLATION_WORKERS=4 \
     MTAGENT_LOG_FORMAT=json \
     MTAGENT_LOG_LEVEL=INFO \
-    PYTHONUNBUFFERED=1
+    PYTHONUNBUFFERED=1 \
+    PYTHONPATH=/app
+# PYTHONPATH=/app: when streamlit runs `app/main.py`, only the script's
+# dir (`/app/app/`) lands on sys.path, NOT the WORKDIR. Without
+# PYTHONPATH=/app, top-level package imports like `from app.ui.sidebar`,
+# `from common.storage`, `from importer.run` all fail with
+# ModuleNotFoundError. PUI-1 surfaced this; PSA-2's placeholder didn't
+# import any of those packages so the gap was hidden until now.
 
 # Per-request workdir base (writable tmpfs on Cloud Run)
 RUN mkdir -p /tmp/imported
