@@ -216,6 +216,43 @@ def main() -> int:
               f"or an unusually large project -- please review.")
 
     high_count = _print_report(per_resource)
+
+    # PSA-9: persist snapshot for Dashboard. Best-effort -- a snapshot
+    # write failure (network, perms, env-gate off) MUST NOT take down
+    # the engine. Policy has no Result class, so we build the dict
+    # inline from the same primitives _print_report iterates over.
+    try:
+        from common.snapshots import write_snapshot
+        severity_totals: Dict[str, int] = defaultdict(int)
+        for vs in per_resource.values():
+            for v in vs:
+                severity_totals[v.severity] += 1
+        n_resources = len(per_resource)
+        compliant_resources = sum(
+            1 for vs in per_resource.values() if not vs
+        )
+        result_dict = {
+            "project_id": project_id,
+            "n_resources": n_resources,
+            "compliant_resources": compliant_resources,
+            "violating_resources": n_resources - compliant_resources,
+            "high_count": high_count,
+            "med_count": severity_totals.get("MED", 0),
+            "low_count": severity_totals.get("LOW", 0),
+            "total_violations": sum(severity_totals.values()),
+            "cap_hit": cap_hit,
+        }
+        write_snapshot("policy", result_dict, project_id)
+    except Exception as snap_err:
+        # Stderr (not stdout) so the CI exit-code contract isn't
+        # disturbed by a snapshot warning showing up in policy output.
+        print(
+            f"[WARN] snapshot_write_skipped engine=policy "
+            f"error={snap_err} (snapshot persistence failed; "
+            f"engine result unaffected)",
+            file=sys.stderr,
+        )
+
     return 1 if high_count > 0 else 0
 
 

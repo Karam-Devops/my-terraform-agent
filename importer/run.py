@@ -1418,6 +1418,23 @@ def _build_result(*, project_id: str, selected: int, imported: int,
         needs_attention=needs_attention,
     )
     _log.info("workflow_complete", **result.as_fields())
+
+    # PSA-9: persist the result to GCS for Dashboard / UI consumption.
+    # Gated by MTAGENT_PERSIST_SNAPSHOTS env var (set by Cloud Run via
+    # cloudbuild.yaml; unset locally so dev runs don't try to write to
+    # GCS). Wrapped in try/except: a snapshot write failure must NOT
+    # affect the engine's actual result -- customer's import succeeded
+    # whether or not the Dashboard data refreshed.
+    try:
+        from common.snapshots import write_snapshot
+        write_snapshot("importer", result.as_fields(), project_id)
+    except Exception as snap_err:
+        _log.warning(
+            "snapshot_write_skipped",
+            engine="importer",
+            error=str(snap_err),
+            reason="snapshot persistence failed; engine result unaffected",
+        )
     return result
 
 

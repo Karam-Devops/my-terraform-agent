@@ -193,4 +193,19 @@ def rescan(project_id: str, *, project_root: str) -> DriftReport:
         duration_s=round(elapsed, 2),
     )
     log.info("rescan_complete", **report.as_fields())
+
+    # PSA-9: persist snapshot for Dashboard. Best-effort -- a snapshot
+    # write failure (network, perms, env-gate off) MUST NOT take down
+    # the engine. The detector already logged its result above; the
+    # GCS snapshot is purely for the Dashboard's cached read path.
+    try:
+        from common.snapshots import write_snapshot
+        write_snapshot("detector", report.as_fields(), project_id)
+    except Exception as snap_err:
+        log.warning(
+            "snapshot_write_skipped", engine="detector",
+            error=str(snap_err),
+            reason="snapshot persistence failed; engine result unaffected",
+        )
+
     return report
