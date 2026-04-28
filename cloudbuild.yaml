@@ -1,0 +1,115 @@
+# cloudbuild.yaml
+#
+# Cloud Build config for the mtagent Cloud Run deployment.
+# Three stages: build → push → deploy. All parameterized via $PROJECT_ID
+# and $SHORT_SHA so the same yaml works for any host project (Stage-1
+# internal-dev, Stage-2 company-prod) without edits.
+#
+# Pre-requisites (run scripts/bootstrap_host_project.sh first):
+#   - Project + billing linked
+#   - APIs enabled (cloudbuild, run, artifactregistry, iam, etc.)
+#   - GCS state bucket created with versioning ON
+#   - Artifact Registry repo `mtagent` created in us-central1
+#   - Runtime SA `mtagent-runtime@<project>.iam.gserviceaccount.com`
+#     created with the runtime roles bound (Vertex AI user, GCS
+#     state-bucket admin)
+#
+# Trigger:
+#   gcloud builds submit --config=cloudbuild.yaml --project=mtagent-internal-dev
+#
+# OR (preferred, for traceability) via a GitHub trigger:
+#   - Cloud Build → Triggers → "Connect repo"
+#   - Set triggering branch to main (Stage 1) / streamlit-UI (during dev)
+#   - This config file path
+
+steps:
+  # ----- Step 1: Build the Docker image (tagged with both SHA + latest)
+  - id: build
+    name: gcr.io/cloud-builders/docker
+    args:
+      - build
+      - --tag=us-central1-docker.pkg.dev/$PROJECT_ID/mtagent/mtagent-app:$SHORT_SHA
+      - --tag=us-central1-docker.pkg.dev/$PROJECT_ID/mtagent/mtagent-app:latest
+      - .
+
+  # ----- Step 2: Push both tags to Artifact Registry
+  - id: push-sha
+    name: gcr.io/cloud-builders/docker
+    args:
+      - push
+      - us-central1-docker.pkg.dev/$PROJECT_ID/mtagent/mtagent-app:$SHORT_SHA
+    waitFor: [build]
+
+  - id: push-latest
+    name: gcr.io/cloud-builders/docker
+    args:
+      - push
+      - us-central1-docker.pkg.dev/$PROJECT_ID/mtagent/mtagent-app:latest
+    waitFor: [build]
+
+  # ----- Step 3: Deploy to Cloud Run
+  # Service config matches CG-8H spec:
+  #   - 8Gi memory + 4 CPU for parallel translator (4 workers × heavy LLM)
+  #   - max-instances=3 (Round-1 ceiling; raise after Vertex AI quota
+  #     bump in Stage 2 / PSA-8)
+  #   - timeout=3600s (1hr; supports long imports of large projects)
+  #   - --no-allow-unauthenticated: IAM-gated; Stage-1 binds invoker
+  #     role only to operator email (PSA-7)
+  #   - Region us-central1: co-located with Vertex AI default region
+  - id: deploy
+    name: gcr.io/google.com/cloudsdktool/cloud-sdk
+    entrypoint: gcloud
+    args:
+      - run
+      - deploy
+      - mtagent-app
+      - --image=us-central1-docker.pkg.dev/$PROJECT_ID/mtagent/mtagent-app:$SHORT_SHA
+      - --region=us-central1
+      - --service-account=mtagent-runtime@$PROJECT_ID.iam.gserviceaccount.com
+      - --memory=8Gi
+      - --cpu=4
+      - --max-instances=3
+      - --min-instances=0
+      - --timeout=3600
+      - --port=8080
+      - --no-allow-unauthenticated
+      - --concurrency=10
+      # Runtime env vars. ALL hardcoded values here are sensible
+      # Stage-1 defaults; Stage-2 swap is just changing PROJECT_ID at
+      # the top of this command (the rest auto-derive from $PROJECT_ID
+      # and the deploy-time GCS bucket convention).
+      - --set-env-vars=HOST_PROJECT_ID=$PROJECT_ID
+      - --set-env-vars=GCP_LOCATION=us-central1
+      - --set-env-vars=GCP_PROJECT_ID=$PROJECT_ID
+      - --set-env-vars=MTAGENT_STATE_BUCKET=mtagent-state-dev
+      - --set-env-vars=MTAGENT_IMPORT_BASE=/tmp/imported
+      - --set-env-vars=MTAGENT_PERSIST_BLUEPRINTS=0
+      - --set-env-vars=IMPORTER_AUTO_QUARANTINE=1
+      - --set-env-vars=TRANSLATOR_TARGETS_ALLOWED=aws
+      - --set-env-vars=MAX_TRANSLATION_WORKERS=4
+      - --set-env-vars=MTAGENT_LOG_FORMAT=json
+      - --set-env-vars=MTAGENT_LOG_LEVEL=INFO
+      - --set-env-vars=PYTHONUNBUFFERED=1
+    waitFor: [push-sha]
+
+# ---- Images Cloud Build records as outputs (for Artifact Registry
+# tracking + the Cloud Build UI's "Artifacts" section) ----
+images:
+  - us-central1-docker.pkg.dev/$PROJECT_ID/mtagent/mtagent-app:$SHORT_SHA
+  - us-central1-docker.pkg.dev/$PROJECT_ID/mtagent/mtagent-app:latest
+
+# ---- Build options ----
+options:
+  # Required for builds that don't use the legacy stackdriver logging.
+  # Future-proofs against Cloud Build's deprecation of stdout-only logs.
+  logging: CLOUD_LOGGING_ONLY
+  # Bigger machine = faster build (Docker COPY of ~500MB context can be
+  # slow on the default e2-medium). E2_HIGHCPU_8 cuts build time roughly
+  # in half (~3min → ~90s) at +$0.04 per build.
+  machineType: E2_HIGHCPU_8
+
+# ---- Timeout: max wall-clock for the whole pipeline ----
+# 20 minutes covers a cold build (full Docker layer rebuild ~5min) +
+# slow push (1-2min for 500MB) + deploy (~30s) with comfortable
+# headroom for retries.
+timeout: 1200s

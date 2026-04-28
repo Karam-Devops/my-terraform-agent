@@ -99,7 +99,7 @@ log "Step 3/4: Enabling ${#APIS[@]} APIs (idempotent; already-enabled APIs are n
 gcloud services enable "${APIS[@]}" --project="${PROJECT_ID}"
 
 # --- Step 4: GCS state bucket ---
-log "Step 4/4: GCS state bucket gs://${STATE_BUCKET}"
+log "Step 4/6: GCS state bucket gs://${STATE_BUCKET}"
 if gcloud storage buckets describe "gs://${STATE_BUCKET}" --format="value(name)" 2>/dev/null | grep -q "${STATE_BUCKET}"; then
   warn "Bucket gs://${STATE_BUCKET} already exists -- skipping create (will still ensure versioning)"
 else
@@ -122,16 +122,95 @@ if [[ "${_versioning}" != "True" ]]; then
   exit 1
 fi
 
+# --- Step 5: Artifact Registry repo (for Cloud Build → Cloud Run image push) ---
+ARTIFACT_REPO="${ARTIFACT_REPO:-mtagent}"
+log "Step 5/6: Artifact Registry repo '${ARTIFACT_REPO}' in ${REGION}"
+if gcloud artifacts repositories describe "${ARTIFACT_REPO}" \
+        --location="${REGION}" --project="${PROJECT_ID}" \
+        --format="value(name)" 2>/dev/null | grep -q "${ARTIFACT_REPO}"; then
+  warn "Artifact Registry repo '${ARTIFACT_REPO}' already exists -- skipping create"
+else
+  gcloud artifacts repositories create "${ARTIFACT_REPO}" \
+    --repository-format=docker \
+    --location="${REGION}" \
+    --project="${PROJECT_ID}" \
+    --description="mtagent container images (Cloud Run)"
+fi
+
+# --- Step 6: Runtime service account (Cloud Run identity) ---
+# This is the SA that the Cloud Run service runs as. It needs:
+#   - aiplatform.user: call Vertex AI Gemini
+#   - storage.objectAdmin (scoped to MTAGENT_STATE_BUCKET): r/w state
+#   - iam.serviceAccountTokenCreator on ITSELF: cross-project SA
+#     impersonation (the mechanism for scanning customer projects)
+#   - logging.logWriter + monitoring.metricWriter: observability
+#
+# We do NOT bind cloudasset.viewer / compute.viewer / etc. on the
+# HOSTING project here -- those live on the CUSTOMER project (granted
+# by the customer per docs/customer_onboarding.md), and our runtime
+# SA reaches them via cross-project impersonation.
+
+RUNTIME_SA_NAME="mtagent-runtime"
+RUNTIME_SA_EMAIL="${RUNTIME_SA_NAME}@${PROJECT_ID}.iam.gserviceaccount.com"
+log "Step 6/6: Runtime service account ${RUNTIME_SA_EMAIL}"
+if gcloud iam service-accounts describe "${RUNTIME_SA_EMAIL}" \
+        --project="${PROJECT_ID}" \
+        --format="value(email)" 2>/dev/null | grep -q "${RUNTIME_SA_EMAIL}"; then
+  warn "Runtime SA ${RUNTIME_SA_EMAIL} already exists -- skipping create"
+else
+  gcloud iam service-accounts create "${RUNTIME_SA_NAME}" \
+    --display-name="mtagent Cloud Run runtime" \
+    --description="Identity for the mtagent Cloud Run service. Needs Vertex AI + GCS state-bucket + cross-project impersonation." \
+    --project="${PROJECT_ID}"
+fi
+
+log "  Granting hosting-project roles to ${RUNTIME_SA_EMAIL}"
+for role in \
+    roles/aiplatform.user \
+    roles/logging.logWriter \
+    roles/monitoring.metricWriter \
+    roles/iam.serviceAccountTokenCreator; do
+  gcloud projects add-iam-policy-binding "${PROJECT_ID}" \
+    --member="serviceAccount:${RUNTIME_SA_EMAIL}" \
+    --role="${role}" \
+    --condition=None \
+    --quiet >/dev/null
+done
+
+# Bucket-scoped role (more precise than project-wide storage.admin)
+log "  Granting bucket-scoped storage.objectAdmin on gs://${STATE_BUCKET}"
+gcloud storage buckets add-iam-policy-binding "gs://${STATE_BUCKET}" \
+  --member="serviceAccount:${RUNTIME_SA_EMAIL}" \
+  --role=roles/storage.objectAdmin >/dev/null
+
+# Self-impersonation (allow our SA to mint tokens for itself; this is
+# what enables the cross-project SA impersonation pattern downstream)
+log "  Granting self-impersonation (serviceAccountTokenCreator on self)"
+gcloud iam service-accounts add-iam-policy-binding "${RUNTIME_SA_EMAIL}" \
+  --member="serviceAccount:${RUNTIME_SA_EMAIL}" \
+  --role=roles/iam.serviceAccountTokenCreator \
+  --project="${PROJECT_ID}" >/dev/null
+
 # --- Done ---
 echo
 log "Bootstrap complete."
 echo
 log "Summary:"
-log "  Project:       ${PROJECT_ID}"
-log "  Region:        ${REGION}"
-log "  State bucket:  gs://${STATE_BUCKET} (versioning: ON)"
-log "  APIs enabled:  ${#APIS[@]}"
+log "  Project:           ${PROJECT_ID}"
+log "  Region:            ${REGION}"
+log "  State bucket:      gs://${STATE_BUCKET} (versioning: ON)"
+log "  APIs enabled:      ${#APIS[@]}"
+log "  Artifact registry: ${REGION}-docker.pkg.dev/${PROJECT_ID}/${ARTIFACT_REPO}"
+log "  Runtime SA:        ${RUNTIME_SA_EMAIL}"
 echo
 log "Next step (Phase 5A PSA-2):"
 log "  Build + deploy the mtagent image:"
 log "    gcloud builds submit --config=cloudbuild.yaml --project=${PROJECT_ID}"
+echo
+log "After deploy, the Cloud Run URL is invoker-restricted (PSA-7);"
+log "grant your operator email run.invoker:"
+log "    gcloud run services add-iam-policy-binding mtagent-app \\"
+log "      --member='user:YOUR_EMAIL@example.com' \\"
+log "      --role=roles/run.invoker \\"
+log "      --region=${REGION} \\"
+log "      --project=${PROJECT_ID}"
