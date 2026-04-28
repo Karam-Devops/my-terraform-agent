@@ -183,6 +183,76 @@ class GetResourceStateTests(unittest.TestCase):
         self.assertIsNone(result)
 
 
+class AssetToLegacyDictTests(unittest.TestCase):
+    """Pin _asset_to_legacy_dict's per-type identity resolution.
+
+    PUI-1 SMOKE 2026-04-28 surfaced a regression where SAs got their
+    URN tail (numeric uniqueId) used as displayName, leading to
+    invalid HCL like `resource "google_service_account" "10354785..."`.
+    These tests pin the resolved displayName + additionalAttributes
+    shapes per asset_type so the regression can't recur silently.
+    """
+
+    def test_sa_uses_email_as_display_name(self):
+        """For SAs, displayName must come from data.email -- NOT from
+        the URN tail (which is the numeric uniqueId, not HCL-safe)."""
+        asset = _make_asset(
+            "//iam.googleapis.com/projects/p/serviceAccounts/103547855339875394846",
+            "iam.googleapis.com/ServiceAccount",
+            data={
+                "email": "poc-sa@dev-proj-470211.iam.gserviceaccount.com",
+                "name": "projects/p/serviceAccounts/103547855339875394846",
+                "uniqueId": "103547855339875394846",
+            },
+        )
+        result = _asset_client._asset_to_legacy_dict(asset)
+        self.assertEqual(
+            result["displayName"],
+            "poc-sa@dev-proj-470211.iam.gserviceaccount.com",
+            "SA displayName must be the email, not the URN tail",
+        )
+
+    def test_sa_populates_additional_attributes_email(self):
+        """importer/run.py:_map_asset_to_terraform reads
+        selected_asset['additionalAttributes']['email'] for SAs.
+        Without this shim the SA gets the URN tail (numeric uniqueId)
+        as its HCL block label -- which fails terraform validation
+        (HCL identifiers must start with a letter)."""
+        asset = _make_asset(
+            "//iam.googleapis.com/projects/p/serviceAccounts/12345",
+            "iam.googleapis.com/ServiceAccount",
+            data={"email": "poc-sa@dev-proj-470211.iam.gserviceaccount.com"},
+        )
+        result = _asset_client._asset_to_legacy_dict(asset)
+        self.assertIn("additionalAttributes", result)
+        self.assertEqual(
+            result["additionalAttributes"]["email"],
+            "poc-sa@dev-proj-470211.iam.gserviceaccount.com",
+        )
+
+    def test_non_sa_does_not_get_additional_attributes(self):
+        """Only SAs need the additionalAttributes shim today; other
+        types should not get an empty {} cluttering their dict."""
+        asset = _make_asset(
+            "//compute.googleapis.com/projects/p/zones/z/instances/vm-a",
+            "compute.googleapis.com/Instance",
+            data={"name": "projects/p/zones/z/instances/vm-a"},
+        )
+        result = _asset_client._asset_to_legacy_dict(asset)
+        self.assertNotIn("additionalAttributes", result)
+
+    def test_compute_uses_name_segment_as_display_name(self):
+        """Standard compute resource: displayName from data.name's
+        trailing segment."""
+        asset = _make_asset(
+            "//compute.googleapis.com/projects/p/zones/z/instances/vm-a",
+            "compute.googleapis.com/Instance",
+            data={"name": "projects/p/zones/z/instances/vm-a"},
+        )
+        result = _asset_client._asset_to_legacy_dict(asset)
+        self.assertEqual(result["displayName"], "vm-a")
+
+
 class GetResourceStateAsJsonTests(unittest.TestCase):
     """Pin the JSON-serialised wrapper that gcp_client uses."""
 

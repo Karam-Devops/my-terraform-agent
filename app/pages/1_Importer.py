@@ -1,36 +1,35 @@
 # app/pages/1_Importer.py
-"""Importer page (PUI-1).
+"""Importer page (PUI-1 + PUI-1B per-resource picker).
 
-UX:
-  1. Sidebar shows the global project picker (rendered by render_sidebar).
-  2. Body shows a "Run import" button + an explainer of what will happen.
-  3. Click -> spinner with elapsed time -> result card.
-  4. Errors render via ``app.ui.error_surface.render_error`` so
-     PreflightError's user_hint shows prominently and other exceptions
-     get a collapsible traceback.
+Two-stage workflow matching the CLI's behaviour:
 
-Backend wiring:
+  Stage A — DISCOVER:
+    Operator clicks "Discover resources". The page calls
+    inventory.inventory(project_id) which fires the Cloud Asset
+    Inventory SDK (PERF-T0). Cheap (~3-8s, no LLM cost). Result list
+    is stored in st.session_state and rendered as a checkbox grid.
 
-  * ``workdir_context(project_id)`` from ``app.middleware`` (PSA-4)
-    hydrates the per-project workdir from GCS on entry, persists on
-    successful exit, and skips persist on exception (preserves
-    previous-good state per PSA-3 / PSA-4 contract).
-  * ``importer.run.run_workflow(project_id, selected_indices="all")``
-    (the PUI-1-prep refactor) bypasses the CLI's stdin prompts.
-  * Snapshot persistence (PSA-9) fires automatically inside
-    run_workflow's existing try/except block; UI doesn't need to
-    explicitly call it.
-  * On success the result card renders the WorkflowResult.as_fields()
-    counts. The structured details (per-resource outcomes) are
-    available in Cloud Logging for now -- a richer viewer is PUI-6
-    polish.
+  Stage B — SELECT + IMPORT:
+    Operator picks a subset via checkboxes (defaults: NONE selected,
+    so a fat-finger Run import never fires the LLM cost). Click
+    "Run import (N selected)". The page calls run_workflow with
+    selected_indices=[1, 5, 12, ...] -- the same 1-indexed shape the
+    CLI's Stage-2 numbered menu uses. Each selected resource gets
+    described + LLM-generated HCL + terraform import.
 
-Why selected_indices="all" for v1:
+Why two stages: each LLM call costs ~$0.10-0.50 and takes 10-30s.
+With 80 discovered resources, all-import = $8-40 + 10-25 min per
+click. PUI-1B v1 makes that cost-controlled by default.
 
-  * The Streamlit checkbox-grid for per-resource selection is PUI-6
-    polish work; PUI-1's contract is "operator picks a project, app
-    imports everything supported in that project". Maps to the most
-    common use case (initial onboarding) and keeps PUI-1 small.
+Backend wiring (unchanged from PUI-1):
+  * workdir_context (PSA-4) hydrates from GCS on entry, persists on
+    successful exit.
+  * run_workflow(project_id, selected_indices=[...]) uses the
+    PUI-1-prep programmatic-input contract.
+  * Snapshot persistence (PSA-9) fires inside run_workflow.
+
+Tier-A run lock + render_error scaffolding from PUI-1 stays intact;
+Stage B inherits both.
 """
 
 import time
@@ -48,19 +47,15 @@ st.set_page_config(
     layout="wide",
 )
 
-# Always render the sidebar first; it owns the project_id.
 project_id = render_sidebar()
 
 st.title("📥 Importer")
 st.caption(
-    "Discover supported GCP resources and generate Terraform "
-    "configuration + state for each one."
+    "Discover supported GCP resources, then pick which ones to "
+    "codify as Terraform."
 )
 
-# Guard: no project picked -> render guidance and stop. The empty
-# project_id case is most common on first page load before the
-# operator has chosen anything (or when gcloud listing failed and
-# they haven't typed a value yet).
+# Guard: no project picked
 if not project_id:
     st.warning(
         "Pick a project in the sidebar to get started.",
@@ -68,189 +63,270 @@ if not project_id:
     )
     st.stop()
 
-# Show what will happen + the current selection.
 st.markdown(f"**Project:** `{project_id}`")
 
-st.markdown(
-    "Click **Run import** below. The workflow will:\n"
-    "1. Discover supported GCP resources in the project (parallel scan).\n"
-    "2. For each, generate the matching Terraform `.tf` file.\n"
-    "3. Run `terraform import` to populate state.\n"
-    "4. Validate; quarantine anything that won't import cleanly "
-    "(no interactive prompts in this UI -- per-resource debugging "
-    "lives in Cloud Logging for v1)."
-)
-st.caption(
-    "Selection scope: imports **every** supported resource discovered "
-    "in this project. A per-resource picker is planned for PUI-6."
-)
+# Session-state keys we own (scope all under one prefix to avoid collisions)
+_SS_DISCOVERED = f"_importer_discovered_{project_id}"
+_SS_RUN_LOCK = "_importer_run_lock"
+_SS_LAST_RESULT = f"_importer_last_result_{project_id}"
 
-# --- PUI-1 Tier-A run lock (prevents same-session double-runs) -----------
-#
-# Streamlit's blocking model already prevents same-tab double-clicks
-# (the page can't process a click while a script rerun is mid-execution).
-# What it DOESN'T prevent: a browser refresh during the run, which
-# interrupts the workflow and -- without a lock -- would happily start a
-# fresh run on the next click.
-#
-# Tier A: session_state-scoped run lock with a stale-detection timeout.
-#
-#   * On click: store {start_ts, project_id} in session_state.
-#   * On every subsequent rerun in the SAME session: if the lock is
-#     present and fresher than RUN_TIMEOUT_S, render a disabled button +
-#     "in progress" banner and stop. Otherwise, lock is stale (refresh
-#     killed the previous run) -- clear it.
-#   * On clean run completion (success OR caught exception): clear the
-#     lock in `finally`.
-#
-# What this PROTECTS: same-session refresh-during-run.
-# What this does NOT protect: multi-tab (different sessions), multi-user
-# on the same project. Those need a server-side lock (Tier B, GCS-backed)
-# -- queued in the polish backlog (PUI-6).
-#
-# Why a button placeholder pattern: in Streamlit, you can't "update" a
-# rendered button in-place. Wrapping it in st.empty() lets us swap the
-# primary "Run import" for a disabled "Running..." once the click fires,
-# without restructuring the page flow.
-
-import time as _time  # local alias; the module-level `import time`
-                       # above is used by the duration measurement below
-
-# 10 min: longer than any realistic single-project import. Stale-clears
-# the lock if a previous run was interrupted (browser refresh, container
-# restart) so the operator isn't permanently blocked.
+# --- Tier-A run lock -----------------------------------------------------
+# Same shape as PUI-1 (commit ea32ba2). Carries through to the new 2-stage
+# flow; the lock guards the IMPORT click (Stage B), not the cheap
+# Discover click.
+import time as _time
 _RUN_TIMEOUT_S = 600
-
-# Stale-clear before rendering: handles the "previous run was interrupted"
-# case so a refresh doesn't leave the page stuck claiming "in progress".
-_lock = st.session_state.get("_importer_run_lock")
+_lock = st.session_state.get(_SS_RUN_LOCK)
 if _lock is not None:
     _elapsed = _time.time() - _lock.get("start_ts", 0)
     if _elapsed > _RUN_TIMEOUT_S:
-        # Stale -- previous run was almost certainly interrupted before
-        # `finally` could clear the lock. Reset and proceed normally.
-        st.session_state.pop("_importer_run_lock", None)
+        st.session_state.pop(_SS_RUN_LOCK, None)
         _lock = None
 
-# Render the button slot. We use st.empty() so we can swap its content
-# without re-rendering the whole page.
-button_slot = st.empty()
+
+# --- Stage A: Discover ---------------------------------------------------
+
+st.markdown("---")
+st.markdown("### Step 1 — Discover")
+
+discovered = st.session_state.get(_SS_DISCOVERED)
+
+discover_col, refresh_col = st.columns([1, 1])
+with discover_col:
+    discover_clicked = st.button(
+        "🔍 Discover resources" if not discovered else "Re-discover",
+        type="primary" if not discovered else "secondary",
+        disabled=(_lock is not None),
+        key="discover_btn",
+        help=(
+            "Lists all importer-supported resources in the project via "
+            "Cloud Asset Inventory. Cheap (~3-8s); no LLM cost."
+        ),
+    )
+with refresh_col:
+    if discovered:
+        if st.button("🗑️ Clear discovery", key="clear_discovery_btn"):
+            st.session_state.pop(_SS_DISCOVERED, None)
+            st.rerun()
+
+if discover_clicked:
+    if _lock is not None:
+        st.warning("Import in progress; wait for it to complete.", icon="⏳")
+        st.stop()
+    # Lazy imports for heavy modules (only load when button actually clicked)
+    from importer.inventory import inventory as _do_inventory  # noqa: E402
+
+    started = _time.time()
+    try:
+        with st.spinner(f"Discovering resources in '{project_id}' …"):
+            # raise_on_error=False: per-asset-type failures land as
+            # warnings (logged) but the discover continues. Operator
+            # sees the partial list; missing types are visible in
+            # Cloud Logging.
+            resources = _do_inventory(project_id, raise_on_error=False)
+        # Cache the raw_asset dicts in session_state. We store dicts
+        # (not CloudResource dataclasses) because session_state survives
+        # reruns more cleanly with plain dicts and we need the dict
+        # shape to feed into run_workflow's selected_indices flow anyway.
+        st.session_state[_SS_DISCOVERED] = [
+            {
+                "name": r.raw_asset.get("name", ""),
+                "displayName": r.raw_asset.get("displayName") or r.cloud_name,
+                "assetType": r.asset_type,
+                "tfType": r.tf_type,
+                "location": r.location or "—",
+                "cloud_name": r.cloud_name,
+                "raw_asset": r.raw_asset,
+            }
+            for r in resources
+        ]
+        # Clear any stale prior result so the page doesn't show old metrics
+        st.session_state.pop(_SS_LAST_RESULT, None)
+        elapsed = _time.time() - started
+        st.success(
+            f"Discovered {len(resources)} resource(s) in {elapsed:.1f}s",
+            icon="✅",
+        )
+        st.rerun()
+    except Exception as e:  # noqa: BLE001
+        render_error(e, context="discovering resources")
+        st.stop()
+
+# After Discover (or on subsequent reruns when we have data in session)
+discovered = st.session_state.get(_SS_DISCOVERED)
+if not discovered:
+    st.info(
+        "Click **Discover resources** above to see what's importable in "
+        "this project. The list is cached in this session until you "
+        "Re-discover or Clear.",
+        icon="ℹ️",
+    )
+    st.stop()
+
+# --- Stage B: Pick + Import ---------------------------------------------
+
+st.markdown("---")
+st.markdown(
+    f"### Step 2 — Pick resources to import "
+    f"({len(discovered)} discovered)"
+)
+st.caption(
+    "Selection defaults to NONE so a fat-finger Run never fires LLM "
+    "cost. Use the column header checkbox to select all visible rows."
+)
+
+# Build a DataFrame-like list of dicts for st.data_editor's checkbox grid.
+# Streamlit's data_editor works well with a dict-of-lists OR a list-of-dicts.
+# For 80-row scale a list-of-dicts is fine and avoids a pandas dep here.
+import pandas as pd  # already in requirements via streamlit
+
+# Build the editable table. The "Select" column is the only editable one;
+# everything else is read-only.
+table_rows = []
+for idx, r in enumerate(discovered):
+    table_rows.append({
+        "Select": False,
+        "#": idx + 1,  # 1-indexed to match CLI menu numbering
+        "Name": r["displayName"] or r["cloud_name"],
+        "Type": r["tfType"],  # show the friendly tf_type, not the URN
+        "Location": r["location"],
+    })
+df = pd.DataFrame(table_rows)
+
+# Filter-by-type widget. Helps when the project has many resources of
+# many types -- operator can narrow before selecting.
+all_tf_types = sorted({r["tfType"] for r in discovered})
+filter_col, count_col = st.columns([3, 1])
+with filter_col:
+    type_filter = st.multiselect(
+        "Filter by type",
+        options=all_tf_types,
+        default=[],
+        placeholder="Show all types",
+        key="type_filter",
+    )
+if type_filter:
+    df = df[df["Type"].isin(type_filter)]
+with count_col:
+    st.metric("Visible", len(df))
+
+# Render the checkbox grid via data_editor.
+edited_df = st.data_editor(
+    df,
+    column_config={
+        "Select": st.column_config.CheckboxColumn(
+            "Select", default=False, width="small",
+        ),
+        "#": st.column_config.NumberColumn(width="small"),
+        "Name": st.column_config.TextColumn(width="large"),
+        "Type": st.column_config.TextColumn(width="medium"),
+        "Location": st.column_config.TextColumn(width="medium"),
+    },
+    disabled=("#", "Name", "Type", "Location"),
+    hide_index=True,
+    use_container_width=True,
+    key="resource_picker",
+)
+
+# The data_editor returns the edited DataFrame. Pull selected indices
+# (1-indexed) from the rows where Select=True.
+selected_indices = edited_df.loc[
+    edited_df["Select"], "#"
+].tolist()
+
+st.markdown("---")
+import_col, info_col = st.columns([1, 2])
+with import_col:
+    import_button = st.button(
+        f"▶ Run import ({len(selected_indices)} selected)" if not _lock
+        else f"Running ({int(_time.time() - _lock['start_ts'])}s)…",
+        type="primary",
+        disabled=(len(selected_indices) == 0 or _lock is not None),
+        key="run_import_btn",
+        use_container_width=True,
+    )
+with info_col:
+    if _lock is not None:
+        st.warning(
+            f"⏳ Import in progress for **{_lock.get('project_id')}**; "
+            f"started {int(_time.time() - _lock['start_ts'])}s ago. "
+            f"Wait or refresh after {_RUN_TIMEOUT_S // 60} min if stuck.",
+            icon="⏳",
+        )
+    elif len(selected_indices) == 0:
+        st.caption(
+            "Select at least one resource above to enable Run import."
+        )
+    else:
+        # Cost / time estimate matching the per-resource ~10-30s LLM cost.
+        est_min_s = max(30, len(selected_indices) * 10)
+        est_max_s = len(selected_indices) * 30
+        st.caption(
+            f"Estimated {est_min_s}–{est_max_s}s for "
+            f"{len(selected_indices)} resource(s) "
+            f"(~10-30s per resource for LLM HCL generation)."
+        )
+
+# Show last result if present, BEFORE consuming a fresh click. Lets the
+# operator see the prior outcome while picking the next batch.
+last_result = st.session_state.get(_SS_LAST_RESULT)
+if last_result and not import_button:
+    st.markdown("---")
+    st.markdown("### Last import result")
+    st.success(
+        f"✅ Last run completed in {last_result.get('duration_s', 0):.1f}s",
+        icon="✅",
+    )
+    m1, m2, m3, m4 = st.columns(4)
+    m1.metric("Imported", last_result.get("imported", 0))
+    m2.metric("Needs attention", last_result.get("needs_attention", 0))
+    m3.metric("Skipped", last_result.get("skipped", 0))
+    m4.metric("Failed", last_result.get("failed", 0))
+    with st.expander("Full result (structured)", expanded=False):
+        st.json(last_result)
+
+if not import_button:
+    st.stop()
+
+# --- Live import path ----------------------------------------------------
 
 if _lock is not None:
-    # An import is in progress in THIS session. Show disabled button +
-    # banner, don't allow a re-click. Project_id from the lock surfaces
-    # the (rare but possible) case where the operator switched projects
-    # mid-run; the banner tells them which one is actually running.
-    locked_project = _lock.get("project_id", "unknown")
-    elapsed_s = int(_time.time() - _lock.get("start_ts", 0))
-    button_slot.button(
-        f"Running ({elapsed_s}s)…",
-        disabled=True,
-        type="secondary",
-        key="run_import_disabled_locked",
-    )
-    st.warning(
-        f"⏳ Import in progress for **{locked_project}** in this "
-        f"session (started {elapsed_s}s ago). Wait for it to complete; "
-        f"if the tab was refreshed, the lock auto-clears after "
-        f"{_RUN_TIMEOUT_S // 60} minutes.",
-        icon="⏳",
-    )
+    # Defensive (button was disabled but UI race could fire it)
+    st.warning("Import already in progress; ignoring click.", icon="⚠️")
     st.stop()
 
-run_button = button_slot.button(
-    "Run import",
-    type="primary",
-    use_container_width=False,
-    key="run_import_active",
-)
-
-if not run_button:
-    # Initial render or user hasn't clicked yet; stop here so we don't
-    # accidentally fire the import on a page reload triggered by some
-    # other widget interaction.
-    st.stop()
-
-# --- Live run path -------------------------------------------------------
-
-# Acquire the lock IMMEDIATELY on click so a refresh during the long
-# blocking workflow lands on the "already in progress" branch above.
-st.session_state["_importer_run_lock"] = {
+# Acquire lock immediately so refresh-during-run shows "in progress"
+st.session_state[_SS_RUN_LOCK] = {
     "start_ts": _time.time(),
     "project_id": project_id,
+    "selected_count": len(selected_indices),
 }
-# Visual swap: the button-slot now shows a disabled "Running..." indicator
-# while the workflow blocks. Operator gets immediate feedback that the
-# click was registered and the action is in flight.
-button_slot.button(
-    "Running…", disabled=True, type="secondary",
-    key="run_import_disabled_active",
-)
 
-# Lazy imports: heavy modules (importer pulls in google-cloud SDKs,
-# vertexai, etc.) only loaded once an actual run starts. Keeps the
-# initial page render snappy and isolates engine import failures from
-# the empty-state UX.
 from app.middleware import workdir_context  # noqa: E402
 from importer.run import run_workflow  # noqa: E402
 
 started = time.monotonic()
-
 try:
     with st.spinner(
-        f"Importing project '{project_id}' ... "
-        f"(this may take 30s–5min depending on project size)"
+        f"Importing {len(selected_indices)} resource(s) from "
+        f"'{project_id}' … (LLM generation runs ~10-30s per resource)"
     ):
         with workdir_context(project_id) as workdir:
-            # selected_indices="all" -> auto-select every discovered
-            # resource (PUI-1 v1 contract). The workdir is hydrated
-            # from GCS on entry, persisted on successful exit.
             result = run_workflow(
                 project_id=project_id,
-                selected_indices="all",
+                selected_indices=selected_indices,
             )
-except Exception as e:  # noqa: BLE001 -- intentionally broad
-    # Clear the lock BEFORE rendering the error so the operator can
-    # immediately retry. PSA-4's persist_on_exit already skipped the
-    # GCS write on exception, so previous-good state is preserved.
-    st.session_state.pop("_importer_run_lock", None)
-    # render_error branches on PreflightError vs everything else and
-    # surfaces the right level of detail.
-    render_error(e, context="running the importer")
+except Exception as e:  # noqa: BLE001
+    st.session_state.pop(_SS_RUN_LOCK, None)
+    render_error(e, context=f"importing {len(selected_indices)} resources")
     st.stop()
 
-# Clean exit: clear the lock so the next click can fire.
-st.session_state.pop("_importer_run_lock", None)
-
+# Clean exit: clear lock, cache result, refresh
+st.session_state.pop(_SS_RUN_LOCK, None)
 duration = time.monotonic() - started
+result_dict = result.as_fields()
+result_dict["duration_s"] = round(duration, 2)
+st.session_state[_SS_LAST_RESULT] = result_dict
 
-# --- Success: render result card ----------------------------------------
-
-st.success(
-    f"✅ Import completed in {duration:.1f}s",
-    icon="✅",
-)
-
-# Pull the engine's structured fields. as_fields() returns the same
-# dict that gets written to the snapshot (PSA-9), so what the
-# Dashboard will eventually show matches what the operator sees here.
-fields = result.as_fields()
-
-# Hero metrics: imported / needs_attention / skipped / failed.
-# Mirrors what Firefly's "import wizard" surfaces post-run; the four
-# buckets together account for every selected resource.
-m1, m2, m3, m4 = st.columns(4)
-m1.metric("Imported", fields.get("imported", 0))
-m2.metric("Needs attention", fields.get("needs_attention", 0))
-m3.metric("Skipped", fields.get("skipped", 0))
-m4.metric("Failed", fields.get("failed", 0))
-
-# Full structured payload for operators / debugging. JSON view is
-# native to Streamlit (collapsible), so no formatting work needed.
-with st.expander("Full result (structured)", expanded=False):
-    st.json(fields)
-
-st.caption(
-    "Snapshot of this run is persisted to GCS (see PSA-9). "
-    "The Dashboard (PUI-2) will read it without re-running the engine."
-)
+# Re-render to show the result card via the "last_result" branch above.
+st.rerun()

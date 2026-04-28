@@ -143,12 +143,21 @@ def _asset_to_legacy_dict(asset: Any) -> dict:
           "assetType": "compute.googleapis.com/Instance",
           "displayName": "vm-a",
           "location": "us-central1-a",
+          "additionalAttributes": {"email": "..."},  # SAs only
           ...
         }
 
     The SDK's Asset.resource.data is a Struct (the full describe output);
     we flatten the top-level Asset metadata + the resource.data into
     one dict that downstream consumers handle without changes.
+
+    Critical: for Service Accounts, populate ``additionalAttributes.email``
+    from the resource data. importer/run.py:_map_asset_to_terraform reads
+    this field at line 447 to derive the HCL-safe local-part identifier.
+    Without it, the URN tail (a numeric uniqueId like "10354785533...")
+    is used as the HCL block label -- which fails terraform's "must
+    start with a letter" validation. Surfaced during PUI-1 SMOKE
+    2026-04-28 after the SDK migration.
     """
     out = {
         "name": asset.name,
@@ -156,23 +165,55 @@ def _asset_to_legacy_dict(asset: Any) -> dict:
     }
     if asset.resource and asset.resource.data:
         data_dict = _struct_to_dict(asset.resource.data)
-        # Merge top-level resource fields. displayName + location often
-        # live inside the data; pull them up so downstream consumers
-        # find them at the top level (matching gcloud's flat output).
-        if "name" in data_dict and "/" in data_dict["name"]:
+
+        # === displayName resolution (per-asset-type) ===
+        # Bug surfaced in PUI-1 SMOKE 2026-04-28: for SAs the URN tail is
+        # the numeric uniqueId, NOT the email. Picking the URN tail as
+        # displayName fails downstream HCL validation. Type-aware order:
+        #   1. resource.data.email (SAs only)
+        #   2. resource.data.displayName (user-set labels)
+        #   3. resource.data.name's last segment (most types)
+        #   4. asset.name URN tail (last resort)
+        if asset.asset_type == "iam.googleapis.com/ServiceAccount":
+            # SA: prefer email (matches what the importer's _map_asset_to_terraform
+            # treats as the canonical identifier).
+            if data_dict.get("email"):
+                out["displayName"] = data_dict["email"]
+            elif data_dict.get("displayName"):
+                out["displayName"] = data_dict["displayName"]
+            else:
+                out["displayName"] = asset.name.rsplit("/", 1)[-1]
+        elif "name" in data_dict and "/" in str(data_dict["name"]):
             out["displayName"] = data_dict["name"].rsplit("/", 1)[-1]
-        elif "displayName" in data_dict:
+        elif data_dict.get("displayName"):
             out["displayName"] = data_dict["displayName"]
         else:
-            # Fall back to last segment of the asset URN
             out["displayName"] = asset.name.rsplit("/", 1)[-1]
+
+        # === location resolution ===
         if "location" in data_dict:
             out["location"] = data_dict["location"]
         elif "zone" in data_dict:
-            # Compute resources expose `zone` as a URL; extract last segment
-            out["location"] = data_dict["zone"].rsplit("/", 1)[-1]
+            out["location"] = str(data_dict["zone"]).rsplit("/", 1)[-1]
         elif "region" in data_dict:
-            out["location"] = data_dict["region"].rsplit("/", 1)[-1]
+            out["location"] = str(data_dict["region"]).rsplit("/", 1)[-1]
+
+        # === additionalAttributes (gcloud asset compatibility shim) ===
+        # The legacy gcloud asset search output had an
+        # `additionalAttributes` sub-dict carrying type-specific identity
+        # fields. importer/run.py:_map_asset_to_terraform line 447 reads
+        # `selected_asset.get("additionalAttributes", {}).get("email")`
+        # for SAs to derive the HCL-safe local-part. Without this shim
+        # the fallback (URN-tail) yields the numeric uniqueId, which
+        # fails HCL identifier validation. Pin the fields the importer
+        # mapper relies on; add more here as future asset types need them.
+        additional: dict = {}
+        if asset.asset_type == "iam.googleapis.com/ServiceAccount":
+            if data_dict.get("email"):
+                additional["email"] = data_dict["email"]
+        if additional:
+            out["additionalAttributes"] = additional
+
         # Preserve everything else from data so describe-style consumers
         # see the full state (this is what makes the SDK migration
         # equivalent to the old subprocess gcloud describe output).
