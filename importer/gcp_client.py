@@ -237,21 +237,71 @@ def get_resource_details_json(mapping):
         )
         return None
 
-    try:
-        json_output = _asset_client.get_resource_state_as_json(
-            project_id=mapping["project_id"],
-            asset_type=asset_type,
-            asset_name=mapping["resource_name"],
-        )
-    except Exception as e:
-        log.error(
-            "describe_failed",
-            tf_type=tf_type,
-            resource_name=mapping.get("resource_name"),
-            error_type=type(e).__name__,
-            error=str(e)[:300],
-        )
-        return None
+    # PERF-T0b: try per-service SDK first (gives full state matching
+    # `gcloud <service> describe` -- what CLI used and what the LLM was
+    # tested against during SMOKE 4). Falls back to asset_v1's sparser
+    # output for tf_types we haven't migrated yet.
+    from . import _describe_router
+    json_output = None
+    handler = _describe_router.get_handler(tf_type)
+    if handler is not None:
+        # Per-service SDK path. Pass through all mapping fields as
+        # extras so the handler gets zone/location/cluster/keyring etc.
+        try:
+            extras = {
+                k: v for k, v in mapping.items()
+                if k not in ("tf_type", "project_id", "resource_name", "workdir")
+            }
+            state = _describe_router.describe(
+                tf_type=tf_type,
+                project_id=mapping["project_id"],
+                name=mapping["resource_name"],
+                **extras,
+            )
+            if state is not None:
+                json_output = json.dumps(state, indent=2)
+                log.info(
+                    "describe_via_per_service_sdk",
+                    tf_type=tf_type,
+                    resource_name=mapping["resource_name"],
+                    field_count=len(state),
+                    payload_bytes=len(json_output),
+                )
+        except Exception as e:
+            log.warning(
+                "describe_per_service_sdk_failed_falling_back",
+                tf_type=tf_type,
+                resource_name=mapping.get("resource_name"),
+                error_type=type(e).__name__,
+                error=str(e)[:300],
+            )
+            json_output = None
+
+    # Fallback: asset_v1 path (sparser data; LLM may produce incomplete
+    # HCL). Used for tf_types not yet migrated to per-service SDK.
+    if json_output is None:
+        try:
+            json_output = _asset_client.get_resource_state_as_json(
+                project_id=mapping["project_id"],
+                asset_type=asset_type,
+                asset_name=mapping["resource_name"],
+            )
+            log.info(
+                "describe_via_asset_v1_fallback",
+                tf_type=tf_type,
+                resource_name=mapping.get("resource_name"),
+                reason=("no per-service SDK handler yet; HCL may "
+                        "be incomplete (queued in PERF-T0b backlog)"),
+            )
+        except Exception as e:
+            log.error(
+                "describe_failed",
+                tf_type=tf_type,
+                resource_name=mapping.get("resource_name"),
+                error_type=type(e).__name__,
+                error=str(e)[:300],
+            )
+            return None
 
     if json_output:
         log.info("describe_complete", tf_type=tf_type,

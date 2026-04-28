@@ -47,6 +47,28 @@ def _install_google_cloud_asset_stub() -> None:
     asset_stub.ContentType = _StubContentType
     sys.modules["google.cloud.asset_v1"] = asset_stub
 
+    # PERF-T0b: per-service SDK stubs. Tests for _describe_router patch
+    # _get_storage_client / _get_compute_instances_client /
+    # _get_container_clusters_client to inject MagicMock clients, so
+    # the real SDK classes are never instantiated. The stubs just need
+    # to be importable.
+    if "google.cloud.storage" not in sys.modules:
+        storage_stub = types.ModuleType("google.cloud.storage")
+        storage_stub.Client = MagicMock(name="storage.Client")
+        sys.modules["google.cloud.storage"] = storage_stub
+
+    if "google.cloud.compute_v1" not in sys.modules:
+        compute_stub = types.ModuleType("google.cloud.compute_v1")
+        compute_stub.InstancesClient = MagicMock(name="compute.InstancesClient")
+        sys.modules["google.cloud.compute_v1"] = compute_stub
+
+    if "google.cloud.container_v1" not in sys.modules:
+        container_stub = types.ModuleType("google.cloud.container_v1")
+        container_stub.ClusterManagerClient = MagicMock(
+            name="container.ClusterManagerClient",
+        )
+        sys.modules["google.cloud.container_v1"] = container_stub
+
     # google.api_core.exceptions stub (in case common/tests/conftest.py
     # didn't run first -- pytest's collection order can vary).
     if "google.api_core" not in sys.modules:
