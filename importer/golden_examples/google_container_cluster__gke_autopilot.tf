@@ -23,10 +23,27 @@ resource "google_container_cluster" "autopilot_example" {
   network    = "projects/example-project/global/networks/default"
   subnetwork = "projects/example-project/regions/us-central1/subnetworks/default"
 
+  # ip_allocation_policy: TWO mutually-exclusive patterns. PICK ONE,
+  # NEVER MIX. The Google provider rejects mixed pairs with:
+  #   "Error: Conflicting configuration arguments
+  #    cluster_secondary_range_name: conflicts with services_ipv4_cidr_block"
+  #
+  # Pattern A (CIDR-based, USED HERE -- recommended for fresh clusters):
   ip_allocation_policy {
     cluster_ipv4_cidr_block  = "/14"
     services_ipv4_cidr_block = "/20"
   }
+  #
+  # Pattern B (NAMED-secondary-ranges, for clusters that reference
+  # pre-existing secondary ranges on the subnetwork). When the cloud
+  # snapshot has `cluster_secondary_range_name` populated, use BOTH
+  # name fields together -- DO NOT mix one name with one CIDR:
+  #   ip_allocation_policy {
+  #     cluster_secondary_range_name  = "gke-poc-cluster-pods-XXXX"
+  #     services_secondary_range_name = "gke-poc-cluster-services-XXXX"
+  #   }
+  # If the snapshot has BOTH name and CIDR fields, prefer the name
+  # variant -- it preserves the operator's pre-existing subnet layout.
 
   release_channel {
     channel = "REGULAR"
