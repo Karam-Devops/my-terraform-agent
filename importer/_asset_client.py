@@ -260,6 +260,89 @@ def _asset_to_legacy_dict(asset: Any) -> dict:
     return out
 
 
+def _list_service_accounts(project_id: str) -> list[dict]:
+    """List Service Accounts via the IAM SDK (NOT asset_v1).
+
+    PUI-1B v3.1 fix (2026-04-29): asset_v1 list_assets returns SA
+    metadata sparsely -- the email + displayName fields are often
+    missing, leaving the picker with only the URN tail (the numeric
+    uniqueId) as a display name. Operators see "103547855339875394846"
+    instead of "poc-sa@dev-proj-470211.iam.gserviceaccount.com".
+
+    Same root cause as the HCL-generation regression (PERF-T0b)
+    addressed at the describe step. For SA LISTING, use the IAM
+    Admin SDK directly -- one API call per project returns all SAs
+    with full email + displayName.
+
+    Returns dicts in the same legacy shape as _asset_to_legacy_dict
+    (so downstream consumers in inventory.py + the UI work unchanged).
+    """
+    from google.cloud import iam_admin_v1
+    client = _get_iam_client_for_listing()
+    parent = f"projects/{project_id}"
+    _log.info(
+        "iam_list_service_accounts_start", project_id=project_id,
+    )
+    try:
+        page = client.list_service_accounts(request={"name": parent})
+    except gcs_exceptions.NotFound:
+        _log.info(
+            "iam_list_service_accounts_not_found",
+            project_id=project_id,
+        )
+        return []
+    except gcs_exceptions.PermissionDenied as e:
+        _log.error(
+            "iam_list_service_accounts_permission_denied",
+            project_id=project_id, error=str(e)[:300],
+            hint="Runtime SA needs roles/iam.serviceAccountViewer "
+                 "(or roles/viewer which includes it).",
+        )
+        raise
+    results = []
+    for sa in page.accounts:
+        # Build the legacy-shaped dict that downstream code expects.
+        # `displayName` is the EMAIL (matches what the SA branch in
+        # _asset_to_legacy_dict would produce when data was complete).
+        results.append({
+            "name": (
+                f"//iam.googleapis.com/projects/{project_id}/"
+                f"serviceAccounts/{sa.email}"
+            ),
+            "assetType": "iam.googleapis.com/ServiceAccount",
+            "displayName": sa.email,
+            "email": sa.email,
+            "uniqueId": sa.unique_id,
+            "additionalAttributes": {"email": sa.email},
+            # Keep the SA's user-set display name as a separate field
+            # so downstream consumers can reach it if needed.
+            "humanDisplayName": sa.display_name,
+        })
+    _log.info(
+        "iam_list_service_accounts_complete",
+        project_id=project_id, count=len(results),
+    )
+    return sorted(results, key=lambda r: r["email"])
+
+
+def _get_iam_client_for_listing():
+    """Same singleton pattern as _describe_router's _get_iam_client.
+
+    Defined here (not imported from _describe_router) to avoid a circular
+    import: _describe_router imports from _asset_client for the legacy
+    dict shape; _asset_client now imports IAM functionality for listing.
+    Two separate singletons; same underlying client class.
+    """
+    global _iam_listing_client
+    if _iam_listing_client is None:
+        from google.cloud import iam_admin_v1
+        _iam_listing_client = iam_admin_v1.IAMClient()
+    return _iam_listing_client
+
+
+_iam_listing_client = None
+
+
 def list_resources_of_type(project_id: str, asset_type: str) -> list[dict]:
     """List all resources of an asset type in a project.
 
@@ -284,6 +367,13 @@ def list_resources_of_type(project_id: str, asset_type: str) -> list[dict]:
             exist OR the cloudasset.googleapis.com API isn't enabled.
         Other google.api_core.exceptions for transient errors.
     """
+    # PUI-1B v3.1 special case: SAs from asset_v1 are sparse (missing
+    # email/displayName -> picker shows numeric uniqueId). Route IAM SA
+    # listing through the IAM SDK directly, which returns full email
+    # in one call. Same singleton-instantiated client; no perf penalty.
+    if asset_type == "iam.googleapis.com/ServiceAccount":
+        return _list_service_accounts(project_id)
+
     client = _get_asset_client()
     parent = f"projects/{project_id}"
     _log.info(
