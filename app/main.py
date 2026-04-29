@@ -20,6 +20,7 @@ are imported lazily by the pages that need them.
 import streamlit as st
 
 from app.ui.sidebar import render_sidebar
+from app.ui.theme import apply_theme_polish
 
 
 st.set_page_config(
@@ -28,6 +29,10 @@ st.set_page_config(
     layout="wide",
     initial_sidebar_state="expanded",
 )
+
+# PUI-1B v3.4: page-wide CSS polish (Firefly-inspired). Runs after
+# set_page_config (Streamlit requirement) and before any content.
+apply_theme_polish()
 
 # Render the sidebar (project picker + runtime info). Returns the
 # selected project_id, but the landing page itself doesn't use it

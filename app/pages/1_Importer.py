@@ -38,6 +38,7 @@ import streamlit as st
 
 from app.ui.sidebar import render_sidebar
 from app.ui.error_surface import render_error
+from app.ui.theme import apply_theme_polish
 
 
 # Page chrome
@@ -46,6 +47,9 @@ st.set_page_config(
     page_icon="📥",
     layout="wide",
 )
+
+# PUI-1B v3.4: Firefly-inspired theme polish (CSS injection).
+apply_theme_polish()
 
 project_id = render_sidebar()
 

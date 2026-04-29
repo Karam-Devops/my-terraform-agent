@@ -1,0 +1,75 @@
+# Streamlit theme + runtime config (PUI-1B v3.4: Firefly-inspired theme).
+#
+# This file controls Streamlit's default visual appearance across all
+# pages. The palette is inspired by Firefly.ai's Inventory page:
+# clean white content area, cool light-gray sidebar, mint/teal accent
+# for primary actions, dark-navy text. Status colors (success/warning/
+# error) follow Material Design conventions for muscle-memory familiarity.
+#
+# Why this lives in `.streamlit/config.toml` (not in code):
+#   * Streamlit's theming engine only reads from this file (or env vars).
+#     Setting theme colors in Python via `st.set_page_config(theme=...)`
+#     is NOT supported.
+#   * One canonical place; all pages inherit. No per-page theming drift.
+#   * Cloud Run deploy includes it automatically (COPY . /app/ in
+#     Dockerfile picks up the dotfile directory).
+#
+# Customization scope:
+#   * `[theme]` controls page-wide colors + fonts.
+#   * Per-component overrides (status pills, table row colors) require
+#     CSS injection via st.markdown(unsafe_allow_html=True). Those
+#     live in app/ui/ helpers (not yet -- planned for PUI-1B v3.5).
+#
+# Reload behavior: changes to this file require a full Streamlit
+# server restart (Cloud Run revision rollout, or `streamlit run`
+# re-launch in local dev). NOT picked up by hot-reload.
+
+[theme]
+# Primary accent -- used for buttons, links, focused widget borders.
+# Firefly's brand is in the teal/mint family; this is close to their
+# "Codify" button color from public demos. Bright enough to draw the
+# eye, calm enough not to clash with status oranges/reds.
+primaryColor = "#00C4A7"
+
+# Main content background -- clean white. Firefly's inventory page
+# uses pure white for the main canvas with subtle gray accents only
+# in the sidebar + card backgrounds.
+backgroundColor = "#FFFFFF"
+
+# Sidebar + expander + card background -- cool light gray. Provides
+# subtle separation from the white main canvas without the harsh
+# borders some SaaS apps use. Matches Firefly's left-nav tone.
+secondaryBackgroundColor = "#F5F7FA"
+
+# Base text -- dark navy (NOT pure black). Pure black on white feels
+# harsh; navy keeps high contrast while feeling more "designed."
+# Firefly + most modern SaaS apps use a similar #1A1F36-ish tone.
+textColor = "#1A1F36"
+
+# Sans-serif feels right for SaaS dashboards (not "documenty"
+# serif, not "code-y" mono). Streamlit's default sans stack is
+# system-ui + Helvetica + Arial fallback -- consistent across OSes.
+font = "sans serif"
+
+# Status colors are NOT directly settable in Streamlit's theme
+# (the theme only has primaryColor as the single accent slot).
+# We use these in custom st.markdown HTML for status pills:
+#   * Success / Imported:   #00C853 (Material Design green)
+#   * Warning / Quarantined: #FFA726 (Material Design orange)
+#   * Error / Failed:       #EF5350 (Material Design red)
+#   * Info:                 #29B6F6 (Material Design light blue)
+# See app/ui/status_pill.py (planned in PUI-1B v3.5) for the
+# helper that renders these.
+
+[server]
+# Streamlit's default behavior on Cloud Run: bind to $PORT, no auth
+# (we use Cloud Run IAM allowlist instead). These are also overridden
+# by the Dockerfile CMD's --server.* flags but documented here so
+# operators reading config know where to look.
+headless = true
+
+[browser]
+# Don't show the "open in browser" prompt -- Cloud Run is the only
+# context this runs in production; the URL comes from the operator's
+# proxy or the Cloud Run service URL, not stdout.
+gatherUsageStats = false
