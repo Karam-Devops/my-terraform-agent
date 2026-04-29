@@ -541,6 +541,61 @@ def hydrate_workdir(
             local_path=local_path,
             objects_downloaded=downloaded,
         )
+
+    # PUI-1R (2026-04-30): restore POSIX +x bit on terraform provider
+    # binaries.
+    #
+    # Why: GCS does NOT preserve POSIX file permissions in object
+    # metadata. terraform downloads provider binaries (e.g.
+    # `.terraform/providers/registry.terraform.io/hashicorp/google/
+    # 7.29.0/linux_amd64/terraform-provider-google_v7.29.0_x5`) with
+    # the executable bit set; persist uploads them to GCS losing the
+    # bit; hydrate downloads them back with default 0644 (rw-r--r--).
+    # Subsequent `terraform plan/apply/init` calls fail with::
+    #
+    #   Failed to obtain provider schema: ... fork/exec
+    #   .terraform/providers/.../terraform-provider-google_v7.29.0_x5:
+    #   permission denied
+    #
+    # Fix: walk `.terraform/providers/**` after hydrate, chmod 0o755
+    # any file matching `terraform-provider-*` (the standard naming
+    # convention for HashiCorp + community providers). 0o755 = owner
+    # rwx + group/other rx, mirroring what `terraform init` originally
+    # set when downloading from the registry.
+    #
+    # Caught by PUI-4j SaaS Detector smoke (Restore button) where the
+    # first cloud-mutating action after a hydrate cycle hit this for
+    # the first time. Read-only paths (state_pull, the inventory
+    # gcloud calls) didn't expose the bug because they don't fork the
+    # provider binary.
+    providers_root = os.path.join(local_path, ".terraform", "providers")
+    if os.path.isdir(providers_root):
+        chmodded = 0
+        for root, _dirs, files in os.walk(providers_root):
+            for fname in files:
+                if not fname.startswith("terraform-provider-"):
+                    continue
+                fpath = os.path.join(root, fname)
+                try:
+                    os.chmod(fpath, 0o755)
+                    chmodded += 1
+                except OSError as chmod_err:
+                    _log.warning(
+                        "provider_binary_chmod_failed",
+                        tenant_id=tenant,
+                        project_id=project_id,
+                        path=fpath,
+                        error=str(chmod_err),
+                    )
+        if chmodded:
+            _log.info(
+                "provider_binaries_chmodded",
+                tenant_id=tenant,
+                project_id=project_id,
+                count=chmodded,
+                providers_root=providers_root,
+            )
+
     return local_path
 
 
