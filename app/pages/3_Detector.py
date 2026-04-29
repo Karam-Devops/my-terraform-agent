@@ -52,6 +52,7 @@ apply_theme_polish(). Mint accent on Run rescan; red on Danger Zone;
 status pills follow the Material palette.
 """
 
+import json
 import os
 import time
 
@@ -395,17 +396,29 @@ if last_result and not rescan_button:
     _unmanaged = len(_unmanaged_orphan)
     _unmanaged_hidden = len(_unmanaged_child)
 
-    # Coverage gauge (Firefly's hero metric).
-    if _in_cloud > 0:
-        _coverage_pct = round(100.0 * _in_state / _in_cloud)
+    # PUI-4k (2026-04-30): Firefly-parity coverage formula.
+    # Pre-PUI-4k denominator was total_in_cloud (in_state + ALL
+    # unmanaged INCLUDING auto-managed children). That over-counts the
+    # denominator with resources nobody would ever write Terraform for
+    # (GKE node-pool VMs, default GCP service accounts, etc.) -- making
+    # coverage look ~3x worse than it really is and demoralizing
+    # operators who DID codify everything they reasonably could.
+    # Firefly's metric: only count IaC-eligible resources in the
+    # denominator (compliant + drifted + GENUINELY-unmanaged orphans).
+    # Auto-managed children are excluded -- they're managed by the
+    # parent's HCL, not separately codifiable.
+    _iac_eligible = _in_state + _unmanaged
+    if _iac_eligible > 0:
+        _coverage_pct = round(100.0 * _in_state / _iac_eligible)
     else:
         _coverage_pct = 0
     st.markdown(f"### Coverage: **{_coverage_pct}%** codified")
     st.progress(
-        min(_in_state, _in_cloud) / max(_in_cloud, 1),
+        min(_in_state, _iac_eligible) / max(_iac_eligible, 1),
         text=(
-            f"{_in_state} of {_in_cloud} cloud resource(s) tracked by "
-            f"Terraform"
+            f"{_in_state} of {_iac_eligible} IaC-eligible resource(s) "
+            f"tracked by Terraform "
+            f"({_unmanaged_hidden} auto-managed children excluded)"
         ),
     )
 
@@ -653,36 +666,199 @@ if last_result and not rescan_button:
                 )
 
     # ---- DRIFT TAB ----------------------------------------------------
+    # PUI-4e/4i/4j (2026-04-30): drift detection wired via diff_engine
+    # (cloud-vs-state per-field diff, NOT terraform-plan-based).
+    # Per-resource expander shows side-by-side diff (Path | State |
+    # Cloud) and 4 remediation actions matching the CLI:
+    #   * Restore  -- terraform apply -target (HCL -> Cloud)
+    #   * Accept   -- terraform refresh-only (Cloud -> State, .tf untouched)
+    #   * Recreate -- destroy + apply (DESTRUCTIVE)
+    #   * Drop     -- terraform state rm (stop managing)
+    # Type-to-confirm gate (matches Danger Zone pattern) prevents
+    # mis-clicks. Policy gate disabled in v1 -- the dedicated Policy
+    # page (PUI-5) will be where operators see / acknowledge violations.
     with tab_drift:
         drift_list = last_result.get("drifted", [])
         if not drift_list:
-            st.info(
-                "No drift detected. **Note:** drift detection (per-"
-                "resource `terraform plan`) is queued as **PUI-4e** "
-                "and not yet wired -- this tab will populate once "
-                "that ships. Today, all in-state resources land in "
-                "the Compliant tab regardless of cloud-vs-HCL match.",
-                icon="ℹ️",
+            st.success(
+                "No drift detected. Every in-state resource matches "
+                "its cloud counterpart on every checked field.",
+                icon="🎉",
             )
         else:
-            # Future-proofed render path; mirror compliant table shape
-            # since drift items are the same ManagedResource type +
-            # additional drift detail.
+            # Summary table at the top.
             rows = [
                 {
                     "#": i + 1,
-                    "Status": "🟡 Drift",
-                    "Resource": r.get("hcl_name", ""),
-                    "Type": r.get("tf_type", ""),
-                    "TF address": r.get("tf_address", ""),
+                    "Status": "❌ Error" if d.get("error") else "🟡 Drift",
+                    "TF address": d.get("tf_address", ""),
+                    "Type": d.get("tf_type", ""),
+                    "Drifted fields": (
+                        len(d.get("items") or [])
+                        if not d.get("error") else "(snapshot missing)"
+                    ),
+                    "Policy": d.get("policy_tag") or "—",
                 }
-                for i, r in enumerate(drift_list)
+                for i, d in enumerate(drift_list)
             ]
             st.dataframe(
                 pd.DataFrame(rows),
                 hide_index=True,
                 use_container_width=True,
             )
+
+            st.markdown("### Per-resource detail")
+            st.caption(
+                "Expand a resource to see the cloud-vs-state diff and "
+                "remediate. **Type the TF address** to enable action "
+                "buttons (prevents fat-finger mistakes)."
+            )
+
+            for i, drift in enumerate(drift_list):
+                _tfa = drift.get("tf_address", "")
+                _items = drift.get("items") or []
+                _err = drift.get("error")
+                _hdr = (
+                    f"❌ {_tfa} — snapshot missing"
+                    if _err
+                    else f"🟡 {_tfa} — {len(_items)} field(s)"
+                )
+                with st.expander(_hdr, expanded=False):
+                    if _err:
+                        st.error(
+                            f"{_err}\n\nThe resource may have been "
+                            "deleted out-of-band. Use **Drop** to "
+                            "remove from state, or **Recreate** to "
+                            "rebuild from HCL.",
+                            icon="❌",
+                        )
+                    else:
+                        # 3-column header
+                        h1, h2, h3 = st.columns([2, 3, 3])
+                        h1.markdown("**Path**")
+                        h2.markdown("**State (HCL)**")
+                        h3.markdown("**Cloud**")
+                        st.divider()
+                        for it in _items:
+                            c1, c2, c3 = st.columns([2, 3, 3])
+                            _op = it.get("op", "")
+                            _glyph = {
+                                "added":   "➕",
+                                "removed": "➖",
+                                "changed": "✏️",
+                            }.get(_op, "•")
+                            c1.markdown(
+                                f"{_glyph} `{it.get('path', '') or '(root)'}`\n\n"
+                                f"_{_op}_"
+                            )
+                            _sv = it.get("state_value")
+                            _cv = it.get("cloud_value")
+                            c2.code(
+                                json.dumps(_sv, indent=2, default=str)
+                                if _sv is not None else "—",
+                                language="json",
+                            )
+                            c3.code(
+                                json.dumps(_cv, indent=2, default=str)
+                                if _cv is not None else "—",
+                                language="json",
+                            )
+
+                    # Remediation action panel
+                    st.markdown("---")
+                    st.markdown("#### 🛠️ Remediation actions")
+                    st.caption(
+                        "🔄 **Restore HCL→Cloud**: `terraform apply -target` "
+                        "— overwrites cloud changes  ·  "
+                        "✅ **Accept Cloud→State**: `terraform refresh -target` "
+                        "— acknowledges the cloud change (.tf unchanged)  ·  "
+                        "♻️ **Recreate**: `destroy + apply` (DESTRUCTIVE)  ·  "
+                        "🗑️ **Stop managing**: `terraform state rm`"
+                    )
+
+                    # Type-to-confirm gate.
+                    _confirm_key = f"_drift_confirm_{_tfa}"
+                    _typed = st.text_input(
+                        f"Type the TF address `{_tfa}` to enable actions:",
+                        key=_confirm_key,
+                        placeholder=_tfa,
+                        label_visibility="visible",
+                    )
+                    _enabled = _typed.strip() == _tfa
+
+                    ba1, ba2, ba3, ba4 = st.columns(4)
+                    if ba1.button(
+                        "🔄 Restore",
+                        key=f"_btn_restore_{_tfa}",
+                        disabled=not _enabled,
+                        use_container_width=True,
+                        help="terraform apply -target (HCL→Cloud)",
+                    ):
+                        st.session_state["_pending_remediation"] = {
+                            "tf_address": _tfa, "action": "restore",
+                        }
+                        st.rerun()
+                    if ba2.button(
+                        "✅ Accept",
+                        key=f"_btn_accept_{_tfa}",
+                        disabled=not _enabled,
+                        use_container_width=True,
+                        help="terraform refresh-only (Cloud→State)",
+                    ):
+                        st.session_state["_pending_remediation"] = {
+                            "tf_address": _tfa, "action": "accept",
+                        }
+                        st.rerun()
+                    if ba3.button(
+                        "♻️ Recreate",
+                        key=f"_btn_recreate_{_tfa}",
+                        disabled=not _enabled,
+                        use_container_width=True,
+                        help="terraform destroy + apply (DESTRUCTIVE)",
+                        type="primary",
+                    ):
+                        st.session_state["_pending_remediation"] = {
+                            "tf_address": _tfa, "action": "recreate",
+                        }
+                        st.rerun()
+                    if ba4.button(
+                        "🗑️ Stop managing",
+                        key=f"_btn_drop_{_tfa}",
+                        disabled=not _enabled,
+                        use_container_width=True,
+                        help="terraform state rm (no cloud change)",
+                    ):
+                        st.session_state["_pending_remediation"] = {
+                            "tf_address": _tfa, "action": "drop",
+                        }
+                        st.rerun()
+
+                    # Per-resource last-action result.
+                    _rem_key = f"_remediation_result_{_tfa}"
+                    if _rem_key in st.session_state:
+                        _r = st.session_state[_rem_key]
+                        _r_action = _r.get("action", "?")
+                        _r_status = _r.get("status", "?")
+                        _r_msg = _r.get("message", "")
+                        if _r.get("success"):
+                            st.success(
+                                f"✅ **{_r_action}** completed "
+                                f"(`{_r_status}`): {_r_msg}",
+                                icon="✅",
+                            )
+                        else:
+                            st.error(
+                                f"❌ **{_r_action}** failed "
+                                f"(`{_r_status}`): {_r_msg}",
+                                icon="❌",
+                            )
+                        if st.button(
+                            "Clear result",
+                            key=f"_btn_clear_{_tfa}",
+                            type="secondary",
+                        ):
+                            st.session_state.pop(_rem_key, None)
+                            st.rerun()
 
     # ---- ERRORS TAB ---------------------------------------------------
     with tab_err:
@@ -705,6 +881,81 @@ if last_result and not rescan_button:
 
     with st.expander("Full DriftReport (structured)", expanded=False):
         st.json(last_result)
+
+
+# --- PUI-4j: Remediation execution ------------------------------------
+# When a remediation button is clicked, the handler stashes
+# {tf_address, action} in st.session_state["_pending_remediation"] and
+# triggers a rerun. We execute it HERE (after the render block, before
+# the rescan-button gate) so the UI surfaces a live spinner in the same
+# tab and the result lands back in session_state for the next render.
+#
+# Why not run inside the button callback: Streamlit re-runs the script
+# top-down on each interaction. Running engine work mid-render would
+# block render of all later widgets and break the "click → see spinner
+# in place" UX. Defer-then-execute is the canonical pattern.
+_pending = st.session_state.get("_pending_remediation")
+if _pending:
+    _tfa = _pending["tf_address"]
+    _act = _pending["action"]
+    # Clear the pending marker FIRST so a re-run doesn't double-execute.
+    st.session_state.pop("_pending_remediation", None)
+
+    _rem_lock_key = f"_remediation_lock_{_tfa}"
+    st.session_state[_rem_lock_key] = {
+        "start_ts": _time.time(), "action": _act,
+    }
+    _result_key = f"_remediation_result_{_tfa}"
+    try:
+        # Lazy imports to keep page-load fast (engine modules pull
+        # google-cloud SDK which is heavy).
+        from importer import terraform_client
+        from detector import remediator
+        from app.middleware import workdir_context, bust_workdir_cache
+
+        with st.spinner(
+            f"Running **{_act}** on `{_tfa}`… This may take 30s-5min "
+            f"depending on the action (terraform init + plan + apply)."
+        ):
+            with workdir_context(project_id) as workdir:
+                # Ensure terraform.tfstate is materialized locally
+                # (mirrors the rescan path).
+                state_file = os.path.join(workdir, "terraform.tfstate")
+                terraform_client.state_pull(
+                    workdir=workdir, output_path=state_file,
+                )
+                rem_result = remediator.remediate_one(
+                    tf_address=_tfa,
+                    action=_act,
+                    auto_confirm=True,
+                    enable_policy_gate=False,  # PUI-4j v1: deferred
+                    workdir=workdir,
+                )
+        # Bust the GCS handle cache so the next page load sees fresh
+        # state (terraform may have rewritten state on Restore/Recreate/Drop).
+        bust_workdir_cache(project_id)
+
+        st.session_state[_result_key] = {
+            "action": _act,
+            "success": rem_result.success,
+            "status": rem_result.status,
+            "message": rem_result.message,
+            "_cached_at": _time.time(),
+        }
+    except Exception as e:  # noqa: BLE001 -- defensive shell for UI
+        st.session_state[_result_key] = {
+            "action": _act,
+            "success": False,
+            "status": "exception",
+            "message": f"{type(e).__name__}: {e}",
+            "_cached_at": _time.time(),
+        }
+    finally:
+        st.session_state.pop(_rem_lock_key, None)
+
+    # Force a re-render so the result appears in the expander AND so
+    # the cached DriftReport gets re-evaluated (state changed).
+    st.rerun()
 
 
 if not rescan_button:
@@ -772,7 +1023,16 @@ try:
                     icon="ℹ️",
                 )
 
-            report = _rescan(project_id, project_root=workdir)
+            # PUI-4e: drift_check=True runs per-resource cloud-vs-state
+            # diff after the unmanaged scan. Adds ~30-90s on a
+            # 50-resource project (one parallel-fanned `gcloud describe`
+            # per in-scope state resource via cloud_snapshot.fetch_snapshots,
+            # then a pure-Python diff via diff_engine.diff_resource).
+            # Result: the Drift bucket actually populates with per-field
+            # deltas the user can View / Restore / Accept / etc.
+            report = _rescan(
+                project_id, project_root=workdir, drift_check=True,
+            )
 except Exception as e:  # noqa: BLE001
     st.session_state.pop(_SS_RUN_LOCK, None)
     render_error(e, context=f"running rescan for {project_id}")

@@ -56,7 +56,8 @@ from importer.gcp_client import friendly_name_from_display
 from common.errors import PreflightError
 from common.logging import get_logger
 
-from . import config, state_reader
+from . import cloud_snapshot, config, diff_engine, state_reader
+from .diff_engine import ResourceDrift
 from .drift_report import DriftReport
 from .state_reader import ManagedResource
 
@@ -105,13 +106,113 @@ def _build_unmanaged(
     return unmanaged
 
 
-def rescan(project_id: str, *, project_root: str) -> DriftReport:
+def _classify_in_state(
+    state_resources: List[ManagedResource],
+    *,
+    log,
+) -> tuple[List[ResourceDrift], List[ManagedResource]]:
+    """PUI-4e: per-resource cloud-vs-state diff for in-state resources.
+
+    Fetches a fresh cloud snapshot for every in-scope state resource
+    and runs ``diff_engine.diff_resource()`` to partition them into
+    ``drifted`` (per-field deltas exist) and ``compliant`` (in sync).
+
+    Out-of-scope state resources skip the diff (no normalization rules
+    available) and stay in compliant -- mirrors the CLI behavior.
+
+    Drift-stub types (in-scope but lacking full normalization rules)
+    are HIDDEN from the drifted bucket per Firefly UX parity (we
+    don't surface "monitored, conservative" caveats to the customer).
+    They land in compliant unless a real diff fires.
+
+    Snapshot fetching reuses ``cloud_snapshot.fetch_snapshots`` which
+    is already threadpooled at ``MAX_SNAPSHOT_WORKERS`` (8 by
+    default). For a 50-resource project this is ~30-60s wall clock;
+    the SaaS Detector page caches the result so subsequent renders
+    don't re-pay the cost.
+
+    Args:
+        state_resources: Output of ``state_reader.read_state``.
+        log: Bound logger from the caller (so progress events nest
+            under the same op="rescan" structured field).
+
+    Returns:
+        ``(drifted, compliant)`` partition of the input list.
+    """
+    drifted: List[ResourceDrift] = []
+    compliant: List[ManagedResource] = []
+
+    in_scope = [r for r in state_resources if r.in_scope]
+    out_of_scope = [r for r in state_resources if not r.in_scope]
+    # Out-of-scope types stay compliant unconditionally (no diff
+    # available). Mirrors CLI behavior at detector/run.py:132.
+    compliant.extend(out_of_scope)
+
+    if not in_scope:
+        log.info("rescan_drift_check_skipped",
+                 reason="no in-scope state resources to diff")
+        return drifted, compliant
+
+    log.info("rescan_drift_check_start",
+             in_scope_count=len(in_scope),
+             out_of_scope_count=len(out_of_scope))
+
+    # Fetch parallel cloud snapshots (already threadpooled).
+    snapshots = cloud_snapshot.fetch_snapshots(in_scope)
+
+    error_count = 0
+    drift_stub_count = 0
+    for r in in_scope:
+        # Drift-stub gating: types in-scope but without full
+        # normalization rules would produce noisy false-positive
+        # drift. Per Firefly UX parity (Hide drift-stubs) we treat
+        # these as compliant unconditionally rather than rendering
+        # a "monitored, conservative" caveat in the SaaS UI. The CLI
+        # surfaces drift_stub=True placeholders for power-user
+        # transparency; the SaaS does not.
+        if not config.is_drift_aware(r.tf_type):
+            compliant.append(r)
+            drift_stub_count += 1
+            continue
+
+        drift = diff_engine.diff_resource(
+            tf_address=r.tf_address,
+            tf_type=r.tf_type,
+            state_attrs=r.attributes,
+            cloud_json=snapshots.get(r.tf_address),
+        )
+        if drift.has_drift:
+            drifted.append(drift)
+            if drift.error:
+                error_count += 1
+        else:
+            compliant.append(r)
+
+    log.info("rescan_drift_check_complete",
+             drifted_count=len(drifted),
+             compliant_count=len(compliant),
+             error_count=error_count,
+             drift_stub_hidden_count=drift_stub_count)
+    return drifted, compliant
+
+
+def rescan(
+    project_id: str,
+    *,
+    project_root: str,
+    drift_check: bool = False,
+) -> DriftReport:
     """Cloud-vs-state rescan; returns a structured DriftReport.
 
-    P4-3 scope: enumerates the cloud, reads state, set-diffs to find
-    unmanaged. Does NOT run terraform plan -- drifted / compliant
-    buckets reflect the simpler "all in state = compliant" model
-    pending future drift_check wiring.
+    Two operating modes:
+      * ``drift_check=False`` (default, cheap): enumerates cloud,
+        reads state, set-diffs to find unmanaged. All in-state
+        resources land in ``compliant``; ``drifted`` stays empty.
+        Wall-clock ~5-15s for a 50-resource project.
+      * ``drift_check=True`` (PUI-4e, expensive): also runs
+        ``diff_engine.diff_resource()`` per in-scope state resource
+        to partition compliant -> drifted on real per-field deltas.
+        Wall-clock ~30-90s for a 50-resource project.
 
     Args:
         project_id: GCP project to rescan. Caller is responsible for
@@ -120,12 +221,20 @@ def rescan(project_id: str, *, project_root: str) -> DriftReport:
             no silent cwd fallback (P4-1 detector hygiene contract).
             State file is read from
             ``<project_root>/<config.STATE_FILE_NAME>``.
+        drift_check: When True, runs the per-resource diff and
+            populates ``DriftReport.drifted`` with ResourceDrift
+            entries (each carrying DriftItems for the SaaS Detector
+            page's side-by-side viewer). Default False keeps the
+            cheap-rescan contract for callers that only want
+            unmanaged tracking.
 
     Returns:
         DriftReport with three buckets populated:
           * unmanaged: in cloud, not in state (the CG-1 finding)
-          * compliant: all state resources (no drift check ran)
-          * drifted:   [] (drift check is future work)
+          * compliant: in-state resources whose cloud matches HCL
+            (or all in-state resources when ``drift_check=False``)
+          * drifted: in-state resources with per-field deltas
+            (populated only when ``drift_check=True``)
         Plus inventory_errors carrying any asset-types whose
         enumeration failed (so the UI can warn that the unmanaged
         report may be incomplete).
@@ -151,7 +260,8 @@ def rescan(project_id: str, *, project_root: str) -> DriftReport:
         )
 
     log = _log.bind(project_id=project_id, op="rescan")
-    log.info("rescan_start", project_root=project_root)
+    log.info("rescan_start", project_root=project_root,
+             drift_check=drift_check)
     started = time.monotonic()
 
     # Cloud side: full inventory. raise_on_error=False keeps the rescan
@@ -177,11 +287,15 @@ def rescan(project_id: str, *, project_root: str) -> DriftReport:
     # Diff: unmanaged = cloud - state (by (tf_type, name) key).
     unmanaged = _build_unmanaged(cloud_resources, state_resources)
 
-    # Bucket assignment for in-state resources. P4-3: all go to
-    # compliant (no drift check ran). drifted=[] until drift_check
-    # is wired in a future commit.
-    compliant = list(state_resources)
-    drifted: List[ManagedResource] = []
+    # Bucket assignment for in-state resources. PUI-4e: when
+    # drift_check is True, run the per-resource diff to partition
+    # compliant vs drifted. Otherwise keep the cheap default
+    # (everything in-state = compliant).
+    if drift_check:
+        drifted, compliant = _classify_in_state(state_resources, log=log)
+    else:
+        compliant = list(state_resources)
+        drifted: List[ResourceDrift] = []
 
     elapsed = time.monotonic() - started
     report = DriftReport(

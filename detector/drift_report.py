@@ -46,6 +46,7 @@ from typing import Any, List
 
 from importer.inventory import CloudResource
 
+from .diff_engine import ResourceDrift
 from .state_reader import ManagedResource
 
 
@@ -60,11 +61,16 @@ class DriftReport:
     Attributes:
         project_id: The GCP project the rescan was run against.
         drifted: Resources in state whose cloud values differ from the
-            recorded .tf. Populated by terraform plan (left empty by
-            rescan() in P4-3 -- drift_check pathway is future work).
+            recorded .tf. Populated when rescan() is called with
+            ``drift_check=True`` (PUI-4e). Each entry is a
+            ``ResourceDrift`` carrying per-field DriftItems (path,
+            op, state_value, cloud_value) -- the SaaS Detector page
+            renders these in a side-by-side cloud-vs-state viewer.
+            Left empty when ``drift_check=False`` (cheap-rescan mode).
         compliant: Resources in state whose cloud values match .tf.
-            P4-3 default: all in-state resources land here when no
-            drift check runs (treated as nominally compliant).
+            With ``drift_check=False``: all in-state resources land
+            here (nominally compliant). With ``drift_check=True``:
+            only resources whose per-field diff came back clean.
         unmanaged: Resources in the cloud that are NOT in state. The
             CG-1 capability: customer adopts 16 resources Monday, an
             admin spins up a new bucket Tuesday in the console, our
@@ -81,7 +87,7 @@ class DriftReport:
     """
 
     project_id: str
-    drifted: List[ManagedResource] = field(default_factory=list)
+    drifted: List[ResourceDrift] = field(default_factory=list)
     compliant: List[ManagedResource] = field(default_factory=list)
     unmanaged: List[CloudResource] = field(default_factory=list)
     inventory_errors: List[str] = field(default_factory=list)
