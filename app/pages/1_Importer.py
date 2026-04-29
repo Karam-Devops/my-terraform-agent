@@ -211,6 +211,12 @@ with count_col:
     st.metric("Visible", len(df))
 
 # Render the checkbox grid via data_editor.
+#
+# PUI-1B v3 (Option C, hover-tooltip variant): Streamlit's data_editor
+# doesn't support per-cell tooltips, but column-header `help` text shows
+# as a "?" icon on hover -- we use it on Name + Type to teach the
+# disambiguation pattern (a VM and its auto-created boot disk often
+# share the same Name; the Type column tells them apart).
 edited_df = st.data_editor(
     df,
     column_config={
@@ -218,9 +224,28 @@ edited_df = st.data_editor(
             "Select", default=False, width="small",
         ),
         "#": st.column_config.NumberColumn(width="small"),
-        "Name": st.column_config.TextColumn(width="large"),
-        "Type": st.column_config.TextColumn(width="medium"),
-        "Location": st.column_config.TextColumn(width="medium"),
+        "Name": st.column_config.TextColumn(
+            "Name",
+            help="The resource's display name. NOTE: a Name may appear "
+                 "under MULTIPLE Types -- e.g., a VM and its auto-"
+                 "created boot disk both named `poc-vm`. Always check "
+                 "the Type column to confirm which one you're picking.",
+            width="large",
+        ),
+        "Type": st.column_config.TextColumn(
+            "Type",
+            help="The Terraform resource type. Same Name + different "
+                 "Type = different resources (the disambiguator for "
+                 "Name collisions).",
+            width="medium",
+        ),
+        "Location": st.column_config.TextColumn(
+            "Location",
+            help="Zone (e.g. us-central1-a), region (us-central1), or "
+                 "`global`. Empty `—` means the resource is project-"
+                 "scoped without a location (e.g., Pub/Sub topics).",
+            width="medium",
+        ),
     },
     disabled=("#", "Name", "Type", "Location"),
     hide_index=True,

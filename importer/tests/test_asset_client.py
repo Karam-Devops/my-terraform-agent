@@ -253,6 +253,65 @@ class AssetToLegacyDictTests(unittest.TestCase):
         self.assertEqual(result["displayName"], "vm-a")
 
 
+class ExtractLocationFromUrnTests(unittest.TestCase):
+    """PUI-1B v3 (Option A): asset URN encodes the canonical location.
+    Pin the parser so the picker UI always shows location, even when
+    list_assets's RESOURCE content_type omits the top-level zone/
+    region field."""
+
+    def test_compute_zonal_urn(self):
+        self.assertEqual(
+            _asset_client._extract_location_from_urn(
+                "//compute.googleapis.com/projects/p/zones/us-central1-a/"
+                "instances/poc-vm",
+            ),
+            "us-central1-a",
+        )
+
+    def test_compute_regional_urn(self):
+        self.assertEqual(
+            _asset_client._extract_location_from_urn(
+                "//compute.googleapis.com/projects/p/regions/us-central1/"
+                "subnetworks/default",
+            ),
+            "us-central1",
+        )
+
+    def test_compute_global_urn(self):
+        """Compute global resources (firewalls, networks, instance
+        templates) report `global` rather than a region."""
+        self.assertEqual(
+            _asset_client._extract_location_from_urn(
+                "//compute.googleapis.com/projects/p/global/"
+                "firewalls/default-allow-icmp",
+            ),
+            "global",
+        )
+
+    def test_generic_locations_segment(self):
+        """KMS, Cloud Run, GKE: use `locations/<X>` segment."""
+        self.assertEqual(
+            _asset_client._extract_location_from_urn(
+                "//cloudkms.googleapis.com/projects/p/locations/"
+                "us-central1/keyRings/kr-a",
+            ),
+            "us-central1",
+        )
+
+    def test_no_location_segment_returns_none(self):
+        """Some asset types are project-scoped without location
+        (e.g., Pub/Sub topics, IAM service accounts)."""
+        self.assertIsNone(
+            _asset_client._extract_location_from_urn(
+                "//pubsub.googleapis.com/projects/p/topics/my-topic",
+            ),
+        )
+
+    def test_empty_or_none_urn_returns_none(self):
+        self.assertIsNone(_asset_client._extract_location_from_urn(""))
+        self.assertIsNone(_asset_client._extract_location_from_urn(None))
+
+
 class GetResourceStateAsJsonTests(unittest.TestCase):
     """Pin the JSON-serialised wrapper that gcp_client uses."""
 

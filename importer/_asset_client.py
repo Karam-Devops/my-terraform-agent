@@ -132,6 +132,35 @@ def _struct_to_dict(struct_obj: Any) -> dict:
             return {}
 
 
+def _extract_location_from_urn(urn: str) -> Optional[str]:
+    """Extract a location-like segment from an asset URN.
+
+    Cloud Asset Inventory URNs encode location in the path:
+      Compute zonal: //compute.googleapis.com/projects/P/zones/<zone>/instances/X
+      Compute regional: //compute.googleapis.com/projects/P/regions/<region>/subnetworks/X
+      Compute global: //compute.googleapis.com/projects/P/global/firewalls/X
+      Generic: //service.googleapis.com/projects/P/locations/<location>/<type>/X
+
+    PUI-1B v3 fix: list_assets's RESOURCE content_type sometimes omits
+    the top-level `zone`/`region`/`location` fields for sparse types,
+    leaving the picker UI showing "—" for every row. Falling back to
+    the URN guarantees a non-empty location whenever one exists, since
+    the URN is canonical.
+
+    Returns None for resources with no location segment (rare; e.g.
+    Pub/Sub topics that are project-scoped without location).
+    """
+    if not urn:
+        return None
+    parts = urn.split("/")
+    for i, part in enumerate(parts):
+        if part in ("zones", "regions", "locations") and i + 1 < len(parts):
+            return parts[i + 1]
+        if part == "global":
+            return "global"
+    return None
+
+
 def _asset_to_legacy_dict(asset: Any) -> dict:
     """Convert a google.cloud.asset_v1 Asset to the dict shape the
     rest of the importer expects.
@@ -191,12 +220,22 @@ def _asset_to_legacy_dict(asset: Any) -> dict:
             out["displayName"] = asset.name.rsplit("/", 1)[-1]
 
         # === location resolution ===
+        # Order: explicit data fields first, then URN extraction as
+        # last-resort fallback (PUI-1B v3 fix -- list_assets sometimes
+        # returns resources without the top-level location/zone/region
+        # field, leaving the picker UI showing "—" for every row).
         if "location" in data_dict:
             out["location"] = data_dict["location"]
         elif "zone" in data_dict:
             out["location"] = str(data_dict["zone"]).rsplit("/", 1)[-1]
         elif "region" in data_dict:
             out["location"] = str(data_dict["region"]).rsplit("/", 1)[-1]
+        else:
+            # Fallback: extract from the asset URN (always populated
+            # by CAI; carries the canonical location for every type).
+            urn_loc = _extract_location_from_urn(asset.name)
+            if urn_loc:
+                out["location"] = urn_loc
 
         # === additionalAttributes (gcloud asset compatibility shim) ===
         # The legacy gcloud asset search output had an
