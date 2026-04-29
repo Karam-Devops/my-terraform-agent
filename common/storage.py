@@ -107,21 +107,49 @@ _TENANT_ID_RE = re.compile(r"^[a-zA-Z0-9][-a-zA-Z0-9_]{0,62}$")
 # GCP project IDs (same regex as common/workdir).
 _PROJECT_ID_RE = re.compile(r"^[a-z][-a-z0-9]{4,28}[a-z0-9]$")
 
-# Files / directories never persisted to GCS:
+# Files / directories never persisted to GCS.
+#
+# PUI-1Q (2026-04-30) -- semantic clarification + critical bugfix:
+# An entry in this list means "IGNORE this path entirely during
+# persist -- neither upload nor delete from GCS." Both halves matter:
+#
+#   * Upload skip (step 1 / local walk): obvious -- don't push
+#     ephemeral files to GCS.
+#   * Delete skip (step 4 / remote-delete loop): CRITICAL -- the
+#     persist's rsync-style "delete remote blobs not in local set"
+#     would otherwise wipe paths that terraform manages directly in
+#     GCS (terraform-state/default.tfstate, etc.) but never writes
+#     to local disk. Pre-PUI-1Q this loop did NOT consult the
+#     excludes -- it deleted the GCS-backend state file every
+#     persist, silently destroying every successful import. Caught
+#     during the PUI-4b Detector smoke (Detector showed 0 Compliant
+#     despite 8 successful imports because terraform state was gone).
+#
+# Entries:
 #   - _diagnostics/**: translator's YAML blueprint dump
 #     (MTAGENT_PERSIST_BLUEPRINTS=0 disables it anyway in SaaS mode,
 #     but excluding here is belt-and-braces)
 #   - *.backup: terraform's auto-backup files (redundant given GCS
 #     object versioning); also *.tfstate.backup variants
-#   - terraform.tfstate / .tfstate*: with PSA-5's GCS backend, state
-#     lives directly in gs://bucket/.../default.tfstate (managed by
-#     terraform itself with native object-locking). Local
-#     terraform.tfstate should never exist after init -- but if
-#     something legacy leaves one around, we MUST NOT rsync it back
-#     to GCS, because that would clobber whatever terraform has
-#     written to the canonical backend path.
+#   - terraform.tfstate (root only): a stray local state at the workdir
+#     root MUST NOT be rsynced back -- with PSA-5's GCS backend the
+#     canonical state lives in terraform-state/default.tfstate and a
+#     local terraform.tfstate would only exist if init failed to wire
+#     the backend (in which case uploading it would clobber GCS state).
 #   - terraform.tfstate.lock.info: terraform's local lock file (if
 #     any); always ephemeral
+#   - terraform-state/**: PUI-1Q FIX. The GCS-backend state directory.
+#     terraform writes here directly via the gcs backend; local disk
+#     never has these files; persist's delete-orphans loop was wiping
+#     them every request. Marking the whole subtree as ignored fixes
+#     the data-loss bug.
+#   - .terraform/terraform.tfstate: PUI-1Q FIX. terraform's BACKEND
+#     CACHE (records which backend is active + workspace metadata).
+#     Pre-PUI-1Q the basename "terraform.tfstate" pattern over-matched
+#     this file and excluded it from upload, so on next hydrate the
+#     backend cache was missing and terraform commands had to re-init
+#     blindly. Explicit path entry makes the intent clear and the new
+#     bugfix in step 4 stops it from being deleted remotely too.
 _PERSIST_EXCLUDES = (
     "_diagnostics/**",
     "*.backup",
@@ -129,6 +157,8 @@ _PERSIST_EXCLUDES = (
     "*.tfstate.*.backup",
     "terraform.tfstate",
     "terraform.tfstate.lock.info",
+    "terraform-state/**",
+    ".terraform/terraform.tfstate",
 )
 
 
@@ -614,14 +644,35 @@ def persist_workdir(
             blob.upload_from_filename(abs_path)
             uploaded += 1
 
-        # Step 4: delete remote blobs that no longer exist locally
-        # (excludes get treated as "not present locally" which means
-        # they'll be deleted from GCS too -- the desired behavior).
+        # Step 4: delete remote blobs that no longer exist locally,
+        # EXCEPT those matching _PERSIST_EXCLUDES (PUI-1Q fix).
+        #
+        # Pre-PUI-1Q this loop did NOT consult the excludes -- it
+        # deleted ANY remote blob not present locally. That semantic
+        # is wrong for paths that terraform writes directly to GCS
+        # via its GCS backend (terraform-state/default.tfstate +
+        # the .tflock siblings). Those files NEVER exist on local
+        # disk, so step 1's local walk never enters them in
+        # local_files, so step 4 was wiping them every persist --
+        # silently destroying every successful import (caught during
+        # PUI-4b Detector smoke; Detector showed 0 Compliant despite
+        # 8 successful imports because terraform state was gone).
+        #
+        # New semantic: an _PERSIST_EXCLUDES entry means "ignore this
+        # path entirely -- neither upload nor delete remotely." The
+        # remote stays untouched on persist; if the operator wants to
+        # wipe it they use reset_workdir (which uses a different,
+        # explicit code path).
         deleted = 0
         for rel, blob in remote_blobs.items():
-            if rel not in local_files:
-                blob.delete()
-                deleted += 1
+            if rel in local_files:
+                continue
+            if _matches_any_pattern(rel, _PERSIST_EXCLUDES):
+                # Belongs to a remote-managed path (terraform-state/,
+                # backend cache, etc.). Don't delete -- terraform owns it.
+                continue
+            blob.delete()
+            deleted += 1
     except Exception as e:
         _log.error(
             "storage_persist_failed",

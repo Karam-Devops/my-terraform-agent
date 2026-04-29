@@ -270,6 +270,95 @@ def state_rm(tf_address: str, *, workdir: str) -> bool:
         return False
 
 
+def state_pull(*, workdir: str, output_path: str = None) -> bool:
+    """Materialize the active terraform state to a local JSON file.
+
+    PUI-4 (2026-04-30): the Detector's state_reader.read_state expects
+    a local ``terraform.tfstate`` file. With the GCS backend (PSA-5,
+    enabled in SaaS via MTAGENT_USE_GCS_BACKEND=1), no such local file
+    exists -- terraform writes state directly to
+    ``gs://<bucket>/.../terraform-state/default.tfstate``. This helper
+    runs ``terraform state pull`` and writes the JSON output to a
+    local path so the Detector can read it.
+
+    Idempotent: safe to call when local state ALREADY exists -- terraform
+    state pull is read-only and just reads from the configured backend
+    (whether local or GCS).
+
+    PUI-4b smoke fix (2026-04-30): force-re-init before pull, NOT just
+    `_ensure_initialized`. Original backstory: SaaS persist_workdir
+    excluded "terraform.tfstate" via basename match, which over-matched
+    AND excluded ``.terraform/terraform.tfstate`` (the GCS backend's
+    metadata cache). After hydrate, the backend cache was missing -->
+    `terraform state pull` failed with "Backend initialization required".
+    PUI-1Q (2026-04-30) fixed the persist excludes to scope-correctly
+    (basename "terraform.tfstate" no longer over-matches; explicit
+    ".terraform/terraform.tfstate" entry is now ignore-only, NOT
+    upload-skip), so the backend cache now round-trips. This forced
+    init still runs as belt-and-braces: it's idempotent and cheap
+    (~3-10s on cached providers) and protects against any future
+    persist regression that drops the cache.
+
+    Args:
+        workdir: per-project workdir absolute path (must have
+            terraform initialized -- caller's responsibility).
+        output_path: where to write the JSON. Defaults to
+            ``<workdir>/terraform.tfstate`` (the conventional location
+            state_reader looks for).
+
+    Returns:
+        True iff the pull + write succeeded. False on any failure.
+        Caller decides whether to surface to UI or treat as
+        "no state available -> all resources unmanaged."
+    """
+    # Force a fresh init so the backend cache is guaranteed present.
+    # Regular _ensure_initialized would return True even when the
+    # backend cache is gone (only the .terraform/ dir is checked).
+    if init(workdir=workdir, upgrade=False) is None:
+        log.error("state_pull_aborted_init_failed", workdir=workdir)
+        return False
+
+    target_path = output_path or os.path.join(workdir, "terraform.tfstate")
+    log.info("state_pull_start", workdir=workdir, target_path=target_path)
+    args = [config.TERRAFORM_PATH, "state", "pull"]
+    try:
+        result = _run_terraform(
+            args,
+            stage="state_pull",
+            timeout_s=_TIMEOUT_STATE_S,
+            check=True,
+            capture_output=True,
+            text=True,
+            cwd=workdir,
+        )
+        # terraform state pull writes the full state JSON to stdout
+        # (regardless of backend). We persist it locally so
+        # state_reader.read_state can parse it the normal way.
+        with open(target_path, "w", encoding="utf-8") as f:
+            f.write(result.stdout)
+        log.info(
+            "state_pull_complete",
+            workdir=workdir,
+            target_path=target_path,
+            bytes_written=len(result.stdout),
+        )
+        return True
+    except subprocess.CalledProcessError as e:
+        error_output = (
+            e.stderr if hasattr(e, "stderr") and e.stderr else str(e)
+        )
+        log.error("state_pull_failed", workdir=workdir, error=error_output)
+        return False
+    except (FileNotFoundError, subprocess.TimeoutExpired, OSError) as e:
+        log.error(
+            "state_pull_subprocess_error",
+            workdir=workdir,
+            error_type=type(e).__name__,
+            error=str(e),
+        )
+        return False
+
+
 def import_resource(mapping, force_refresh=False):
     """Runs 'terraform import', ensuring initialization first.
 

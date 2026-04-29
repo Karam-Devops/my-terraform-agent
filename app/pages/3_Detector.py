@@ -1,0 +1,804 @@
+# app/pages/3_Detector.py
+"""Detector page (PUI-4) — the star of the SaaS demo.
+
+Firefly's killer pattern is "show me what's NOT in IaC" -- coverage
+percentage at the top, color-coded buckets, per-resource Codify CTAs
+that flow back to the Inventory page in one click. This page maps
+detector.rescan.rescan() output (a DriftReport) onto that UX.
+
+Three result buckets get rendered as tabs:
+
+  Unmanaged (the demo's hero finding)
+    Resources visible in cloud but NOT in terraform state. The CG-1
+    capability: customer adopts 16 resources Monday, an admin spins
+    up a new bucket Tuesday in the console, our Tuesday rescan
+    surfaces that bucket here. Per-row "Codify in Inventory" deep-link
+    (PUI-4d) takes the operator to Inventory with the resource
+    pre-selected for import.
+
+  Compliant
+    Resources in state. Currently catches everything in state since
+    PUI-4e (drift_check wiring) is deferred -- when the drift_check
+    lands, "compliant" narrows to "in state AND cloud values match
+    HCL" and the Drift bucket actually populates.
+
+  Drift
+    Resources in state whose cloud values diverge from HCL. Always
+    empty until PUI-4e ships. Tab still rendered so operators can
+    see the future shape of the bucket.
+
+  Errors
+    Asset types whose enumeration failed during the cloud-side
+    discovery. Non-empty here means the Unmanaged report may have
+    false negatives (resources of those types couldn't even be
+    checked). Surfaced so customers don't false-trust an "0
+    unmanaged" report when discovery was actually incomplete.
+
+State-reading caveat (PSA-5 + PUI-4):
+The detector's state_reader expects a local terraform.tfstate file.
+With GCS backend (MTAGENT_USE_GCS_BACKEND=1, set in SaaS), terraform
+writes state to GCS and there is no local file. We materialize it
+on the fly via terraform_client.state_pull() before calling rescan.
+
+Engine wiring:
+  * detector.rescan.rescan(project_id, project_root) -> DriftReport
+  * importer.terraform_client.state_pull (PUI-4 helper) materializes
+    GCS state to local file before rescan runs
+  * common.snapshots.write_snapshot already wired inside rescan
+    (Dashboard reads from there in PUI-2)
+
+Theme: same Firefly DARK polish as Inventory + Translator via
+apply_theme_polish(). Mint accent on Run rescan; red on Danger Zone;
+status pills follow the Material palette.
+"""
+
+import os
+import time
+
+import streamlit as st
+
+from app.ui.sidebar import render_sidebar
+from app.ui.error_surface import render_error
+from app.ui.theme import apply_theme_polish
+
+
+# Page chrome
+st.set_page_config(
+    page_title="mtagent · Detector",
+    page_icon="🔍",
+    layout="wide",
+)
+
+apply_theme_polish()
+
+project_id = render_sidebar()
+
+st.title("🔍 Detector")
+st.caption(
+    "Compare cloud reality vs terraform state. Find resources NOT yet "
+    "codified (Unmanaged) and resources whose HCL drifted from cloud "
+    "values (Drift)."
+)
+
+if not project_id:
+    st.warning("Pick a project in the sidebar to get started.", icon="⚠️")
+    st.stop()
+
+st.markdown(f"**Project:** `{project_id}`")
+
+# --- Session-state keys -------------------------------------------------
+_SS_RUN_LOCK = "_detector_run_lock"
+_SS_LAST_RESULT = f"_detector_last_result_{project_id}"
+
+
+# --- Tier-A run lock + PUI-3b auto-recover -----------------------------
+import time as _time
+
+_RUN_TIMEOUT_S = 600
+_lock = st.session_state.get(_SS_RUN_LOCK)
+_last_result_for_recover = st.session_state.get(_SS_LAST_RESULT)
+
+if _lock is not None:
+    _elapsed = _time.time() - _lock.get("start_ts", 0)
+    if _elapsed > _RUN_TIMEOUT_S:
+        st.session_state.pop(_SS_RUN_LOCK, None)
+        _lock = None
+    elif (
+        _last_result_for_recover is not None
+        and _last_result_for_recover.get("_cached_at", 0)
+        > _lock.get("start_ts", 0)
+    ):
+        # PUI-3b auto-recover: stale lock from websocket-dropped run.
+        print(
+            f"PUI-3b auto-recover: clearing stale Detector run-lock "
+            f"({int(_elapsed)}s old; result cached "
+            f"{int(_time.time() - _last_result_for_recover['_cached_at'])}s "
+            f"ago)."
+        )
+        st.session_state.pop(_SS_RUN_LOCK, None)
+        _lock = None
+
+
+# --- Danger Zone (always visible) --------------------------------------
+# Detector rescan is read-only on cloud + state, so Reset is far less
+# destructive here than on Inventory. Just clears the cached
+# DriftReport from session_state so the next render starts fresh
+# (e.g., after an external state mutation).
+def _render_danger_zone() -> None:
+    with st.expander("⚠️ Danger zone", expanded=False):
+        st.markdown(
+            f"### Reset rescan results for `{project_id}`\n\n"
+            f"This clears the cached DriftReport from this Streamlit "
+            f"session. Cloud + terraform state are NOT touched -- "
+            f"rescan is purely read-only.\n\n"
+            f"_Use when you want to redo a rescan from scratch (e.g., "
+            f"after running an external `terraform apply` or codifying "
+            f"new resources via Inventory)._"
+        )
+        typed_confirm = st.text_input(
+            f"Type the project ID to confirm: `{project_id}`",
+            value="",
+            key="dz_dt_confirm",
+            placeholder=project_id,
+        )
+        confirm_match = typed_confirm.strip() == project_id
+        reset_btn_disabled = (
+            (not confirm_match) or (_lock is not None)
+        )
+        reset_help = (
+            "Type the project ID exactly to enable this button."
+            if not confirm_match
+            else "Rescan in progress; wait for it to complete."
+            if _lock is not None
+            else "Clears the cached DriftReport. Cloud + state untouched."
+        )
+        if st.button(
+            "🗑️ Reset rescan results",
+            type="primary",
+            disabled=reset_btn_disabled,
+            key="dz_dt_reset_btn",
+            help=reset_help,
+        ):
+            st.session_state.pop(_SS_LAST_RESULT, None)
+            st.success(
+                f"✅ Rescan results cleared for `{project_id}`. "
+                f"Click Run rescan above for a fresh scan.",
+                icon="✅",
+            )
+
+
+_render_danger_zone()
+
+
+# --- Run rescan trigger ------------------------------------------------
+st.markdown("---")
+st.markdown("### Run rescan")
+st.caption(
+    "Cloud-side enumeration via Cloud Asset Inventory + state-side "
+    "read of `terraform.tfstate`. Set-diffs the two to surface "
+    "Unmanaged (in cloud, not in IaC). Cheap (~5-15s); no LLM cost."
+)
+
+run_col, info_col = st.columns([1, 2])
+with run_col:
+    rescan_btn_slot = st.empty()
+    rescan_button = rescan_btn_slot.button(
+        "▶ Run rescan" if not _lock
+        else f"Rescanning ({int(_time.time() - _lock['start_ts'])}s)…",
+        type="primary",
+        disabled=(_lock is not None),
+        key="dt_rescan_btn",
+        use_container_width=True,
+    )
+with info_col:
+    if _lock is not None:
+        st.warning(
+            f"⏳ Rescan in progress for **{_lock.get('project_id')}**; "
+            f"started {int(_time.time() - _lock['start_ts'])}s ago.",
+            icon="⏳",
+        )
+    elif _last_result_for_recover is not None:
+        _last_dur = _last_result_for_recover.get("duration_s", 0)
+        st.caption(
+            f"_Last rescan: {_last_dur:.1f}s. Click **Run rescan** to "
+            f"refresh._"
+        )
+    else:
+        st.caption(
+            "_No rescan run yet for this project in this session. "
+            "Click **Run rescan** above._"
+        )
+
+
+# --- Render last DriftReport (if present) ------------------------------
+
+last_result = st.session_state.get(_SS_LAST_RESULT)
+
+if last_result and not rescan_button:
+    st.markdown("---")
+    _drifted = last_result.get("drifted_count", 0)
+    _compliant = last_result.get("compliant_count", 0)
+    _errors = last_result.get("inventory_error_count", 0)
+    _in_state = last_result.get("total_in_state", 0)
+    _in_cloud = last_result.get("total_in_cloud", 0)
+
+    # ------------------------------------------------------------------
+    # PUI-4g (2026-04-30): Firefly-style "Unmanaged" definition.
+    # ------------------------------------------------------------------
+    # The strict engine-side definition counts ANY resource not in
+    # state as Unmanaged. That over-reports for resources auto-spawned
+    # by a managed parent (e.g., GKE cluster auto-creates node-pool
+    # VMs, their boot disks, default service accounts; KMS key rings
+    # auto-include keys; Pub/Sub topics include subscriptions).
+    # Operators don't separately codify these in HCL -- the parent
+    # resource manages them.
+    #
+    # Firefly's UX: hide auto-managed children from the Unmanaged
+    # count by default; toggle to reveal. Counts the genuinely-orphan
+    # resources only (= "things you should probably codify").
+    #
+    # Heuristics applied per resource type. Conservative -- a wrong
+    # match HIDES a resource that should be flagged, so we only match
+    # high-confidence patterns. Toggle below lets the operator audit
+    # the heuristic by un-hiding.
+    #
+    # Long-term (PUI-4g v2): move this classification into the
+    # detector engine itself so the DriftReport carries a third
+    # bucket (`child_of_managed`) and snapshots reflect the same
+    # taxonomy. UI-side for now to ship demo-ready in one round.
+    _unmanaged_raw = last_result.get("unmanaged", []) or []
+    _compliant_raw = last_result.get("compliant", []) or []
+
+    # Lookup sets for parent detection.
+    _compliant_cluster_names = {
+        r.get("hcl_name") for r in _compliant_raw
+        if r.get("tf_type") == "google_container_cluster"
+    }
+    _compliant_vm_names = {
+        r.get("hcl_name") for r in _compliant_raw
+        if r.get("tf_type") == "google_compute_instance"
+    }
+    _compliant_keyring_names = {
+        r.get("hcl_name") for r in _compliant_raw
+        if r.get("tf_type") == "google_kms_key_ring"
+    }
+    _compliant_topic_names = {
+        r.get("hcl_name") for r in _compliant_raw
+        if r.get("tf_type") == "google_pubsub_topic"
+    }
+
+    def _classify_parent_owner(r: dict) -> str:
+        """Return human-readable parent ownership tag, or empty string
+        if the resource is genuinely orphan.
+
+        PUI-4g v2 (2026-04-30 smoke fix): the v1 heuristic required a
+        parent in Compliant before classifying a child as "owned" --
+        which meant clusters-not-yet-imported left all their child
+        resources falsely flagged as Unmanaged (~50+ false positives
+        on the smoke project). v2 fires UNCONDITIONALLY for high-
+        confidence name patterns. Trade-off: a manually-named
+        resource starting with "gke-" gets hidden, but that's such
+        an unusual choice (the prefix is reserved by Google) that
+        false-positive risk is acceptable.
+
+        Also fixes the underscore-vs-hyphen mismatch between state's
+        hcl_name (sanitized snake_case) and cloud's actual hyphenated
+        name -- now tries both spellings for parent matching.
+
+        Ordered most-specific to least. Each rule includes a comment
+        explaining why the heuristic is safe.
+        """
+        name = r.get("cloud_name", "") or ""
+        urn = r.get("cloud_urn", "") or ""
+        tf_type = r.get("tf_type", "")
+
+        # GKE auto-spawn: node-pool VMs, boot disks, NEGs, instance
+        # groups, etc. All have name prefix `gke-`. The "gke-" prefix
+        # is reserved by GKE -- operators don't manually create
+        # resources with this prefix, so unconditional matching is
+        # safe in practice. Try to attribute to a SPECIFIC managed
+        # cluster first (handling underscore<->hyphen sanitization);
+        # fall back to "GKE cluster (not yet imported)" so the child
+        # is still hidden from the genuinely-unmanaged count.
+        if name.startswith("gke-"):
+            for cluster in _compliant_cluster_names:
+                # state's hcl_name uses underscores; cloud uses hyphens
+                cluster_hyphen = cluster.replace("_", "-")
+                if (
+                    name.startswith(f"gke-{cluster}-")
+                    or name.startswith(f"gke-{cluster_hyphen}-")
+                ):
+                    return f"GKE cluster `{cluster_hyphen}`"
+            # Cluster not in state (quarantined? not yet imported?) --
+            # but the gke- prefix is so distinctive that we still
+            # classify as auto-spawn so the demo's Unmanaged count
+            # reflects "things to codify" not "GKE noise."
+            return "GKE cluster (not yet imported)"
+
+        # Default project service accounts. GCP auto-creates several
+        # SAs on project enablement + service activation; operators
+        # never codify these in HCL. URN/email patterns are the
+        # high-confidence signal.
+        if tf_type == "google_service_account":
+            # @-domain checks against the full URN
+            sa_default_domains = (
+                "@cloudservices.gserviceaccount.com",
+                "@developer.gserviceaccount.com",
+                "@cloudbuild.gserviceaccount.com",
+                "@compute-system.iam.gserviceaccount.com",
+                "@container-engine-robot.iam.gserviceaccount.com",
+                "@gcp-sa-",  # any "gcp-sa-*" Google-managed SA
+                "@dataproc-accounts.iam.gserviceaccount.com",
+                "@cloud-tpu.iam.gserviceaccount.com",
+            )
+            if any(d in urn or d in name for d in sa_default_domains):
+                return "GCP default service account"
+            # Numeric-prefix SAs are project defaults
+            # (e.g. 1234567890-compute@developer.gserviceaccount.com)
+            local = name.split("@", 1)[0] if "@" in name else name
+            if local.split("-")[0].isdigit():
+                return "GCP default service account"
+            if local.endswith("-compute") or local == "default":
+                return "GCP default service account"
+
+        # GCE auto-created boot disk: name matches a managed VM
+        # (default GCE behavior creates boot disk with the VM's name).
+        if tf_type == "google_compute_disk":
+            if name in _compliant_vm_names:
+                return f"VM `{name}` (boot disk)"
+            # Try hyphenated version (state hcl_name -> cloud name)
+            for vm in _compliant_vm_names:
+                if name == vm.replace("_", "-"):
+                    return f"VM `{vm.replace('_', '-')}` (boot disk)"
+
+        # KMS keys nested under a managed keyring (URN encodes parent).
+        if tf_type == "google_kms_crypto_key":
+            for keyring in _compliant_keyring_names:
+                if (
+                    f"/keyRings/{keyring}/" in urn
+                    or f"/keyRings/{keyring.replace('_', '-')}/" in urn
+                ):
+                    return f"KMS key ring `{keyring.replace('_', '-')}`"
+
+        # Pub/Sub subscriptions nested under a managed topic.
+        if tf_type == "google_pubsub_subscription":
+            for topic in _compliant_topic_names:
+                topic_hyphen = topic.replace("_", "-")
+                if (
+                    f"/topics/{topic}" in urn
+                    or f"/topics/{topic_hyphen}" in urn
+                    or topic in name
+                    or topic_hyphen in name
+                ):
+                    return f"Pub/Sub topic `{topic_hyphen}`"
+
+        # Default networks/subnets that GCP creates per-project on
+        # API enablement. Customers don't typically codify these.
+        if tf_type in ("google_compute_network", "google_compute_subnetwork"):
+            if name == "default":
+                return "GCP default VPC"
+
+        return ""  # genuinely orphan
+
+    # Partition the raw unmanaged list.
+    _unmanaged_orphan = []
+    _unmanaged_child = []
+    for _r in _unmanaged_raw:
+        owner = _classify_parent_owner(_r)
+        if owner:
+            _r = {**_r, "_parent_owner": owner}
+            _unmanaged_child.append(_r)
+        else:
+            _unmanaged_orphan.append(_r)
+
+    # PUI-4g: customer-facing "Unmanaged" count is just the orphans.
+    _unmanaged = len(_unmanaged_orphan)
+    _unmanaged_hidden = len(_unmanaged_child)
+
+    # Coverage gauge (Firefly's hero metric).
+    if _in_cloud > 0:
+        _coverage_pct = round(100.0 * _in_state / _in_cloud)
+    else:
+        _coverage_pct = 0
+    st.markdown(f"### Coverage: **{_coverage_pct}%** codified")
+    st.progress(
+        min(_in_state, _in_cloud) / max(_in_cloud, 1),
+        text=(
+            f"{_in_state} of {_in_cloud} cloud resource(s) tracked by "
+            f"Terraform"
+        ),
+    )
+
+    # 4-metric grid.
+    m1, m2, m3, m4 = st.columns(4)
+    m1.metric("🟢 Compliant", _compliant)
+    m2.metric("🟡 Drift", _drifted)
+    m3.metric("🔴 Unmanaged", _unmanaged)
+    m4.metric("⚠️ Errors", _errors)
+
+    if _errors > 0:
+        st.warning(
+            f"⚠ Cloud-side enumeration failed for {_errors} asset "
+            f"type(s) -- the **Unmanaged** count below may be a "
+            f"lower bound (resources of those types couldn't be "
+            f"checked). See the Errors tab for the failed types.",
+            icon="⚠️",
+        )
+
+    # Tabbed bucket view. Unmanaged first (the demo's hero finding).
+    tab_unm, tab_comp, tab_drift, tab_err = st.tabs([
+        f"🔴 Unmanaged ({_unmanaged})",
+        f"🟢 Compliant ({_compliant})",
+        f"🟡 Drift ({_drifted})",
+        f"⚠️ Errors ({_errors})",
+    ])
+
+    import pandas as pd
+
+    # ---- UNMANAGED TAB (PUI-4g Firefly-style) -------------------------
+    with tab_unm:
+        if not _unmanaged_orphan and not _unmanaged_child:
+            st.success(
+                "🎉 Zero unmanaged resources -- everything in this "
+                "project is codified.",
+                icon="🎉",
+            )
+        else:
+            st.caption(
+                "These resources exist in your GCP project but are "
+                "**not tracked by Terraform**. Auto-spawned children "
+                "of managed parents (e.g. GKE node-pool VMs, default "
+                "service accounts) are hidden by default — toggle "
+                "below to reveal."
+            )
+
+            # Filter + child-toggle row
+            type_options = sorted({
+                r.get("tf_type", "")
+                for r in _unmanaged_orphan + _unmanaged_child
+            })
+            f_col, t_col, c_col = st.columns([2, 1.2, 1])
+            with f_col:
+                type_filter = st.multiselect(
+                    "Filter by type",
+                    options=type_options,
+                    default=[],
+                    placeholder="Show all types",
+                    key="dt_unm_type_filter",
+                )
+            with t_col:
+                show_children = st.checkbox(
+                    "Show child resources of managed parents",
+                    value=False,
+                    key="dt_unm_show_children",
+                    help=(
+                        "OFF (default, Firefly-style): only genuinely-"
+                        "orphan resources count as Unmanaged. ON: also "
+                        "show resources auto-managed by a parent in "
+                        "Compliant -- useful for auditing the heuristic."
+                    ),
+                )
+
+            # Build the visible rows, partitioned.
+            orphan_rows = []
+            for r in _unmanaged_orphan:
+                if type_filter and r.get("tf_type") not in type_filter:
+                    continue
+                orphan_rows.append({
+                    "#": len(orphan_rows) + 1,
+                    "Status": "🔴 Unmanaged",
+                    "Resource": (
+                        r.get("cloud_name", "")
+                        or r.get("cloud_urn", "")[-50:]
+                    ),
+                    "Type": r.get("tf_type", ""),
+                    "Location": r.get("location") or "—",
+                })
+            child_rows = []
+            if show_children:
+                for r in _unmanaged_child:
+                    if (
+                        type_filter
+                        and r.get("tf_type") not in type_filter
+                    ):
+                        continue
+                    child_rows.append({
+                        "#": len(child_rows) + 1,
+                        "Status": "🟦 Auto-managed",
+                        "Resource": (
+                            r.get("cloud_name", "")
+                            or r.get("cloud_urn", "")[-50:]
+                        ),
+                        "Type": r.get("tf_type", ""),
+                        "Owned by": r.get("_parent_owner", ""),
+                        "Location": r.get("location") or "—",
+                    })
+
+            with c_col:
+                st.metric(
+                    "Visible",
+                    len(orphan_rows)
+                    + (len(child_rows) if show_children else 0),
+                )
+
+            # Render orphans (the demo's hero finding).
+            if orphan_rows:
+                st.markdown(
+                    f"#### 🔴 Genuinely unmanaged "
+                    f"({len(orphan_rows)})"
+                )
+                st.dataframe(
+                    pd.DataFrame(orphan_rows),
+                    column_config={
+                        "#": st.column_config.NumberColumn(
+                            width="small",
+                        ),
+                        "Status": st.column_config.TextColumn(
+                            "Status", width="small",
+                        ),
+                        "Resource": st.column_config.TextColumn(
+                            "Resource", width="large",
+                        ),
+                        "Type": st.column_config.TextColumn(
+                            "Type", width="medium",
+                        ),
+                        "Location": st.column_config.TextColumn(
+                            "Location", width="small",
+                        ),
+                    },
+                    hide_index=True,
+                    use_container_width=True,
+                )
+                st.info(
+                    "📥 **Codify these in Inventory**: head to the "
+                    "**Inventory** page, Discover, then pick + Run "
+                    "import for the resources you want IaC-managed. "
+                    "(Per-row deep-link button queued as PUI-4d.)",
+                    icon="📥",
+                )
+            elif _unmanaged_child and not show_children:
+                st.success(
+                    f"🎉 Zero genuinely-unmanaged resources. "
+                    f"({len(_unmanaged_child)} auto-managed child "
+                    f"resource(s) hidden — toggle above to view.)",
+                    icon="🎉",
+                )
+
+            # Render auto-managed children when toggled.
+            if show_children and child_rows:
+                st.markdown("---")
+                st.markdown(
+                    f"#### 🟦 Auto-managed by parent in Compliant "
+                    f"({len(child_rows)})"
+                )
+                st.caption(
+                    "_These resources exist in your cloud but are "
+                    "auto-managed by a parent resource that IS in "
+                    "your terraform state. Codifying them separately "
+                    "is usually wrong (the parent recreates them). "
+                    "Heuristic-based — review if any look misclassified._"
+                )
+                st.dataframe(
+                    pd.DataFrame(child_rows),
+                    column_config={
+                        "#": st.column_config.NumberColumn(
+                            width="small",
+                        ),
+                        "Status": st.column_config.TextColumn(
+                            "Status", width="small",
+                        ),
+                        "Resource": st.column_config.TextColumn(
+                            "Resource", width="large",
+                        ),
+                        "Type": st.column_config.TextColumn(
+                            "Type", width="medium",
+                        ),
+                        "Owned by": st.column_config.TextColumn(
+                            "Owned by", width="medium",
+                        ),
+                        "Location": st.column_config.TextColumn(
+                            "Location", width="small",
+                        ),
+                    },
+                    hide_index=True,
+                    use_container_width=True,
+                )
+
+    # ---- COMPLIANT TAB ------------------------------------------------
+    with tab_comp:
+        compliant_list = last_result.get("compliant", [])
+        if not compliant_list:
+            st.info(
+                "No resources in terraform state for this project yet. "
+                "Run an import in **Inventory** first.",
+                icon="ℹ️",
+            )
+        else:
+            st.caption(
+                f"_{len(compliant_list)} resource(s) tracked by "
+                f"Terraform. Drift detection (per-resource `terraform "
+                f"plan`) is queued as PUI-4e -- once shipped, items "
+                f"with cloud-vs-HCL drift will move to the Drift tab._"
+            )
+            type_options = sorted({
+                r.get("tf_type", "") for r in compliant_list
+            })
+            f_col, c_col = st.columns([3, 1])
+            with f_col:
+                type_filter = st.multiselect(
+                    "Filter by type",
+                    options=type_options,
+                    default=[],
+                    placeholder="Show all types",
+                    key="dt_comp_type_filter",
+                )
+            rows = []
+            for r in compliant_list:
+                if type_filter and r.get("tf_type") not in type_filter:
+                    continue
+                rows.append({
+                    "#": len(rows) + 1,
+                    "Status": "🟢 Compliant",
+                    "Resource": r.get("hcl_name", ""),
+                    "Type": r.get("tf_type", ""),
+                    "TF address": r.get("tf_address", ""),
+                })
+            with c_col:
+                st.metric("Visible", len(rows))
+            if rows:
+                st.dataframe(
+                    pd.DataFrame(rows),
+                    hide_index=True,
+                    use_container_width=True,
+                )
+
+    # ---- DRIFT TAB ----------------------------------------------------
+    with tab_drift:
+        drift_list = last_result.get("drifted", [])
+        if not drift_list:
+            st.info(
+                "No drift detected. **Note:** drift detection (per-"
+                "resource `terraform plan`) is queued as **PUI-4e** "
+                "and not yet wired -- this tab will populate once "
+                "that ships. Today, all in-state resources land in "
+                "the Compliant tab regardless of cloud-vs-HCL match.",
+                icon="ℹ️",
+            )
+        else:
+            # Future-proofed render path; mirror compliant table shape
+            # since drift items are the same ManagedResource type +
+            # additional drift detail.
+            rows = [
+                {
+                    "#": i + 1,
+                    "Status": "🟡 Drift",
+                    "Resource": r.get("hcl_name", ""),
+                    "Type": r.get("tf_type", ""),
+                    "TF address": r.get("tf_address", ""),
+                }
+                for i, r in enumerate(drift_list)
+            ]
+            st.dataframe(
+                pd.DataFrame(rows),
+                hide_index=True,
+                use_container_width=True,
+            )
+
+    # ---- ERRORS TAB ---------------------------------------------------
+    with tab_err:
+        errors_list = last_result.get("inventory_errors", [])
+        if not errors_list:
+            st.success(
+                "No enumeration errors -- the cloud inventory is "
+                "complete.",
+                icon="🎉",
+            )
+        else:
+            st.error(
+                f"❌ {len(errors_list)} asset type(s) failed to "
+                f"enumerate. The Unmanaged tab may be missing "
+                f"resources of these types.",
+                icon="❌",
+            )
+            for err in errors_list:
+                st.markdown(f"- `{err}`")
+
+    with st.expander("Full DriftReport (structured)", expanded=False):
+        st.json(last_result)
+
+
+if not rescan_button:
+    st.stop()
+
+
+# --- Live rescan path --------------------------------------------------
+
+if _lock is not None:
+    st.warning(
+        "Rescan already in progress; ignoring click.", icon="⚠️",
+    )
+    st.stop()
+
+# Immediate visual feedback (mirrors Inventory + Translator pattern):
+rescan_btn_slot.button(
+    "⚡ Rescanning…",
+    type="secondary",
+    disabled=True,
+    key="dt_rescan_btn_disabled_swap",
+    use_container_width=True,
+)
+st.toast("⚡ Starting rescan...", icon="🚀")
+st.success(
+    f"🚀 Rescan started for **{project_id}**. Loading engine "
+    f"modules + cloud inventory...",
+    icon="🚀",
+)
+
+st.session_state[_SS_RUN_LOCK] = {
+    "start_ts": _time.time(),
+    "project_id": project_id,
+}
+
+from app.middleware import workdir_context  # noqa: E402
+from detector.rescan import rescan as _rescan  # noqa: E402
+from importer.terraform_client import state_pull  # noqa: E402
+
+started = time.monotonic()
+try:
+    with st.spinner(
+        f"Rescanning {project_id} … (cloud inventory + state diff; "
+        f"~5-15s depending on resource count)"
+    ):
+        with workdir_context(project_id) as workdir:
+            # PUI-4: ensure local terraform.tfstate exists. With GCS
+            # backend (MTAGENT_USE_GCS_BACKEND=1, default in SaaS),
+            # terraform writes state to GCS -- the detector's
+            # state_reader needs a local file. state_pull is
+            # idempotent: if the local file already exists, it
+            # overwrites with a fresh copy (always safe).
+            state_file = os.path.join(workdir, "terraform.tfstate")
+            pulled_ok = state_pull(
+                workdir=workdir, output_path=state_file,
+            )
+            if not pulled_ok:
+                # Soft-fail: rescan can still run with empty state
+                # (everything cloud-side will land in Unmanaged).
+                # Surface a hint so the operator knows.
+                st.info(
+                    "ℹ️ Couldn't pull terraform state (likely no "
+                    "imports run yet for this project, OR backend "
+                    "init not done). Continuing with empty state -- "
+                    "all cloud resources will appear as Unmanaged.",
+                    icon="ℹ️",
+                )
+
+            report = _rescan(project_id, project_root=workdir)
+except Exception as e:  # noqa: BLE001
+    st.session_state.pop(_SS_RUN_LOCK, None)
+    render_error(e, context=f"running rescan for {project_id}")
+    st.stop()
+
+# Clean exit.
+st.session_state.pop(_SS_RUN_LOCK, None)
+duration = time.monotonic() - started
+result_dict = report.as_fields()
+# as_fields() drops the heavy per-bucket lists. Restore them so the UI
+# can render. asdict-style for each bucket; mirrors Inventory's pattern.
+from dataclasses import asdict
+result_dict["unmanaged"] = [asdict(r) for r in report.unmanaged]
+result_dict["compliant"] = [asdict(r) for r in report.compliant]
+result_dict["drifted"] = [asdict(r) for r in report.drifted]
+result_dict["inventory_errors"] = list(report.inventory_errors)
+# Restore counts (as_fields included them, but defensive).
+result_dict["unmanaged_count"] = report.unmanaged_count
+result_dict["compliant_count"] = report.compliant_count
+result_dict["drifted_count"] = report.drifted_count
+result_dict["inventory_error_count"] = report.inventory_error_count
+result_dict["total_in_state"] = report.total_in_state
+result_dict["total_in_cloud"] = report.total_in_cloud
+result_dict["duration_s"] = round(duration, 2)
+# PUI-3b: stamp cache time for auto-recover.
+result_dict["_cached_at"] = _time.time()
+st.session_state[_SS_LAST_RESULT] = result_dict
+
+st.rerun()
