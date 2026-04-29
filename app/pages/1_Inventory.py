@@ -91,9 +91,31 @@ _SS_LAST_RESULT = f"_importer_last_result_{project_id}"
 import time as _time
 _RUN_TIMEOUT_S = 600
 _lock = st.session_state.get(_SS_RUN_LOCK)
+_last_result_for_recover = st.session_state.get(_SS_LAST_RESULT)
 if _lock is not None:
     _elapsed = _time.time() - _lock.get("start_ts", 0)
+    # Hard timeout: 10-min absolute ceiling (catches genuine hangs).
     if _elapsed > _RUN_TIMEOUT_S:
+        st.session_state.pop(_SS_RUN_LOCK, None)
+        _lock = None
+    # PUI-3b auto-recover (2026-04-30): the lock might be stale because
+    # the engine completed + result was cached, but the browser missed
+    # the st.rerun() message (Cloud Run idle-WebSocket timeout drops
+    # the connection during long blocking calls). Detection: a result
+    # was cached AFTER this lock acquired -> the engine ran to
+    # completion -> safe to clear the stale lock and render the
+    # success card. Same fix mirrored in app/pages/2_Translator.py.
+    elif (
+        _last_result_for_recover is not None
+        and _last_result_for_recover.get("_cached_at", 0)
+        > _lock.get("start_ts", 0)
+    ):
+        print(
+            f"PUI-3b auto-recover: clearing stale Importer run-lock "
+            f"({int(_elapsed)}s old; result cached "
+            f"{int(_time.time() - _last_result_for_recover['_cached_at'])}s "
+            f"ago). Engine completed but websocket likely dropped."
+        )
         st.session_state.pop(_SS_RUN_LOCK, None)
         _lock = None
 
@@ -1007,6 +1029,10 @@ st.session_state.pop(_SS_RUN_LOCK, None)
 duration = time.monotonic() - started
 result_dict = result.as_fields()
 result_dict["duration_s"] = round(duration, 2)
+# PUI-3b: stamp the wall-clock at cache time so the page-top
+# auto-recover can detect "result is newer than the currently-held
+# lock" -> stale lock from a websocket-dropped run -> safe to clear.
+result_dict["_cached_at"] = _time.time()
 st.session_state[_SS_LAST_RESULT] = result_dict
 
 # PUI-1F: bust the persisted-files cache so the picker grid's Status

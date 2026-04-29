@@ -1049,3 +1049,239 @@ def read_workdir_file(
     client = _get_gcs_client()
     blob = client.bucket(bucket_name).blob(blob_path)
     return blob.download_as_text()
+
+
+# ----------------------------------------------------------------------
+# PUI-3 Translator surface helpers (2026-04-29).
+# Translator outputs land at:
+#   gs://<bucket>/tenants/<t>/projects/<p>/translated/<target>/*.tf
+# where <target> is "aws" or "azure". Each helper here is per-target so
+# the UI can list/read/reset one target's outputs without touching the
+# others (e.g. operator may have translated to AWS but not Azure -- the
+# Azure listing should return empty cleanly, not error).
+# ----------------------------------------------------------------------
+
+
+def _validate_target_cloud(target_cloud: str) -> str:
+    """Lowercase + validate. Raises ValueError on anything else."""
+    target = (target_cloud or "").strip().lower()
+    if target not in ("aws", "azure"):
+        raise ValueError(
+            f"target_cloud must be 'aws' or 'azure'; got "
+            f"{target_cloud!r}"
+        )
+    return target
+
+
+def list_translated_files(
+    project_id: str,
+    target_cloud: str,
+    *,
+    tenant_id: Optional[str] = None,
+) -> List[dict]:
+    """List the translator-output ``.tf`` files for a (project, target).
+
+    Returns a list of dicts ordered alphabetically by filename::
+
+        [
+          {"name": "aws_storage_bucket_poc.tf",
+           "size_bytes": 1234},
+          ...
+        ]
+
+    Mirrors ``list_workdir_tf_files`` for the importer; intentionally
+    simpler because the translator doesn't have a quarantine concept
+    yet (validation failures land in the per-file FileOutcome instead
+    of moving the .tf to a sidecar location).
+
+    Args:
+        project_id: GCP project (validated).
+        target_cloud: "aws" or "azure" (validated).
+        tenant_id: Multi-tenant identifier (defaults "default").
+
+    Returns:
+        List of file metadata dicts. Empty list if the operator hasn't
+        run a Translate for this (project, target) yet.
+
+    Raises:
+        ValueError: project_id / tenant_id / target_cloud failed
+            validation.
+    """
+    tenant = tenant_id or _DEFAULT_TENANT_ID
+    _validate_ids(tenant, project_id)
+    target = _validate_target_cloud(target_cloud)
+
+    bucket_name = state_bucket()
+    prefix = (
+        f"tenants/{tenant}/projects/{project_id}/translated/{target}/"
+    )
+
+    client = _get_gcs_client()
+    bucket = client.bucket(bucket_name)
+
+    out: List[dict] = []
+    for blob in client.list_blobs(bucket, prefix=prefix):
+        if blob.name == prefix or blob.name.endswith("/"):
+            continue
+        rel = blob.name[len(prefix):]
+        # Skip nested subdirectories (defensive; translator doesn't
+        # nest today but a future iteration might).
+        if "/" in rel:
+            continue
+        if not rel.endswith(".tf"):
+            continue
+        out.append({
+            "name": rel,
+            "size_bytes": blob.size or 0,
+        })
+
+    out.sort(key=lambda f: f["name"])
+    return out
+
+
+def read_translated_file(
+    project_id: str,
+    target_cloud: str,
+    filename: str,
+    *,
+    tenant_id: Optional[str] = None,
+) -> str:
+    """Download a single translated file's content as a UTF-8 string.
+
+    Used by the Translator page's "Generated translated files" expander
+    to show .tf content inline (st.code with HCL syntax highlighting).
+
+    Args:
+        project_id: GCP project.
+        target_cloud: "aws" or "azure".
+        filename: BARE basename (no path separators). Path-traversal
+            validated.
+        tenant_id: Multi-tenant identifier (defaults "default").
+
+    Returns:
+        File content as a UTF-8 string.
+
+    Raises:
+        ValueError: any input failed validation.
+        google.api_core.exceptions.NotFound: file doesn't exist.
+    """
+    tenant = tenant_id or _DEFAULT_TENANT_ID
+    _validate_ids(tenant, project_id)
+    target = _validate_target_cloud(target_cloud)
+
+    if (
+        "/" in filename
+        or "\\" in filename
+        or filename.startswith(".")
+    ):
+        raise ValueError(
+            f"filename must be a bare basename, got {filename!r}",
+        )
+
+    bucket_name = state_bucket()
+    blob_path = (
+        f"tenants/{tenant}/projects/{project_id}/translated/{target}/"
+        f"{filename}"
+    )
+    client = _get_gcs_client()
+    blob = client.bucket(bucket_name).blob(blob_path)
+    return blob.download_as_text()
+
+
+def reset_translated(
+    project_id: str,
+    target_cloud: str,
+    *,
+    tenant_id: Optional[str] = None,
+) -> dict:
+    """Wipe ALL translated-output files for a (project, target).
+
+    Targeted version of ``reset_workdir`` -- only deletes the
+    ``translated/<target>/`` subtree, leaves the operator's imported
+    .tf files at the project root untouched. Use when the operator
+    wants to redo a translation cleanly without losing their import
+    state.
+
+    Args:
+        project_id: GCP project (validated).
+        target_cloud: "aws" or "azure" (validated).
+        tenant_id: Multi-tenant identifier (defaults "default").
+
+    Returns:
+        Dict with operational counters::
+
+            {
+              "deleted_blobs": 7,
+              "deleted_versions": 12,
+              "prefix": "tenants/default/projects/.../translated/aws/",
+              "bucket": "mtagent-state-dev",
+              "target_cloud": "aws",
+            }
+    """
+    tenant = tenant_id or _DEFAULT_TENANT_ID
+    _validate_ids(tenant, project_id)
+    target = _validate_target_cloud(target_cloud)
+
+    bucket_name = state_bucket()
+    prefix = (
+        f"tenants/{tenant}/projects/{project_id}/translated/{target}/"
+    )
+
+    _log.info(
+        "storage_reset_translated_start",
+        tenant_id=tenant,
+        project_id=project_id,
+        target_cloud=target,
+        bucket=bucket_name,
+        prefix=prefix,
+    )
+
+    client = _get_gcs_client()
+    bucket = client.bucket(bucket_name)
+
+    deleted_blobs = 0
+    deleted_versions = 0
+
+    for blob in client.list_blobs(bucket, prefix=prefix):
+        try:
+            blob.delete()
+            deleted_blobs += 1
+        except Exception as e:  # noqa: BLE001
+            _log.warning(
+                "storage_reset_translated_blob_delete_failed",
+                tenant_id=tenant,
+                project_id=project_id,
+                target_cloud=target,
+                blob_name=blob.name,
+                error=str(e)[:200],
+            )
+
+    for blob in client.list_blobs(bucket, prefix=prefix, versions=True):
+        try:
+            blob.delete()
+            deleted_versions += 1
+        except Exception as e:  # noqa: BLE001
+            _log.warning(
+                "storage_reset_translated_version_delete_failed",
+                tenant_id=tenant,
+                project_id=project_id,
+                target_cloud=target,
+                blob_name=blob.name,
+                generation=blob.generation,
+                error=str(e)[:200],
+            )
+
+    result = {
+        "deleted_blobs": deleted_blobs,
+        "deleted_versions": deleted_versions,
+        "prefix": prefix,
+        "bucket": bucket_name,
+        "target_cloud": target,
+    }
+    _log.info(
+        "storage_reset_translated_complete",
+        tenant_id=tenant,
+        project_id=project_id,
+        **result,
+    )
+    return result

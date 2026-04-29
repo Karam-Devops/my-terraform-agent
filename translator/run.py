@@ -9,7 +9,16 @@ from typing import List, Optional, Tuple
 from common.logging import get_logger
 
 from . import config, yaml_engine, aws_engine, azure_engine, tf_validator
-from ..importer.config import TF_TYPE_TO_GCLOUD_INFO
+# Absolute import: ``importer`` is a sibling top-level package at the
+# repo root (= /app under PYTHONPATH=/app in Cloud Run; = repo root
+# under CLI / pytest). The previous form ``from ..importer.config``
+# assumed translator was nested inside a parent package, which only
+# resolved under specific CWD layouts and broke on Cloud Run with
+# ``ImportError: attempted relative import beyond top-level package``.
+# Same pattern as llm_provider's absolute import (see yaml_engine.py).
+# Surfaced 2026-04-29 PUI-3 first-smoke when SaaS loaded
+# translator.run for the first time.
+from importer.config import TF_TYPE_TO_GCLOUD_INFO
 from .results import FileOutcome, TranslationResult
 
 # Module-level logger used by the CLI main(). Every call into
