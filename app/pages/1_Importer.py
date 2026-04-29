@@ -262,7 +262,25 @@ selected_indices = edited_df.loc[
 st.markdown("---")
 import_col, info_col = st.columns([1, 2])
 with import_col:
-    import_button = st.button(
+    # PUI-1B v3.2: button uses st.empty() placeholder so we can SWAP
+    # it to a disabled "Running..." state IMMEDIATELY after click,
+    # before the heavy imports + workflow start.
+    #
+    # Without the placeholder, the button is rendered FIRST in the
+    # script rerun (with its primary-active text), then the lock is
+    # set, then the workflow runs (blocking 10+ min). The visual
+    # update to "Running..." doesn't happen until the workflow
+    # completes -- so during the entire run the button still looks
+    # clickable. Operators with a fast finger may double-click;
+    # Streamlit's script-execution-lock prevents the second click
+    # from doing anything but the visual is misleading.
+    #
+    # With the placeholder, we render the button into the slot, and
+    # if the click fires (import_button=True) we IMMEDIATELY replace
+    # the slot's content with a disabled "Running..." button. The
+    # operator sees the button greyed out within milliseconds of click.
+    import_btn_slot = st.empty()
+    import_button = import_btn_slot.button(
         f"▶ Run import ({len(selected_indices)} selected)" if not _lock
         else f"Running ({int(_time.time() - _lock['start_ts'])}s)…",
         type="primary",
@@ -416,14 +434,32 @@ if _lock is not None:
 # imports (importer.run + dependencies) take another ~5-15s on cold
 # container. THEN the spinner finally appears.
 #
-# Fix: render an immediate banner + browser toast at the TOP of this
-# section so operator sees the click registered NOW, not 5-15s later.
-# The banner is rendered BEFORE heavy imports + spinner, so it's the
-# first thing the operator sees.
+# Three-part fix (in order of perceptual impact):
+#   1. Swap the button slot to a disabled "Running..." button NOW.
+#      Operator sees button greyed out within milliseconds.
+#   2. Browser toast notification.
+#   3. In-page green banner.
+# All three render BEFORE heavy imports + spinner.
+
+# (1) Disable + relabel the button via the placeholder. Streamlit
+#     evaluates the placeholder slot's most recent content; this
+#     replaces the primary "Run import" with a secondary disabled
+#     "Running..." button at the same position. Visually instant.
+import_btn_slot.button(
+    f"⚡ Running ({len(selected_indices)} resource(s))…",
+    type="secondary",
+    disabled=True,
+    key="run_import_btn_disabled_swap",
+    use_container_width=True,
+)
+
+# (2) Browser toast -- lightweight popup, doesn't shift layout.
 st.toast(
     f"⚡ Starting import of {len(selected_indices)} resource(s)...",
     icon="🚀",
 )
+
+# (3) In-page green banner with project context.
 st.success(
     f"🚀 Import started for **{project_id}** "
     f"({len(selected_indices)} resource(s) selected). "
