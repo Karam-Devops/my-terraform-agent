@@ -59,6 +59,20 @@ APIS=(
   serviceusage.googleapis.com       # API enablement detection (CG-11)
   logging.googleapis.com            # Cloud Logging (structured logs)
   monitoring.googleapis.com         # Cloud Monitoring (metrics)
+  # PERF-T0b SDK call sources -- the importer's per-service describe
+  # handlers call these APIs FROM the host project (against the target
+  # project's resources). Google checks the calling project for API
+  # enablement + quota -- not the target. Without these enabled the
+  # SDK calls return "API has not been used in project N" 403 errors
+  # and the per-service handler falls back to asset_v1 sparse data
+  # (incomplete LLM HCL). Surfaced during PUI-1B SMOKE 2026-04-29.
+  cloudasset.googleapis.com         # Cloud Asset Inventory (PERF-T0)
+  compute.googleapis.com            # Compute Engine describe handlers
+  container.googleapis.com          # GKE describe handlers
+  cloudkms.googleapis.com           # KMS describe handlers
+  pubsub.googleapis.com             # Pub/Sub describe handlers
+  sqladmin.googleapis.com           # Cloud SQL describe (googleapiclient)
+  cloudresourcemanager.googleapis.com  # project / IAM resolution
 )
 
 # --- Colors for readability ---

@@ -404,6 +404,33 @@ if _lock is not None:
     st.warning("Import already in progress; ignoring click.", icon="⚠️")
     st.stop()
 
+# PUI-1B v3 follow-up: IMMEDIATE visual feedback on click.
+#
+# Operator feedback during smoke 2026-04-29: "After clicking Run Import
+# it takes a lot of time before the UI shows the run was kicked off
+# (makes you wanna click Run Import again)."
+#
+# Root cause of perceived lag: the click triggers a Streamlit script
+# rerun that re-renders the WHOLE page (sidebar, picker grid with N=80
+# rows, expanders) BEFORE reaching this import path. Heavy module
+# imports (importer.run + dependencies) take another ~5-15s on cold
+# container. THEN the spinner finally appears.
+#
+# Fix: render an immediate banner + browser toast at the TOP of this
+# section so operator sees the click registered NOW, not 5-15s later.
+# The banner is rendered BEFORE heavy imports + spinner, so it's the
+# first thing the operator sees.
+st.toast(
+    f"⚡ Starting import of {len(selected_indices)} resource(s)...",
+    icon="🚀",
+)
+st.success(
+    f"🚀 Import started for **{project_id}** "
+    f"({len(selected_indices)} resource(s) selected). "
+    f"Loading engine modules...",
+    icon="🚀",
+)
+
 # Acquire lock immediately so refresh-during-run shows "in progress"
 st.session_state[_SS_RUN_LOCK] = {
     "start_ts": _time.time(),
