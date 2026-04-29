@@ -451,6 +451,10 @@ class ListWorkdirTfFilesTests(unittest.TestCase):
         return b
 
     def test_returns_only_tf_files_alphabetical(self):
+        """Imported (top-level) .tf files come first, alphabetical.
+        Quarantine is now SURFACED (not skipped) -- see the dedicated
+        QuarantinedFilesTests below. This test pins the imported-only
+        case (no _quarantine/ blobs)."""
         prefix = "tenants/default/projects/dev-proj-470211/"
         self.mock_client.list_blobs.return_value = iter([
             self._make_blob(prefix + "google_compute_disk_b.tf", 200),
@@ -459,16 +463,59 @@ class ListWorkdirTfFilesTests(unittest.TestCase):
             self._make_blob(prefix + "_backend_seed.tf", 30),     # skipped
             self._make_blob(prefix + "_providers_seed.tf", 40),   # skipped
             self._make_blob(prefix + ".terraform/providers/", 0),  # nested skip
-            self._make_blob(prefix + "_quarantine/old.tf", 100),   # nested skip
         ])
         with patch.dict(os.environ, {"MTAGENT_STATE_BUCKET": "b"}):
             result = storage.list_workdir_tf_files("dev-proj-470211")
-        # Only the two real .tf files, alphabetical
+        # Two real .tf files, alphabetical, all status=imported
         self.assertEqual(
             [f["name"] for f in result],
             ["google_compute_disk_a.tf", "google_compute_disk_b.tf"],
         )
         self.assertEqual(result[0]["size_bytes"], 100)
+        # PUI-1B v3.3: every dict has status + error_preview keys
+        self.assertEqual(result[0]["status"], "imported")
+        self.assertIsNone(result[0]["error_preview"])
+
+    def test_quarantined_files_surface_with_status_and_preview(self):
+        """PUI-1B v3.3: _quarantine/*.tf files surface in the result
+        with status='needs_attention'. The matching .quarantine.txt
+        sidecar's first 300 chars become the error_preview."""
+        prefix = "tenants/default/projects/dev-proj-470211/"
+        # Top-level imported file + quarantined file + quarantine sidecar
+        imported_blob = self._make_blob(prefix + "google_storage_bucket.tf", 500)
+        q_blob = self._make_blob(
+            prefix + "_quarantine/google_container_cluster.tf", 800,
+        )
+        sidecar_blob = self._make_blob(
+            prefix + "_quarantine/google_container_cluster.tf.quarantine.txt",
+            120,
+        )
+        self.mock_client.list_blobs.return_value = iter([
+            imported_blob, q_blob, sidecar_blob,
+        ])
+        # Mock the sidecar's content read
+        sidecar_text = (
+            "Auto-quarantined after import + plan verification failed.\n"
+            "Error: Conflicting configuration arguments\n"
+            "  with google_container_cluster.poc_cluster"
+        )
+        # Need a separate bucket+blob mock for the sidecar download
+        self.mock_client.bucket.return_value.blob.return_value.download_as_text.return_value = sidecar_text
+
+        with patch.dict(os.environ, {"MTAGENT_STATE_BUCKET": "b"}):
+            result = storage.list_workdir_tf_files("dev-proj-470211")
+
+        # Two file rows: 1 imported (sorted first), 1 needs_attention
+        self.assertEqual(len(result), 2)
+        self.assertEqual(result[0]["status"], "imported")
+        self.assertEqual(result[0]["name"], "google_storage_bucket.tf")
+        self.assertEqual(result[1]["status"], "needs_attention")
+        self.assertEqual(result[1]["name"], "google_container_cluster.tf")
+        # Error preview present (first 300 chars of sidecar)
+        self.assertIsNotNone(result[1]["error_preview"])
+        self.assertIn(
+            "Conflicting configuration", result[1]["error_preview"],
+        )
 
     def test_returns_empty_when_no_files(self):
         self.mock_client.list_blobs.return_value = iter([])

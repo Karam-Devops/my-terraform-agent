@@ -376,41 +376,117 @@ with st.expander(
             "this section."
         )
     else:
-        st.caption(
-            f"{len(tf_files)} file(s). Click any name to view its "
-            "HCL content."
-        )
-        # Per-file accordion: name + size + content + download.
-        # Lazy-loads file content only when expander is opened (one
-        # GCS GET per opened file).
+        # PUI-1B v3.3 (Firefly-style status grouping):
+        # Split files by status -> two clearly-labelled subsections
+        # with color-coded headers + badges. Imported (green/✅) on top
+        # because that's the celebration; needs_attention (orange/⚠️)
+        # below where the operator focuses to triage.
         from common.storage import read_workdir_file  # noqa: E402
-        for tf_file in tf_files:
-            fname = tf_file["name"]
-            size_kb = tf_file["size_bytes"] / 1024
-            with st.expander(
-                f"`{fname}`  ({size_kb:.1f} KB)",
-                expanded=False,
-            ):
-                try:
-                    content = read_workdir_file(project_id, fname)
-                except Exception as e:  # noqa: BLE001
-                    st.error(
-                        f"Failed to read `{fname}`: "
-                        f"`{type(e).__name__}: {e}`",
+
+        imported_files = [f for f in tf_files if f["status"] == "imported"]
+        needs_attn_files = [
+            f for f in tf_files if f["status"] == "needs_attention"
+        ]
+
+        # Top-line summary
+        c_ok, c_warn, c_total = st.columns(3)
+        c_ok.metric("✅ Imported", len(imported_files))
+        c_warn.metric("⚠️ Needs attention", len(needs_attn_files))
+        c_total.metric("Total files", len(tf_files))
+
+        # ----- Imported (green section) -----
+        if imported_files:
+            st.markdown(
+                f"#### ✅ Successfully imported ({len(imported_files)})"
+            )
+            st.caption(
+                "These resources imported into terraform state AND "
+                "passed `terraform plan` verification. The HCL is "
+                "production-ready."
+            )
+            for tf_file in imported_files:
+                fname = tf_file["name"]
+                size_kb = tf_file["size_bytes"] / 1024
+                with st.expander(
+                    f"✅  `{fname}`  ({size_kb:.1f} KB)",
+                    expanded=False,
+                ):
+                    try:
+                        content = read_workdir_file(project_id, fname)
+                    except Exception as e:  # noqa: BLE001
+                        st.error(
+                            f"Failed to read `{fname}`: "
+                            f"`{type(e).__name__}: {e}`",
+                        )
+                        continue
+                    st.code(content, language="hcl")
+                    st.download_button(
+                        label=f"📥 Download {fname}",
+                        data=content,
+                        file_name=fname,
+                        mime="text/plain",
+                        key=f"dl_{fname}",
                     )
-                    continue
-                # HCL syntax highlighting via st.code's language hint.
-                # Streamlit's HCL highlighter is rough but adequate.
-                st.code(content, language="hcl")
-                # Download button: per-file. Streamlit handles MIME +
-                # file-name correctly for text/plain content.
-                st.download_button(
-                    label=f"📥 Download {fname}",
-                    data=content,
-                    file_name=fname,
-                    mime="text/plain",
-                    key=f"dl_{fname}",
-                )
+
+        # ----- Needs attention (orange section) -----
+        if needs_attn_files:
+            st.markdown(
+                f"#### ⚠️ Needs attention ({len(needs_attn_files)})"
+            )
+            st.warning(
+                "These resources imported into terraform state, but "
+                "their generated HCL **failed `terraform plan` "
+                "verification**. The most common cause is the LLM "
+                "generating mutually-exclusive fields (e.g., GKE "
+                "clusters with both `default_node_pool` and "
+                "`remove_default_node_pool=true`). Review the error "
+                "below + the HCL, then either edit the .tf manually "
+                "or skip the resource.",
+                icon="⚠️",
+            )
+            for tf_file in needs_attn_files:
+                fname = tf_file["name"]
+                size_kb = tf_file["size_bytes"] / 1024
+                with st.expander(
+                    f"⚠️  `{fname}`  ({size_kb:.1f} KB) — needs review",
+                    expanded=False,
+                ):
+                    # Show the error preview FIRST -- operator's first
+                    # question is "why did this fail?"
+                    error_preview = tf_file.get("error_preview")
+                    if error_preview:
+                        st.error(
+                            f"**Why it failed verification:**\n\n"
+                            f"```\n{error_preview}\n```",
+                            icon="🛑",
+                        )
+                    else:
+                        st.error(
+                            "Plan-verification failed (no error preview "
+                            "available). Check the .quarantine.txt "
+                            "sidecar in GCS for full details.",
+                            icon="🛑",
+                        )
+                    # Then the HCL itself
+                    try:
+                        content = read_workdir_file(
+                            project_id, fname, from_quarantine=True,
+                        )
+                    except Exception as e:  # noqa: BLE001
+                        st.error(
+                            f"Failed to read quarantined `{fname}`: "
+                            f"`{type(e).__name__}: {e}`",
+                        )
+                        continue
+                    st.markdown("**Generated HCL (review this):**")
+                    st.code(content, language="hcl")
+                    st.download_button(
+                        label=f"📥 Download {fname}",
+                        data=content,
+                        file_name=fname,
+                        mime="text/plain",
+                        key=f"dl_quarantine_{fname}",
+                    )
 
 if not import_button:
     st.stop()

@@ -658,16 +658,36 @@ def list_workdir_tf_files(
     *,
     tenant_id: Optional[str] = None,
 ) -> List[dict]:
-    """List the .tf files persisted for a (tenant, project).
+    """List the .tf files persisted for a (tenant, project), with
+    per-file status (imported vs quarantined).
 
-    Returns a list of dicts ordered alphabetically by name::
+    Returns a list of dicts ordered first by status (imported first),
+    then alphabetically by name::
 
-        [{"name": "google_storage_bucket_x.tf", "size_bytes": 1234}, ...]
+        [
+          {"name": "google_storage_bucket_x.tf",
+           "size_bytes": 1234,
+           "status": "imported",
+           "error_preview": None},
+          {"name": "google_container_cluster_x.tf",
+           "size_bytes": 5678,
+           "status": "needs_attention",
+           "error_preview": "Error: Conflicting configuration..."},
+        ]
 
     Filters to user-relevant .tf files only -- excludes infrastructure
     files (.terraform.lock.hcl, _backend_seed.tf, _providers_seed.tf)
     that the operator didn't author and shouldn't see in the
     "Generated files" view.
+
+    Status semantics (PUI-1B v3.3):
+      * `imported`: file lives at top-level workdir (terraform import
+        + plan-verify both succeeded; HCL is canonical)
+      * `needs_attention`: file lives under `_quarantine/` (terraform
+        import succeeded but plan-verify failed; HCL has issues the
+        operator should review). The matching `<name>.quarantine.txt`
+        sidecar (also in `_quarantine/`) holds the verbatim terraform
+        error -- we read its first ~300 chars as `error_preview`.
 
     Args:
         project_id: GCP project (path-traversal-validated).
@@ -687,11 +707,6 @@ def list_workdir_tf_files(
     bucket_name = state_bucket()
     prefix = f"tenants/{tenant}/projects/{project_id}/"
 
-    # Files we DON'T want to surface as "generated HCL" in the UI:
-    #   * .terraform.lock.hcl: provider lock file (auto-managed by terraform)
-    #   * _backend_seed.tf: PSA-5 GCS-backend declaration (infrastructure)
-    #   * _providers_seed.tf: D-6 fix providers stub (infrastructure)
-    # Everything else ending in .tf is a user-relevant generated file.
     _INFRA_FILES = frozenset((
         ".terraform.lock.hcl",
         "_backend_seed.tf",
@@ -700,25 +715,74 @@ def list_workdir_tf_files(
 
     client = _get_gcs_client()
     bucket = client.bucket(bucket_name)
-    results: List[dict] = []
+
+    # Two passes:
+    #   Pass 1: collect all relevant blobs, group by status. Also
+    #           collect quarantine.txt sidecars to fetch error previews.
+    imported: List[dict] = []
+    quarantined: List[dict] = []
+    quarantine_sidecars: dict = {}  # tf_name -> sidecar blob path
+
     for blob in client.list_blobs(bucket, prefix=prefix):
         if blob.name == prefix or blob.name.endswith("/"):
             continue
         rel = blob.name[len(prefix):]
-        # Only top-level .tf files (skip nested .terraform/, _quarantine/,
-        # snapshots/ etc).
+        # Quarantined .tf -> needs_attention bucket
+        if rel.startswith("_quarantine/"):
+            inner = rel[len("_quarantine/"):]
+            if inner.endswith(".quarantine.txt"):
+                # Sidecar -- record path for later read
+                tf_name = inner[:-len(".quarantine.txt")]
+                quarantine_sidecars[tf_name] = blob.name
+                continue
+            if inner.endswith(".tf"):
+                quarantined.append({
+                    "name": inner,
+                    "size_bytes": blob.size or 0,
+                    "status": "needs_attention",
+                    "error_preview": None,  # filled in pass 2
+                    "_blob_path": blob.name,
+                })
+            continue
+        # Other nested paths (.terraform/, snapshots/) -> skip
         if "/" in rel:
             continue
         if not rel.endswith(".tf"):
             continue
         if rel in _INFRA_FILES:
             continue
-        results.append({
+        imported.append({
             "name": rel,
             "size_bytes": blob.size or 0,
+            "status": "imported",
+            "error_preview": None,
         })
-    results.sort(key=lambda f: f["name"])
-    return results
+
+    # Pass 2: read quarantine.txt sidecars for error previews.
+    # Each is a small text file (~few KB); cheap to download inline.
+    for q in quarantined:
+        sidecar_path = quarantine_sidecars.get(q["name"])
+        if not sidecar_path:
+            continue
+        try:
+            sidecar_blob = client.bucket(bucket_name).blob(sidecar_path)
+            text = sidecar_blob.download_as_text()
+            # Truncate to first 300 chars for the picker preview;
+            # full content is available via read_workdir_file (UI
+            # detects status=needs_attention and reads from
+            # _quarantine/ instead of top-level).
+            q["error_preview"] = text[:300].strip()
+        except Exception:  # noqa: BLE001
+            # Sidecar read failure is non-fatal -- file still listed
+            # without error preview.
+            pass
+
+    # Sort: imported first (alphabetical), then needs_attention
+    # (alphabetical). This puts the celebratory rows on top and
+    # the attention-needed rows below where the operator focuses.
+    imported.sort(key=lambda f: f["name"])
+    quarantined.sort(key=lambda f: f["name"])
+    return imported + quarantined
 
 
 def read_workdir_file(
@@ -726,46 +790,48 @@ def read_workdir_file(
     filename: str,
     *,
     tenant_id: Optional[str] = None,
+    from_quarantine: bool = False,
 ) -> str:
     """Download a single file's content from the persisted workdir.
 
     Used by the UI's "Generated files" expander to show .tf content
-    inline (st.code with HCL syntax highlighting).
+    inline (st.code with HCL syntax highlighting). PUI-1B v3.3:
+    `from_quarantine=True` reads from `_quarantine/<filename>` instead
+    of the top-level workdir, supporting the needs-attention view.
 
     Args:
         project_id: GCP project.
         filename: BARE filename (e.g. "google_storage_bucket_x.tf").
-            Must NOT contain path separators -- the function only reads
-            top-level files in the project workdir, never nested
-            (.terraform/, _quarantine/, etc). Path-traversal guard.
+            Must NOT contain path separators -- defensive against
+            client-side tampering.
         tenant_id: Multi-tenant identifier (defaults "default").
+        from_quarantine: When True, read from `_quarantine/<filename>`
+            (the needs-attention bucket). When False (default), read
+            the top-level imported file.
 
     Returns:
         File content as a string (UTF-8 decoded).
 
     Raises:
         ValueError: project_id / tenant_id failed validation, OR
-            filename contains a path separator (defensive against
-            "../../etc/passwd" style traversal even though the GCS
-            blob name validation would also reject it).
+            filename contains a path separator.
         google.api_core.exceptions.NotFound: file doesn't exist.
     """
     tenant = tenant_id or _DEFAULT_TENANT_ID
     _validate_ids(tenant, project_id)
 
     if "/" in filename or "\\" in filename or filename.startswith("."):
-        # Strict path-traversal guard. Filename is operator-supplied
-        # via UI clicks but we still defend against client-side
-        # tampering (custom URL params, replayed requests).
-        # Allow leading-underscore-prefixed files (none today; the
-        # _INFRA_FILES filter in list_workdir_tf_files keeps those
-        # out of the UI list, but reads of those would still be safe).
         raise ValueError(
             f"filename must be a bare basename, got {filename!r}",
         )
 
     bucket_name = state_bucket()
-    blob_path = f"tenants/{tenant}/projects/{project_id}/{filename}"
+    if from_quarantine:
+        blob_path = (
+            f"tenants/{tenant}/projects/{project_id}/_quarantine/{filename}"
+        )
+    else:
+        blob_path = f"tenants/{tenant}/projects/{project_id}/{filename}"
     client = _get_gcs_client()
     blob = client.bucket(bucket_name).blob(blob_path)
     return blob.download_as_text()
