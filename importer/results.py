@@ -105,6 +105,30 @@ class WorkflowResult:
     # bucket per CC-5 spec; CLI just prints the count.
     needs_attention: int = 0
 
+    # PUI-1F (2026-04-29): subset of `skipped` that was specifically
+    # auto-skipped because its .tf already existed in the workdir
+    # (engine guard fired; no LLM call). Tracked separately so the UI
+    # can surface a positive "already imported, nothing to do" success
+    # message instead of the neutral "skipped" metric -- without this
+    # split, `skipped=8` reads identically whether the operator picked
+    # 8 unmappable asset types OR re-clicked Run on 8 already-imported
+    # rows. The accounting invariant continues to hold:
+    #   imported + needs_attention + failed + skipped == selected
+    # because auto_skipped is a SUBSET of skipped (not an additional
+    # bucket) -- it's just a finer-grained reason annotation for the
+    # already-counted skipped resources.
+    auto_skipped: int = 0
+
+    # PUI-1F v3.3 (2026-04-29 smoke 5): subset of `imported` that
+    # required at least one Auto-Correction Loop retry to succeed.
+    # SUBSET of imported, not an additional bucket -- the accounting
+    # invariant holds. Surfaced in the UI to communicate "the system
+    # quietly fixed N hallucinations for you on retry" so operators
+    # see the correction loop is doing real work. Cloud Logging also
+    # has per-attempt events (auto_correction_attempt_*) for deeper
+    # audit.
+    auto_corrected: int = 0
+
     @property
     def exit_code(self) -> int:
         """0 iff every selected resource reached green; 1 otherwise.

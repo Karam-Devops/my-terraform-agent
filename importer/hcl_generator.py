@@ -12,11 +12,18 @@ import llm_provider
 from . import config
 from . import post_llm_overrides
 from . import post_llm_validation
+from . import _status
 from .golden_examples_loader import (
     load_golden_example,
     format_example_section,
 )
 from .schema_prompt import build_schema_summary
+
+# Project-level config import (for the GEMINI_MODEL / GEMINI_MODEL_FALLBACK
+# constants that drive PERF-T3 model routing). Imported as `app_config`
+# to avoid shadowing the local `from . import config` (importer.config,
+# the asset-type map).
+from config import config as app_config
 
 _log = get_logger(__name__)
 
@@ -245,7 +252,34 @@ def generate_hcl_from_json(resource_json_str, tf_type, hcl_name, attempt, schema
     )
 
     try:
-        llm_client = llm_provider.get_llm_text_client()
+        # PERF-T3b ROLLBACK (2026-04-29 smoke 3): Flash failed
+        # `terraform plan` verification on google_compute_disk with
+        # "Error: Unsupported argument" -- exactly the schema-
+        # adherence weakness we worried about. Quarantine rate on
+        # Flash for non-cluster resources was higher than acceptable
+        # for demo / customer-facing output.
+        #
+        # Until LLM-1 (Gemini -> Claude Sonnet/Opus migration) lands,
+        # we route EVERYTHING to Pro. The per-model client cache in
+        # llm_provider.py is preserved (cheap; future re-enable is a
+        # one-line change here). PERF-T3a's submission stagger (0.5s
+        # between executor.submit calls) still applies and keeps the
+        # Pro RPM well under quota for any realistic batch size.
+        #
+        # Operator cost: ~5-10x per call vs Flash. At demo scale
+        # (10-30 resources) the absolute cost is small ($1-5 per
+        # smoke). For customer scale (100+ resources) we'll need to
+        # either bump the Vertex quota OR migrate to Claude (which
+        # has its own quota envelope).
+        chosen_model = app_config.GEMINI_MODEL  # always Pro for now
+        _log.info(
+            "llm_model_route",
+            tf_type=tf_type,
+            hcl_name=hcl_name,
+            chosen_model=chosen_model,
+            routing_policy="pro_everywhere_pending_llm1",
+        )
+        llm_client = llm_provider.get_llm_text_client(model_name=chosen_model)
         response = llm_client.invoke(final_prompt)
         generated_hcl = response.content
 

@@ -168,6 +168,140 @@ if discover_clicked:
 
 # After Discover (or on subsequent reruns when we have data in session)
 discovered = st.session_state.get(_SS_DISCOVERED)
+
+
+# --- PUI-1C v2 (2026-04-29 smoke 4 fix): Danger zone ALWAYS visible ----
+# Pre-fix, the Danger Zone was rendered deep inside Stage B (after the
+# data_editor + result card + files expander), so an operator who
+# hadn't yet clicked Discover -- the very state where they most likely
+# want to reset a stale workdir -- would never see the button (page
+# st.stop()'d before reaching it).
+#
+# Now rendered RIGHT AFTER Stage A's Discover button, BEFORE the
+# discovery-required early-stop. Self-contained tf_files fetch (uses
+# the same _SS_TF_FILES cache key that Stage B uses, so it's free if
+# Stage B already populated; otherwise this is the first fetch).
+def _render_danger_zone() -> None:
+    """Inline Reset-workdir UI, callable from any page state."""
+    _ss_tf = f"_importer_tf_files_{project_id}"
+    _ss_tf_err = f"_importer_tf_files_error_{project_id}"
+    if _ss_tf not in st.session_state:
+        try:
+            from common.storage import list_workdir_tf_files  # noqa: E402
+            st.session_state[_ss_tf] = list_workdir_tf_files(project_id)
+            st.session_state[_ss_tf_err] = None
+        except Exception as _e:  # noqa: BLE001
+            st.session_state[_ss_tf] = []
+            st.session_state[_ss_tf_err] = (
+                f"{type(_e).__name__}: {_e}"[:200]
+            )
+    _files = st.session_state.get(_ss_tf, [])
+
+    with st.expander("⚠️ Danger zone", expanded=False):
+        st.markdown(
+            f"### Reset workdir for `{project_id}`\n\n"
+            f"This will permanently delete:\n"
+            f"- All Terraform files in GCS at "
+            f"`gs://mtagent-state-dev/tenants/default/projects/"
+            f"{project_id}/`\n"
+            f"- All quarantined files\n"
+            f"- All terraform state "
+            f"(`terraform-state/default.tfstate`)\n"
+            f"- The local Streamlit cache for this project\n\n"
+            f"It will **NOT** delete:\n"
+            f"- The actual GCP resources in the project (those keep "
+            f"running; only the IaC tracking is reset)\n"
+            f"- Other projects' workdirs\n\n"
+            f"_Use this when you want to start fresh on this project — "
+            f"e.g., re-test the import flow from scratch, recover from "
+            f"a corrupted state, or hand the project back to a customer "
+            f"with no traces._"
+        )
+        _n_imp = sum(1 for f in _files if f["status"] == "imported")
+        _n_quar = sum(
+            1 for f in _files if f["status"] == "needs_attention"
+        )
+        if _n_imp == 0 and _n_quar == 0:
+            st.caption(
+                "Workdir is already empty in GCS — Reset will clear "
+                "the local Streamlit cache only."
+            )
+        else:
+            st.caption(
+                f"Currently in workdir: **{_n_imp} imported file(s)**, "
+                f"**{_n_quar} quarantined file(s)** "
+                f"(plus terraform state and provider caches, "
+                f"not listed)."
+            )
+        typed_confirm = st.text_input(
+            f"Type the project ID to confirm: `{project_id}`",
+            value="",
+            key="reset_workdir_confirm",
+            placeholder=project_id,
+        )
+        confirm_match = typed_confirm.strip() == project_id
+        reset_btn_disabled = (
+            (not confirm_match) or (_lock is not None)
+        )
+        reset_help = (
+            "Type the project ID exactly to enable this button."
+            if not confirm_match
+            else "Import in progress; wait for it to complete."
+            if _lock is not None
+            else "Wipes GCS + local cache + session state. "
+                 "Not reversible."
+        )
+        if st.button(
+            "🗑️ Reset workdir",
+            type="primary",
+            disabled=reset_btn_disabled,
+            key="reset_workdir_btn",
+            help=reset_help,
+        ):
+            from common.storage import reset_workdir
+            from app.middleware import bust_workdir_cache
+            try:
+                with st.spinner("🔄 Wiping GCS prefix..."):
+                    gcs_result = reset_workdir(project_id)
+                with st.spinner("🔄 Clearing local /tmp cache..."):
+                    cache_result = bust_workdir_cache(project_id)
+                # Clear all this-project session state.
+                for _k in (
+                    _SS_DISCOVERED, _ss_tf, _ss_tf_err, _SS_LAST_RESULT,
+                ):
+                    st.session_state.pop(_k, None)
+                total_deleted = (
+                    gcs_result["deleted_blobs"]
+                    + gcs_result["deleted_versions"]
+                )
+                if total_deleted == 0 and not cache_result["cache_hit"]:
+                    st.info(
+                        f"Nothing to reset — workdir for "
+                        f"`{project_id}` was already empty.",
+                        icon="ℹ️",
+                    )
+                else:
+                    st.success(
+                        f"✅ Workdir reset for `{project_id}`. Removed "
+                        f"**{gcs_result['deleted_blobs']} live + "
+                        f"{gcs_result['deleted_versions']} archived** "
+                        f"GCS object(s). Local cache: "
+                        f"{'cleared' if cache_result['cache_hit'] else 'was empty'}. "
+                        f"Re-discover above to start fresh.",
+                        icon="✅",
+                    )
+            except Exception as _e:  # noqa: BLE001
+                render_error(
+                    _e, context=f"resetting workdir for {project_id}"
+                )
+
+
+# Always render Danger Zone -- regardless of discovery state. Operator
+# may want to reset BEFORE running their first Discover (e.g., handing
+# the project back to a customer, recovering from a wedged state).
+_render_danger_zone()
+
+
 if not discovered:
     st.info(
         "Click **Discover resources** above to see what's importable in "
@@ -177,22 +311,114 @@ if not discovered:
     )
     st.stop()
 
+# --- PUI-1F: compute per-row import status ----------------------------
+# Cross-reference the discovered resources against what's already
+# persisted in GCS (.tf at top-level vs in _quarantine/), so the picker
+# grid can show a Status column AND the engine guard's source-of-truth
+# is mirrored visually for the operator.
+#
+# Source of truth: _status.expected_tf_filename(tf_type, asset_type,
+# cloud_name) -- same helper the engine's run_workflow uses to build
+# its skip-set. Mirroring guarantees no UI/engine drift.
+from importer._status import expected_tf_filename, classify_status
+
+# Pull the persisted-files list from GCS (cached in session_state to
+# avoid a per-rerun fetch). The "All generated files" expander below
+# uses the same key, so opening it after picking is also free.
+#
+# PUI-1F v2 fix (2026-04-29 smoke): the previous version silently
+# fell back to an empty list on GCS errors. Symptom: every row
+# showed "Not imported" even when the workdir was full -- operator
+# picked them in good faith, engine guard correctly skipped (since
+# the .tf files DID exist), result card showed confusing "0 imported
+# / 8 skipped". Surfacing the failure as a visible warning so the
+# operator knows the Status column may be unreliable.
+_SS_TF_FILES = f"_importer_tf_files_{project_id}"
+_SS_TF_FILES_ERROR = f"_importer_tf_files_error_{project_id}"
+if _SS_TF_FILES not in st.session_state:
+    try:
+        from common.storage import list_workdir_tf_files  # noqa: E402
+        st.session_state[_SS_TF_FILES] = list_workdir_tf_files(project_id)
+        st.session_state[_SS_TF_FILES_ERROR] = None
+    except Exception as e:  # noqa: BLE001 -- captured + surfaced below
+        st.session_state[_SS_TF_FILES] = []
+        st.session_state[_SS_TF_FILES_ERROR] = (
+            f"{type(e).__name__}: {e}"[:200]
+        )
+
+_tf_files = st.session_state.get(_SS_TF_FILES, [])
+_tf_files_err = st.session_state.get(_SS_TF_FILES_ERROR)
+if _tf_files_err:
+    st.warning(
+        f"⚠ Couldn't read the imported-file list from GCS — the "
+        f"**Status column below may show 'Not imported' for resources "
+        f"that ARE actually imported**. Re-discover or refresh the "
+        f"page to retry. Underlying error: `{_tf_files_err}`",
+        icon="⚠️",
+    )
+_imported_set = {f["name"] for f in _tf_files if f["status"] == "imported"}
+_quarantined_set = {f["name"] for f in _tf_files if f["status"] == "needs_attention"}
+
+# Pre-compute per-row metadata. For each discovered resource we derive:
+#   * expected_filename (None if cloud_name is empty -- shouldn't happen
+#     in practice but defensive)
+#   * status            ("imported" / "needs_attention" / "none")
+# Stored alongside the row dict so the table builder + selection
+# resolver both have access without re-deriving.
+_row_status: list[str] = []
+_row_filenames: list[str] = []
+for r in discovered:
+    fname = expected_tf_filename(
+        r["tfType"], r["assetType"], r["cloud_name"],
+    )
+    status = classify_status(
+        fname,
+        imported_set=_imported_set,
+        quarantined_set=_quarantined_set,
+    )
+    _row_filenames.append(fname or "")
+    _row_status.append(status)
+
+
 # --- Stage B: Pick + Import ---------------------------------------------
 
 st.markdown("---")
+
+# Top-line counters (Firefly-style "Codified vs Un-codified" call-out
+# above the picker). Operator sees at a glance how much of the project
+# is already managed -- the demo story we want to lead with.
+_n_imported = sum(1 for s in _row_status if s == "imported")
+_n_needs_attn = sum(1 for s in _row_status if s == "needs_attention")
+_n_uncodified = len(discovered) - _n_imported - _n_needs_attn
+
 st.markdown(
     f"### Step 2 — Pick resources to import "
     f"({len(discovered)} discovered)"
 )
+m_uncod, m_cod, m_attn = st.columns(3)
+m_uncod.metric("⚪ Not imported", _n_uncodified)
+m_cod.metric("✅ Imported", _n_imported)
+m_attn.metric("⚠️ Needs review", _n_needs_attn)
 st.caption(
     "Selection defaults to NONE so a fat-finger Run never fires LLM "
-    "cost. Use the column header checkbox to select all visible rows."
+    "cost. Use the column header checkbox to select all visible rows. "
+    "Already-imported rows are hidden by default — uncheck the filter "
+    "below to re-codify (LLM call + HCL overwrite)."
 )
 
 # Build a DataFrame-like list of dicts for st.data_editor's checkbox grid.
 # Streamlit's data_editor works well with a dict-of-lists OR a list-of-dicts.
 # For 80-row scale a list-of-dicts is fine and avoids a pandas dep here.
 import pandas as pd  # already in requirements via streamlit
+
+# Status-pill mapping for the Status column. Streamlit's data_editor
+# can't render HTML inline (security model), so we use an emoji prefix
+# + plain label that reads cleanly even without rich rendering.
+_STATUS_LABEL = {
+    "imported": "✅ Imported",
+    "needs_attention": "⚠️ Needs review",
+    "none": "⚪ Not imported",
+}
 
 # Build the editable table. The "Select" column is the only editable one;
 # everything else is read-only.
@@ -201,16 +427,21 @@ for idx, r in enumerate(discovered):
     table_rows.append({
         "Select": False,
         "#": idx + 1,  # 1-indexed to match CLI menu numbering
+        "Status": _STATUS_LABEL[_row_status[idx]],
         "Name": r["displayName"] or r["cloud_name"],
         "Type": r["tfType"],  # show the friendly tf_type, not the URN
         "Location": r["location"],
     })
 df = pd.DataFrame(table_rows)
+# Carry status into the DataFrame so we can filter on it without
+# re-aligning the indexer. Hidden from the rendered table via column
+# config below.
+df["_status_raw"] = _row_status
 
-# Filter-by-type widget. Helps when the project has many resources of
-# many types -- operator can narrow before selecting.
+# Filter row: type multiselect + "Hide already imported" toggle (PUI-1F).
+# Layout: 2 cols (filter + toggle) on top + visible-count metric on right.
 all_tf_types = sorted({r["tfType"] for r in discovered})
-filter_col, count_col = st.columns([3, 1])
+filter_col, hide_col, count_col = st.columns([2, 1.2, 1])
 with filter_col:
     type_filter = st.multiselect(
         "Filter by type",
@@ -219,8 +450,26 @@ with filter_col:
         placeholder="Show all types",
         key="type_filter",
     )
+with hide_col:
+    # PUI-1F: "Hide already imported" defaults to True (on) -- the
+    # Firefly default. Operators rarely need to re-codify; making it
+    # one extra click instead of the default keeps the picker focused
+    # on un-codified work and makes re-codify a deliberate action.
+    hide_imported = st.checkbox(
+        "Hide already imported",
+        value=True,
+        key="hide_imported_toggle",
+        help=(
+            "When ON (default), already-imported resources are hidden "
+            "from the picker -- can't be re-selected. Uncheck to expose "
+            "them; selecting an imported row will re-fire the LLM and "
+            "OVERWRITE the existing HCL on Run import."
+        ),
+    )
 if type_filter:
     df = df[df["Type"].isin(type_filter)]
+if hide_imported:
+    df = df[df["_status_raw"] != "imported"]
 with count_col:
     st.metric("Visible", len(df))
 
@@ -238,6 +487,15 @@ edited_df = st.data_editor(
             "Select", default=False, width="small",
         ),
         "#": st.column_config.NumberColumn(width="small"),
+        "Status": st.column_config.TextColumn(
+            "Status",
+            help="Imported = top-level .tf exists for this resource "
+                 "(no LLM call needed on Run import unless you re-"
+                 "codify). Needs review = HCL exists but failed plan "
+                 "verification (operator triage required). Not "
+                 "imported = no .tf yet -- the LLM will generate one.",
+            width="small",
+        ),
         "Name": st.column_config.TextColumn(
             "Name",
             help="The resource's display name. NOTE: a Name may appear "
@@ -260,8 +518,13 @@ edited_df = st.data_editor(
                  "scoped without a location (e.g., Pub/Sub topics).",
             width="medium",
         ),
+        # PUI-1F: hide the helper column we added for filtering. Streamlit's
+        # data_editor renders every column in the DataFrame unless we
+        # explicitly suppress it via the `hidden` flag.
+        "_status_raw": None,
     },
-    disabled=("#", "Name", "Type", "Location"),
+    disabled=("#", "Status", "Name", "Type", "Location"),
+    column_order=("Select", "#", "Status", "Name", "Type", "Location"),
     hide_index=True,
     use_container_width=True,
     key="resource_picker",
@@ -272,6 +535,40 @@ edited_df = st.data_editor(
 selected_indices = edited_df.loc[
     edited_df["Select"], "#"
 ].tolist()
+
+# PUI-1F: detect whether any selected rows are already-imported. The
+# data_editor's _status_raw column is preserved across the filter, so
+# we can ask "is the operator's selection asking us to re-codify?"
+# without re-running the status derivation.
+selected_already_imported = []
+for one_indexed in selected_indices:
+    row_idx = one_indexed - 1
+    if 0 <= row_idx < len(_row_status):
+        if _row_status[row_idx] == "imported":
+            selected_already_imported.append(
+                {
+                    "name": discovered[row_idx]["displayName"]
+                            or discovered[row_idx]["cloud_name"],
+                    "type": discovered[row_idx]["tfType"],
+                }
+            )
+# Force-reimport is auto-enabled when the operator has explicitly
+# unchecked "Hide already imported" AND picked one or more imported
+# rows. We pass this through to run_workflow so the engine guard
+# steps aside for those resources. Without the flag, the engine
+# guard would silently skip them and the result card would show
+# "skipped" for picks the operator clearly opted into.
+force_reimport = bool(selected_already_imported)
+
+if selected_already_imported:
+    st.warning(
+        f"⚠ Re-codify confirmation: **{len(selected_already_imported)} "
+        f"already-imported resource(s)** are in your selection. Running "
+        f"will fire the LLM and **overwrite** their existing HCL files. "
+        f"To skip the re-codify, re-check 'Hide already imported' above "
+        f"or untick those rows in the picker.",
+        icon="⚠️",
+    )
 
 st.markdown("---")
 import_col, info_col = st.columns([1, 2])
@@ -330,15 +627,75 @@ last_result = st.session_state.get(_SS_LAST_RESULT)
 if last_result and not import_button:
     st.markdown("---")
     st.markdown("### Last import result")
-    st.success(
-        f"✅ Last run completed in {last_result.get('duration_s', 0):.1f}s",
-        icon="✅",
+
+    # PUI-1F Option C (2026-04-29): when the engine guard auto-skipped
+    # everything (selected=N, imported=0, failed=0, auto_skipped=N),
+    # the neutral "Imported 0 / Skipped N" metric grid reads as a
+    # failure even though it's actually the engine correctly NOT
+    # burning N LLM calls on already-imported resources. Replace the
+    # metric grid with a positive success banner for that case --
+    # "X resources already imported; nothing to do."
+    _imp = last_result.get("imported", 0)
+    _failed = last_result.get("failed", 0)
+    _needs = last_result.get("needs_attention", 0)
+    _skipped = last_result.get("skipped", 0)
+    _auto_skipped = last_result.get("auto_skipped", 0)
+    _auto_corrected = last_result.get("auto_corrected", 0)
+    _all_auto_skipped = (
+        _imp == 0 and _failed == 0 and _needs == 0
+        and _auto_skipped > 0 and _auto_skipped == _skipped
     )
-    m1, m2, m3, m4 = st.columns(4)
-    m1.metric("Imported", last_result.get("imported", 0))
-    m2.metric("Needs attention", last_result.get("needs_attention", 0))
-    m3.metric("Skipped", last_result.get("skipped", 0))
-    m4.metric("Failed", last_result.get("failed", 0))
+
+    if _all_auto_skipped:
+        # Pure-success "everything already imported" path. Single
+        # green banner with the duration + count. No metric grid
+        # (it would just show "0 / 0 / N / 0" which is misleading).
+        st.success(
+            f"✅ All {_auto_skipped} selected resource(s) were "
+            f"**already imported** — engine skipped the LLM call to "
+            f"preserve existing HCL. Completed in "
+            f"{last_result.get('duration_s', 0):.1f}s. "
+            f"To re-codify any of them, untick **Hide already "
+            f"imported** above and re-pick.",
+            icon="✅",
+        )
+    else:
+        # Mixed or genuinely-imported run -- show the standard
+        # metric grid. When auto_skipped > 0 in a mixed run, surface
+        # it as a small caption beneath so the operator knows the
+        # `skipped` total includes the engine guard's contribution.
+        st.success(
+            f"✅ Last run completed in "
+            f"{last_result.get('duration_s', 0):.1f}s",
+            icon="✅",
+        )
+        m1, m2, m3, m4 = st.columns(4)
+        m1.metric("Imported", _imp)
+        m2.metric("Needs attention", _needs)
+        m3.metric("Skipped", _skipped)
+        m4.metric("Failed", _failed)
+        if _auto_skipped > 0:
+            st.caption(
+                f"_Of the {_skipped} skipped, {_auto_skipped} were "
+                f"auto-skipped (already imported — engine guard "
+                f"saved the LLM call). The remaining "
+                f"{_skipped - _auto_skipped} had no Terraform mapping "
+                f"for their asset type._"
+            )
+        # PUI-1F v3.3 Fix 1: surface Auto-Correction Loop activity.
+        # When auto_corrected > 0, some imports needed at least one
+        # LLM retry to pass plan-verify. This is a SUCCESS signal --
+        # the system silently fixed LLM hallucinations that would
+        # otherwise have quarantined. Showing it builds trust ("I
+        # see the system fixing things automatically").
+        if _auto_corrected > 0:
+            st.caption(
+                f"_Of the {_imp} imported, **{_auto_corrected} needed "
+                f"the Auto-Correction Loop** to fix a transient LLM "
+                f"mistake (1–{_auto_corrected * 5} extra retry "
+                f"call(s)). Cloud Logging has per-attempt detail "
+                f"(filter on `event=auto_correction_attempt_*`)._"
+            )
     with st.expander("Full result (structured)", expanded=False):
         st.json(last_result)
 
@@ -519,6 +876,20 @@ with st.expander(
                             "sidecar in GCS for full details.",
                             icon="🛑",
                         )
+                    # PUI-1F v3.2 (2026-04-29 smoke 5 cleanup): the
+                    # "Show full quarantine details" expander shipped in
+                    # v3.1 was redundant. Now that the error_preview
+                    # skips the preamble + caps at 1500 chars, the
+                    # preview shows the actual diagnostic content for
+                    # essentially every quarantine. Operators flagged
+                    # the duplicate cards as confusing in smoke 5
+                    # ("why am I seeing 2 cards"). Removed.
+                    #
+                    # The read_quarantine_sidecar helper in
+                    # common.storage stays available for future use
+                    # (e.g., a "Download full sidecar" button) and for
+                    # operator gcloud-debugging continuity.
+
                     # Then the HCL itself
                     try:
                         content = read_workdir_file(
@@ -539,6 +910,12 @@ with st.expander(
                         mime="text/plain",
                         key=f"dl_quarantine_{fname}",
                     )
+
+# NOTE: Danger Zone is rendered earlier in the page (right after Stage A's
+# Discover button, BEFORE the discovery-required early-stop). See
+# _render_danger_zone() above. This was moved out of the Stage B render
+# path in the 2026-04-29 smoke 4 fix so operators can reset a workdir
+# without first having to click Discover.
 
 if not import_button:
     st.stop()
@@ -615,6 +992,10 @@ try:
             result = run_workflow(
                 project_id=project_id,
                 selected_indices=selected_indices,
+                # PUI-1F: pass through the operator's explicit re-codify
+                # opt-in (only true when they unchecked "Hide already
+                # imported" AND selected at least one imported row).
+                force_reimport=force_reimport,
             )
 except Exception as e:  # noqa: BLE001
     st.session_state.pop(_SS_RUN_LOCK, None)
@@ -627,6 +1008,14 @@ duration = time.monotonic() - started
 result_dict = result.as_fields()
 result_dict["duration_s"] = round(duration, 2)
 st.session_state[_SS_LAST_RESULT] = result_dict
+
+# PUI-1F: bust the persisted-files cache so the picker grid's Status
+# column re-fetches and reflects the just-imported resources on the
+# next render. Without this, an operator who imports 3 buckets and
+# then revisits the picker still sees them as "Not imported" until
+# they manually click the Refresh list button -- exactly the kind of
+# stale UI that makes the engine guard feel inconsistent.
+st.session_state.pop(_SS_TF_FILES, None)
 
 # Re-render to show the result card via the "last_result" branch above.
 st.rerun()

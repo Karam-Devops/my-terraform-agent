@@ -100,7 +100,24 @@ _TRANSIENT_ERROR_TOKENS = (
 
 _vertex_initialized: bool = False
 _llm_json_client = None
-_llm_text_client = None
+
+# PERF-T3 (2026-04-29): replaced the single _llm_text_client with a
+# per-model cache so HCL gen can route cluster work to Gemini Pro
+# (high schema-adherence quality, lower quota) and everything else to
+# Gemini Flash (10x quota, fast enough for flat resources). Keys are
+# the full model_name string ("gemini-2.5-pro" / "gemini-2.5-flash" /
+# whatever else config.py defines); values are ChatVertexAI instances.
+#
+# Cache (vs. one global) chosen because:
+#   * Threadsafe by virtue of dict.setdefault (CPython GIL gives us
+#     atomic dict ops; ChatVertexAI itself is thread-safe per
+#     LangChain docs).
+#   * Construction is the expensive part (~3-5s per client); reusing
+#     across the whole process is mandatory for cold-start economics.
+#   * Different temperature / response_format settings would need
+#     different cache keys, but text-mode HCL generation uses identical
+#     settings everywhere -- model_name is the only axis.
+_llm_text_clients: dict = {}
 
 
 def _ensure_vertex_initialized() -> None:
@@ -197,8 +214,8 @@ def get_llm_client():
     return _llm_json_client
 
 
-def get_llm_text_client():
-    """Return the raw-text LLM client. Lazy-init on first call.
+def get_llm_text_client(model_name: str = None):
+    """Return the raw-text LLM client. Lazy-init + per-model cache.
 
     Used by importer's HCL generator and translator's HCL generator
     (Phase 2 of translation). Tiny temperature (0.05) gives the LLM
@@ -206,29 +223,42 @@ def get_llm_text_client():
     helpful for avoiding pathological loops where the LLM keeps
     emitting identical broken output across retries.
 
+    Args:
+        model_name: Optional explicit model identifier
+            (e.g. ``"gemini-2.5-flash"``, ``"gemini-2.5-pro"``).
+            ``None`` (default) uses ``config.GEMINI_MODEL`` --
+            preserves the pre-PERF-T3 single-client behaviour for
+            translator and any caller that doesn't care about routing.
+            Cluster-aware HCL generation passes the model_name explicitly
+            so flat resources get Flash and cluster resources get Pro.
+
     Raises:
         PreflightError: same as ``get_llm_client``.
     """
-    global _llm_text_client
-    if _llm_text_client is None:
-        _ensure_vertex_initialized()
-        _log.info("llm_client_create_start",
-                  mode="text",
-                  model=config.GEMINI_MODEL,
-                  max_retries=config.LLM_MAX_RETRIES,
-                  timeout_s=config.LLM_TIMEOUT_SECONDS)
-        # P3-5 + P4-12: same `timeout` kwarg wiring as the JSON
-        # client. See get_llm_client() docstring for the rationale +
-        # the rename history.
-        _llm_text_client = ChatVertexAI(
-            model_name=config.GEMINI_MODEL,
-            temperature=0.05,  # tiny temperature helps code-gen variety
-            max_retries=config.LLM_MAX_RETRIES,
-            timeout=config.LLM_TIMEOUT_SECONDS,
-            # No response_format -> raw text output.
-        )
-        _log.info("llm_client_create_ok", mode="text")
-    return _llm_text_client
+    resolved_model = model_name or config.GEMINI_MODEL
+    cached = _llm_text_clients.get(resolved_model)
+    if cached is not None:
+        return cached
+
+    _ensure_vertex_initialized()
+    _log.info("llm_client_create_start",
+              mode="text",
+              model=resolved_model,
+              max_retries=config.LLM_MAX_RETRIES,
+              timeout_s=config.LLM_TIMEOUT_SECONDS)
+    # P3-5 + P4-12: same `timeout` kwarg wiring as the JSON
+    # client. See get_llm_client() docstring for the rationale +
+    # the rename history.
+    client = ChatVertexAI(
+        model_name=resolved_model,
+        temperature=0.05,  # tiny temperature helps code-gen variety
+        max_retries=config.LLM_MAX_RETRIES,
+        timeout=config.LLM_TIMEOUT_SECONDS,
+        # No response_format -> raw text output.
+    )
+    _llm_text_clients[resolved_model] = client
+    _log.info("llm_client_create_ok", mode="text", model=resolved_model)
+    return client
 
 
 def _is_transient_error(exc: Exception) -> bool:
@@ -397,7 +427,15 @@ def preflight() -> dict:
     result["vertex_ai"] = "ok"
     get_llm_client()
     result["llm_json_client"] = "ok"
-    get_llm_text_client()
+    # PERF-T3: warm BOTH text-mode clients (default + Flash fallback) so
+    # the first per-resource HCL gen doesn't pay the ~3-5s
+    # ChatVertexAI cold-start. Cheap (just construction; no network
+    # call yet) and matters for the cluster-vs-non-cluster routing:
+    # without warming, the first non-cluster resource of a smoke would
+    # block the entire batch on Flash client init.
+    get_llm_text_client()  # default (config.GEMINI_MODEL)
+    if config.GEMINI_MODEL_FALLBACK and config.GEMINI_MODEL_FALLBACK != config.GEMINI_MODEL:
+        get_llm_text_client(model_name=config.GEMINI_MODEL_FALLBACK)
     result["llm_text_client"] = "ok"
     _log.info("preflight_ok", **result)
     return result

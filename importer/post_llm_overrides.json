@@ -27,6 +27,17 @@
         "block_path": "",
         "field": "enterprise_config"
       }
+    ],
+    "block_deletions": [
+      {
+        "comment": "PUI-1F v3.4 (2026-04-29 cluster smoke): the cloud snapshot's `monitoringConfig.managedPrometheusConfig` field is mistranslated by the LLM as a top-level `managed_prometheus_config { enabled = true }` block. The provider's actual schema has `monitoring_config.managed_prometheus.enabled = true` (no `_config` suffix on managed_prometheus, NESTED inside monitoring_config). Provider rejects with 'Blocks of type managed_prometheus_config are not expected here'. ACL retried 5 times with the same error -- the LLM kept producing the same hallucinated block name. Deleting the bad block is GENUINE: the block has NO valid placement in the schema (the right name would be a different block at a different path). The snapshot's actual managed-prometheus state is preserved server-side -- the cluster keeps whatever managedPrometheusConfig.enabled=true setting it has; HCL just doesn't track it (acceptable for Phase-6 demo; if customer needs explicit management, they add `monitoring_config { managed_prometheus { enabled = true } }` manually post-import). Long-term fix: LLM-1 (Claude) likely handles complex provider schemas better. Surfaced by 2026-04-29 cluster smoke on poc_cluster_std.",
+        "block_name": "managed_prometheus_config"
+      },
+      {
+        "comment": "PUI-1F v3.6 (2026-04-29 Standard cluster smoke 2): the cloud snapshot's `nodePoolDefaults.nodeConfigDefaults.loggingConfig.variant` is mistranslated by the LLM as `node_pool_defaults { node_config_defaults { logging_config { variant = \"DEFAULT\" } } }`. The provider's schema for `node_pool_defaults.node_config_defaults` does NOT have a nested `logging_config` block at that depth -- the equivalent setting is a flat `logging_variant` attribute. Provider rejects with 'Blocks of type logging_config are not expected here' (line 72 in the v3.5 quarantined HCL). Note: `logging_config` IS valid at the resource ROOT (with `enable_components`); this rule scopes deletion to ONLY the nested path via block_path so the root-level logging_config is not collateral damage. Deleting the nested block loses the `variant = \"DEFAULT\"` setting -- but DEFAULT is the provider's default value anyway, so deletion is semantically equivalent to omission. Long-term fix: rename to `logging_variant = \"DEFAULT\"` would be GENUINE (preserves intent); ship as a v3.7 follow-up if any customer needs the explicit variant.",
+        "block_path": "node_pool_defaults.node_config_defaults",
+        "block_name": "logging_config"
+      }
     ]
   },
 
@@ -46,6 +57,21 @@
         "comment": "P4-11 (re-surfaced in SMOKE 4 on poc-cloudrun): `startup_cpu_boost` was a top-level template field in v1; v2 relocated the concept under `template.containers[].startup_probe` with a different shape. The cloud snapshot's `template.startupCpuBoost` survives gcloud describe and the LLM echoes it back. Provider rejects: 'argument named startup_cpu_boost is not expected here'. Same v1-vestige class as the two siblings above (P2-8, P2-12). The CC-9 golden example pointed at the right SHAPE but the LLM still emitted the field because the input JSON had it -- few-shot didn't override input data. Three-layer fix: snapshot_scrubber strips it pre-LLM (defense layer 1, see snapshot_scrubber.py), this entry strips it post-LLM (defense layer 2), golden example trimmed to remove the misleading 'NO startup_cpu_boost' comment (defense layer 3 -- absence is the signal, not prose).",
         "block_path": "",
         "field": "startup_cpu_boost"
+      }
+    ],
+    "lifecycle_ignore_changes": [
+      {
+        "comment": "PUI-1F v3.3 (2026-04-29 smoke 5): `client` and `client_version` are server-stamped audit metadata that the Cloud Run API auto-fills based on which tool created/last-updated the resource (e.g. 'gcloud' / '565.0.0', or 'terraform' / 'X.Y.Z'). NOT operator-configurable intent -- the operator never SETS these in HCL with meaningful semantics. terraform import populates them in state from the live API. If the LLM doesn't write them in HCL (the typical case since our describe doesn't expose them), terraform plan diffs state-vs-config and wants to set them to null. ignoring is GENUINE (no info loss; the fields aren't operator-meaningful). Replaces the v3.1 lifecycle_planner._KNOWN_NOISE_FIELDS unconditional override (which fed the LLM via IGNORE_LIST and was sometimes silently ignored by the model). Post-LLM injection is deterministic.",
+        "fields": ["client", "client_version"]
+      }
+    ]
+  },
+
+  "google_compute_disk": {
+    "lifecycle_ignore_changes": [
+      {
+        "comment": "PUI-1F v3.3 (2026-04-29 smoke 5) + PUI-1H pending: `architecture` is a ForceNew + Optional + Computed field on google_compute_disk. The Google provider's terraform-import handler does NOT populate architecture from the v1 REST API response (despite the disk genuinely being X86_64/ARM64 in cloud). Symptom: state-vs-config diff on architecture triggers ForceNew => destroy+recreate of an otherwise-clean import. ignoring this field via post-LLM injection is GENUINE (HCL retains `architecture = \"X86_64\"` for documentation; terraform just doesn't try to manage drift on it). Better than stripping from snapshot (which would lose the info). The proper upstream fix is PUI-1H (file google-provider issue + maybe contribute a PR to fix the Read function). Once upstream is fixed, this entry becomes unnecessary and can be removed.",
+        "fields": ["architecture"]
       }
     ]
   }

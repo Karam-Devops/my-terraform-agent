@@ -225,6 +225,128 @@ _PROVIDER_DROPPED_PATHS: List[str] = [
 ]
 
 
+# PUI-1F v3.2 (2026-04-29 smoke 5): per-resource-type top-level field
+# strips. Different from `_PROVIDER_DROPPED_PATHS` (which applies
+# globally to every tf_type via auto_scrub_cloud_snapshot) -- entries
+# here fire ONLY for the listed tf_type. Necessary when a top-level
+# field name is shared across multiple tf_types but only some have the
+# import-quirk that requires stripping.
+#
+# Entry format: tf_type -> [list of top-level snake_case keys to strip]
+# Both snake_case and camelCase variants are matched (the key walker
+# handles transformation).
+_PER_TYPE_TOP_LEVEL_STRIP: dict = {
+    # PUI-1F v3.3 (2026-04-29 smoke 5): the `compute_disk.architecture`
+    # entry was MOVED to post_llm_overrides.json's
+    # `lifecycle_ignore_changes` block. The new approach is GENUINE
+    # rather than WORKAROUND: HCL retains `architecture = "X86_64"`
+    # (no info loss; the operator can read the .tf and see the disk's
+    # architecture); terraform's ignore_changes prevents the false-
+    # replacement diff caused by the provider's import-quirk in state.
+    #
+    # The mechanism stays here for any FUTURE per-type top-level strip
+    # where genuinely omitting from HCL is the right call (e.g., a
+    # field that simply has no valid placement in the v2 schema and
+    # belongs nowhere). Empty dict by design.
+}
+
+
+# PUI-1F v3.6 (2026-04-29 cluster smoke): per-type "unwrap nested
+# wrapper" rules. The cloud snapshot's API JSON nests certain fields
+# inside a wrapper sub-object (e.g. monitoringConfig.componentConfig.
+# enableComponents) but the current Terraform provider schema expects
+# the same fields one level UP (monitoring_config.enable_components,
+# directly under monitoring_config). The LLM faithfully copies the
+# nested wrapper from the snapshot into HCL, producing
+# `monitoring_config { component_config { enable_components = [...] } }`
+# which the provider rejects with two errors:
+#   * "argument enable_components is required" (the parent now lacks it)
+#   * "Blocks of type component_config are not expected here" (the
+#     wrapper has no valid placement in the schema)
+#
+# The fix: pre-LLM, FLATTEN the snapshot so component_config's
+# children move up to monitoring_config / logging_config. The LLM
+# then sees the correct shape and emits the correct HCL. GENUINE fix
+# (no info loss; just relocating the same data to the schema-correct
+# nesting).
+#
+# Format: tf_type -> [(parent_path, wrapper_key), ...]
+#   parent_path is dotted snake_case (handles camelCase via _candidate_keys)
+#   wrapper_key is the immediate child key to dissolve
+#
+# Add an entry here when you observe a quarantine where the LLM HCL
+# matches the snapshot structure but the provider rejects it because
+# the schema flattened a nesting level vs the API.
+_PER_TYPE_UNWRAPS: dict = {
+    "google_container_cluster": [
+        # GKE provider v6+ flattened componentConfig out of both
+        # monitoring_config and logging_config. Surfaced 2026-04-29
+        # cluster smoke on poc_cluster (Autopilot) -- ACL retried 5x
+        # with the same hallucination because the snapshot enforced it.
+        ("monitoring_config", "component_config"),
+        ("logging_config", "component_config"),
+    ],
+}
+
+
+def _unwrap_path(
+    data: Any, parent_path: str, wrapper_key: str,
+) -> bool:
+    """Lift the contents of ``data[parent_path][wrapper_key]`` into
+    ``data[parent_path]``, then delete the wrapper.
+
+    Returns True if the unwrap actually fired (wrapper was present and
+    is a dict); False otherwise (wrapper missing, parent missing, or
+    wrapper is not a dict).
+
+    Camel-case-aware: matches both snake_case and camelCase spellings
+    of ``wrapper_key`` so the same rule fires on the API's camelCase
+    snapshot AND on any pre-camelized intermediate dict.
+
+    Conflict policy: if a child key in the wrapper would clobber a
+    same-named existing key in the parent, the parent's value WINS
+    (don't overwrite operator-relevant data). The wrapper's child
+    is silently dropped in that case (defensive; should be rare).
+    """
+    if not isinstance(data, dict):
+        return False
+    # Walk to parent
+    obj: Any = data
+    for seg in parent_path.split("."):
+        if not isinstance(obj, dict):
+            return False
+        # Match snake or camel for each segment
+        candidates = _candidate_keys(seg)
+        found = None
+        for cand in candidates:
+            if cand in obj:
+                found = cand
+                break
+        if found is None:
+            return False
+        obj = obj[found]
+    if not isinstance(obj, dict):
+        return False
+    # Find the wrapper inside parent
+    wrapper_candidates = _candidate_keys(wrapper_key)
+    wrapper_found = None
+    for cand in wrapper_candidates:
+        if cand in obj:
+            wrapper_found = cand
+            break
+    if wrapper_found is None:
+        return False
+    wrapper = obj[wrapper_found]
+    if not isinstance(wrapper, dict):
+        return False
+    # Lift children up; parent wins on key conflict
+    for k, v in wrapper.items():
+        if k not in obj:
+            obj[k] = v
+    del obj[wrapper_found]
+    return True
+
+
 def _candidate_keys(snake_segment: str) -> set:
     """All cloud-JSON key spellings that could match this schema-path segment."""
     out = {snake_segment, _snake_to_camel(snake_segment)}
@@ -439,6 +561,41 @@ def auto_scrub_cloud_snapshot(
                 if key in _ALWAYS_STRIP_TOP_LEVEL:
                     del data[key]
                     all_modified.append(key)
+
+        # PUI-1F v3.2 per-type top-level strip pass. Different from
+        # _ALWAYS_STRIP_TOP_LEVEL (which fires for every tf_type) and
+        # _PROVIDER_DROPPED_PATHS (which is dotted-path + global). This
+        # pass fires ONLY for the listed tf_type and only at the top
+        # level. Used for fields whose name is shared across multiple
+        # tf_types but only some have the import-quirk requiring strip.
+        if isinstance(data, dict):
+            per_type_strips = _PER_TYPE_TOP_LEVEL_STRIP.get(tf_type, [])
+            for snake_key in per_type_strips:
+                # Match both snake_case and camelCase variants of the key.
+                # _candidate_keys returns the set of valid spellings for
+                # a given snake_case path segment (handles plurals too).
+                for candidate in _candidate_keys(snake_key):
+                    if candidate in data:
+                        del data[candidate]
+                        all_modified.append(candidate)
+
+        # PUI-1F v3.6 per-type "unwrap nested wrapper" pass. Flattens
+        # known-bad wrapper sub-objects (e.g. monitoring_config.
+        # component_config -> monitoring_config) so the LLM sees the
+        # schema-correct shape and emits the schema-correct HCL.
+        # See _PER_TYPE_UNWRAPS comment block for full rationale.
+        if isinstance(data, dict):
+            unwraps = _PER_TYPE_UNWRAPS.get(tf_type, [])
+            for parent_path, wrapper_key in unwraps:
+                if _unwrap_path(data, parent_path, wrapper_key):
+                    label = f"{parent_path}.{wrapper_key} (unwrapped)"
+                    all_modified.append(label)
+                    _log.info(
+                        "snapshot_scrubber_unwrap_applied",
+                        tf_type=tf_type,
+                        parent_path=parent_path,
+                        wrapper_key=wrapper_key,
+                    )
 
         if oracle.has(tf_type):
             computed_only = oracle.computed_only_paths(tf_type)

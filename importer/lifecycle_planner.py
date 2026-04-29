@@ -58,6 +58,24 @@ _NEVER_IGNORE = {
 }
 
 
+# PUI-1F v3.3 (2026-04-29 smoke 5): _KNOWN_NOISE_FIELDS retired.
+# Was added in v3.1 as a per-type override that fed unconditional
+# ignore-list hints to the LLM via IGNORE_LIST. Problem: the LLM
+# could (and did) silently skip writing the lifecycle block if it
+# didn't see the fields in the snapshot.
+#
+# Replaced by post_llm_overrides `lifecycle_ignore_changes` operation
+# which deterministically INJECTS the lifecycle block post-LLM. See
+# importer/post_llm_overrides.py:_inject_lifecycle_ignore_changes
+# and the entries in importer/post_llm_overrides.json for
+# google_cloud_run_v2_service and google_compute_disk.
+#
+# Empty dict kept so any external test mocks importing the symbol
+# don't break. Future "always ignore" rules belong in
+# post_llm_overrides.json, not here.
+_KNOWN_NOISE_FIELDS: dict = {}
+
+
 def _snake_to_camel(name: str) -> str:
     if "_" not in name:
         return name
@@ -133,5 +151,37 @@ def derive_lifecycle_ignores(cloud_data: dict, tf_type: str) -> List[str]:
             if key in cloud_data and _is_present(cloud_data[key]):
                 ignore.add(path)
                 break
+
+    # PUI-1F v3.1 known-noise overrides (see _KNOWN_NOISE_FIELDS).
+    # Same _NEVER_IGNORE / pure_computed safety filters so a wrong
+    # override entry can't crash terraform with "no configured
+    # value to compare with."
+    #
+    # PUI-1F v3.2 (2026-04-29 smoke 5 fix): UNCONDITIONAL -- we no
+    # longer require the field to be present in cloud_data. Previously
+    # we mirrored the oracle-driven loop's "field present in cloud"
+    # guard, but that broke for cloud_run_v2_service: the discovery
+    # API doesn't return `client`/`clientVersion` in cloud_data, so
+    # the override never fired, even though terraform import DID
+    # populate them in state (different code path -- terraform reads
+    # them via the v1 REST API directly). Result: HCL had no
+    # ignore_changes block, plan diff'd, quarantine fired.
+    #
+    # Unconditional means: for any tf_type listed here, the named
+    # fields ALWAYS land in lifecycle.ignore_changes. By definition
+    # these are server-stamped metadata that the operator never
+    # configures, so it's safe to ignore them blanket-style. A wrong
+    # entry in this dict silently masks real drift -- still gated
+    # on operator vigilance when adding entries.
+    for noise_field in _KNOWN_NOISE_FIELDS.get(tf_type, []):
+        if noise_field in _NEVER_IGNORE or noise_field in pure_computed:
+            continue
+        ignore.add(noise_field)
+        _log.info(
+            "lifecycle_planner_known_noise_added",
+            tf_type=tf_type,
+            field=noise_field,
+            policy="unconditional",
+        )
 
     return sorted(ignore)

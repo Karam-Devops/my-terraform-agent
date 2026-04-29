@@ -15,6 +15,7 @@ from . import (
     snapshot_scrubber, lifecycle_planner, resource_mode,
     inventory as _inventory,
     quarantine as _quarantine,
+    _status,
 )
 
 
@@ -821,6 +822,7 @@ def run_workflow(
     project_id: Optional[str] = None,
     *,
     selected_indices: Optional[Union[List[int], str]] = None,
+    force_reimport: bool = False,
 ) -> WorkflowResult:
     """Main function with RAG-powered, parallel bulk import and self-correction.
 
@@ -1047,6 +1049,118 @@ def run_workflow(
             started=started,
         )
 
+    # PUI-1F engine guard (2026-04-29): skip LLM calls for resources
+    # whose .tf file already exists at the workdir top level. Without
+    # this guard, every re-click of "Run import" on the SAME selection
+    # burns N more LLM calls, overwrites the existing HCL with a
+    # non-deterministic re-generation, and may create spurious
+    # quarantines if the new HCL drifts from the state. Operator
+    # explicitly opts in via force_reimport=True (UI: confirm modal
+    # behind "Hide already imported" toggle).
+    #
+    # Quarantined files (_quarantine/*.tf) are NOT treated as imported
+    # here -- the operator's explicit re-codify of a quarantined row
+    # SHOULD fire the LLM (that's the whole point of the
+    # needs-attention review). Only the top-level .tf set is the
+    # "already done" set.
+    #
+    # Defined OUTSIDE the if-block so the final _build_result call at
+    # the bottom of run_workflow can reference it unconditionally
+    # (force_reimport=True path leaves it 0, which is correct: the
+    # engine processed everything, nothing was auto-skipped).
+    #
+    # PUI-1F v3 (2026-04-29): SOURCE OF TRUTH FIXED. Pre-v3 we did
+    # `os.listdir(workdir)` -- which reads from the local /tmp cache
+    # the workdir_context middleware (app/middleware.py) maintains
+    # per-Streamlit-session. That cache is invalidated by container
+    # restart, NOT by external GCS mutations. So a `gcloud storage rm`
+    # on the GCS prefix would NOT bust the local cache, and the
+    # engine guard would happily skip 8 resources because their .tf
+    # files were still resident in stale /tmp -- even though GCS was
+    # genuinely empty. Then persist_workdir on exit would re-upload
+    # the stale .tf files, repopulating GCS with phantom data.
+    #
+    # Verified live during 2026-04-29 smoke: operator wiped GCS,
+    # ran import on 8 picks, got "0 imported / 8 skipped" with files
+    # reappearing in GCS post-run. Bug reproducible 100%.
+    #
+    # Fix: read the imported set from GCS via list_workdir_tf_files()
+    # so the engine + UI share ONE source of truth. Any external
+    # mutation (operator's gcloud rm, future PUI-1C Reset button,
+    # other tenant tooling) is now visible to the engine guard
+    # immediately, with no cache to bust.
+    skipped_already_imported_count = 0
+    if not force_reimport:
+        try:
+            from common.storage import list_workdir_tf_files
+            _gcs_files = list_workdir_tf_files(project_id)
+            # Only top-level .tf (status="imported") counts as "already
+            # done." Quarantined files (status="needs_attention") are
+            # explicitly NOT in the skip set -- re-codifying a
+            # quarantined row IS the operator's intended action when
+            # they pick it from the picker.
+            top_level = {
+                f["name"] for f in _gcs_files
+                if f["status"] == "imported"
+            }
+            _log.info(
+                "engine_guard_source_loaded",
+                project_id=project_id,
+                gcs_imported_count=len(top_level),
+                source="gcs_list_workdir_tf_files",
+            )
+        except Exception as gcs_err:  # noqa: BLE001
+            # GCS read failure: fall back to "nothing skipped." This
+            # over-fires LLM (worst-case wastes calls) but never
+            # under-fires (which would silently skip a resource the
+            # operator wanted imported). Log loudly so the failure is
+            # visible -- if this fires every run, GCS auth or perms
+            # need fixing, not the engine guard.
+            top_level = set()
+            _log.warning(
+                "engine_guard_source_failed",
+                project_id=project_id,
+                error_type=type(gcs_err).__name__,
+                error=str(gcs_err)[:300],
+                fallback="empty_set_fire_llm_for_all",
+            )
+        kept_mappings = []
+        for m in mappings:
+            if m["filename"] in top_level:
+                _log.info(
+                    "skipped_already_imported",
+                    project_id=project_id,
+                    tf_type=m["tf_type"],
+                    hcl_name=m["hcl_name"],
+                    filename=m["filename"],
+                    reason=("Top-level .tf already exists; skipping "
+                            "LLM regen to preserve existing HCL and "
+                            "avoid quota burn. Re-import explicitly "
+                            "via UI's 'Re-codify' confirmation."),
+                )
+                skipped_already_imported_count += 1
+            else:
+                kept_mappings.append(m)
+        if skipped_already_imported_count:
+            print(f"   ✓ Skipped {skipped_already_imported_count} "
+                  f"already-imported resource(s) (LLM call avoided)")
+        mappings = kept_mappings
+        if not mappings:
+            # Everything the operator picked was already imported.
+            # Workflow completes cleanly with all picks landing in the
+            # `skipped` bucket -- no LLM calls fired. exit_code=0.
+            # PUI-1F: tag with auto_skipped so the UI knows this was
+            # the "everything was already imported" path, not the
+            # "no TF mapping" path -- distinct success messaging.
+            print(f"   ℹ All {skipped_already_imported_count} selected "
+                  f"resource(s) already imported; nothing to do.")
+            return _build_empty_result(
+                project_id=project_id,
+                selected=len(selected_assets),
+                started=started,
+                auto_skipped=skipped_already_imported_count,
+            )
+
     print("\n--- Pre-loading all required documentation schemas ---")
     schemas = {m['tf_type']: knowledge_base.get_schema_for_resource(m['tf_type']) for m in mappings}
     # P4-13: heuristics_kb retained as an empty-dict shim so existing
@@ -1057,13 +1171,74 @@ def run_workflow(
 
     print("\n--- Generating Initial HCL Files in Parallel ---")
     initial_results = []
+    # PERF-T3a (2026-04-29): submission stagger to smooth burst rate.
+    # Pre-PERF-T3 the executor submitted ALL N mappings as futures
+    # back-to-back, so up to MAX_IMPORT_WORKERS threads each fired
+    # ChatVertexAI.invoke() within the same ~50ms window. With Vertex
+    # AI's 60-RPM per-project default quota for Gemini Pro, an
+    # all-cluster batch instantly tripped 429 ResourceExhausted and
+    # langchain's exponential backoff (4s, 8s, 16s sleeps) compounded
+    # across the batch -- a 2-cluster smoke took >15min instead of
+    # ~90s.
+    #
+    # The stagger here adds a small sleep between submissions so the
+    # ThreadPoolExecutor's actual call rate caps at ~2/sec even with
+    # MAX_IMPORT_WORKERS=4 ready to run. Combined with PERF-T3b's
+    # Flash routing (most resources go to a 600-RPM model), this keeps
+    # the per-Pro-resource rate well under quota for any realistic
+    # smoke size.
+    #
+    # Why submit-stagger instead of lowering MAX_IMPORT_WORKERS:
+    # parallelism still helps -- the LLM call is I/O-bound (~10-30s
+    # waiting on Vertex), so 4 threads give us 4x throughput once the
+    # initial burst has been smoothed. Lowering workers would slow the
+    # whole batch; staggering only smooths the start.
+    _SUBMIT_STAGGER_S = 0.5
     with concurrent.futures.ThreadPoolExecutor(max_workers=config.MAX_IMPORT_WORKERS) as executor:
-        future_to_gen = {executor.submit(_generate_and_save_hcl, m, schemas.get(m['tf_type']), heuristics_kb): m for m in mappings}
+        future_to_gen = {}
+        for i, m in enumerate(mappings):
+            if i > 0:
+                time.sleep(_SUBMIT_STAGGER_S)
+            future = executor.submit(
+                _generate_and_save_hcl, m,
+                schemas.get(m['tf_type']), heuristics_kb,
+            )
+            future_to_gen[future] = m
         for future in concurrent.futures.as_completed(future_to_gen):
             mapping, success, data = future.result()
             initial_results.append({'mapping': mapping, 'is_success': success, 'data': data})
 
     successful_generations = [r for r in initial_results if r['is_success']]
+    # PUI-1F v3 follow-up (2026-04-29 smoke 3 fix): track HCL-gen
+    # failures separately so they land in the `failed` bucket of the
+    # final result. Pre-fix, only the all-failed shortcut below
+    # accounted for HCL-gen failures; the partial-failure case
+    # (e.g., 2/3 succeed, 1 fails) silently dropped the failed one
+    # from `all_results`, which then leaked it into the catch-all
+    # `skipped = selected - imported - failed - needs_attention`
+    # math at result-build time. Symptom: operator picks 3,
+    # 1 imports, 1 quarantines, 1 disappears as "skipped" with
+    # auto_skipped=0 -- exactly the 2026-04-29 smoke 3 confusion.
+    #
+    # Keep these out of failed_imports (downstream code does
+    # interactive correction + classify_blockage on those, neither
+    # of which makes sense for an HCL-gen failure: there's no .tf
+    # file to correct). Just count them and add the count to
+    # _build_result(failed=...) at the bottom.
+    hcl_gen_failed_count = len(initial_results) - len(successful_generations)
+    if hcl_gen_failed_count:
+        _log.warning(
+            "hcl_gen_partial_failure",
+            project_id=project_id,
+            total_mappings=len(mappings),
+            hcl_gen_succeeded=len(successful_generations),
+            hcl_gen_failed=hcl_gen_failed_count,
+            failed_resources=[
+                r['mapping'].get('resource_name', '')
+                for r in initial_results if not r['is_success']
+            ][:20],
+        )
+
     if not successful_generations:
         # All HCL generations failed -- workflow completed, every mapped
         # resource ends up in the failed bucket. exit_code will be 1.
@@ -1102,6 +1277,17 @@ def run_workflow(
     # populated (zero in CLI mode); WorkflowResult carries the count
     # so dashboards filter on it uniformly.
     quarantined_count = 0
+    # PUI-1F v3.3 Fix 1: count of resources that imported only after
+    # the Auto-Correction Loop fixed an LLM mistake. Defined HERE
+    # (outside the auto-quarantine branch) so the final _build_result
+    # call can reference it unconditionally; CLI mode leaves it 0.
+    auto_corrected_count = 0
+    # PUI-1F v3.5: count of items that survived the auto-quarantine
+    # path but failed BOTH re-verify AND ACL AND quarantine. These
+    # used to vanish into catch-all `skipped` (the Autopilot bug);
+    # now we propagate them to the `failed` bucket so accounting is
+    # honest. CLI mode leaves it 0.
+    auto_quarantine_unrecovered_count = 0
 
     if failed_imports:
         # Path 1: classify failures into self_broken vs blocked-by-sibling
@@ -1124,9 +1310,144 @@ def run_workflow(
             print("\n" + "="*70)
             print(f"--- CG-7 Headless Quarantine ({len(failed_imports)} failed resources) ---")
             print(f"    {n_self} self-broken · {n_blocked} blocked by sibling files")
-            print(f"    Quarantining self-broken; survivors will re-verify automatically.")
+            print(f"    Auto-correction first, then quarantine; survivors re-verify.")
             print("="*70)
 
+            # PUI-1F v3.3 Fix 1 (CLI parity, 2026-04-29): Auto-Correction
+            # Loop. Mirrors CLI HITL option [2] ("Let AI self-correct")
+            # without the stdin prompt. Each self_broken item gets up to
+            # MAX_LLM_RETRIES retries with the previous error fed back to
+            # the LLM as context, BEFORE quarantine fires.
+            #
+            # Why: pre-Fix-1, SaaS quarantined immediately on first
+            # plan-verify failure -- giving up the 5-retry budget that
+            # CLI had. Most "Unsupported argument" / "Conflicting
+            # configuration" errors get fixed on retry 1-2 because the
+            # LLM, now seeing the actual provider error, knows what to
+            # remove. Without this loop, a resource CLI would have
+            # rescued in 1-2 retries got quarantined in SaaS instantly.
+            # That asymmetry is what produced the smoke-5 mismatch
+            # ("CLI passed; SaaS quarantines on the same resources").
+            #
+            # The HITL "provide a snippet" path ([1]) is NOT mirrored
+            # here -- it requires operator interaction. PUI-1J (queued)
+            # adds that as a UI button on quarantine cards.
+            #
+            # auto_corrected_count is initialized at the top of
+            # run_workflow (alongside quarantined_count) so the final
+            # _build_result call can reference it unconditionally.
+            self_broken_items = [
+                f for f in failed_imports
+                if f.get('_blockage') == 'self_broken'
+            ]
+            if self_broken_items:
+                print(
+                    f"\n--- Auto-Correction Loop "
+                    f"({len(self_broken_items)} item(s), "
+                    f"up to {config.MAX_LLM_RETRIES} retries each) ---"
+                )
+                for failed_item in list(failed_imports):
+                    if failed_item.get('_blockage') != 'self_broken':
+                        continue
+                    mapping = failed_item['mapping']
+                    tf_address = (
+                        f"{mapping['tf_type']}.{mapping['hcl_name']}"
+                    )
+                    current_error = failed_item['data'].get('error', '')
+                    resource_json = failed_item['data'].get('json', '')
+                    if not resource_json:
+                        # Defensive: HCL-gen-failure path doesn't
+                        # populate 'json', so we have no snapshot to
+                        # feed the correction LLM. Skip ACL; existing
+                        # quarantine logic below handles it.
+                        _log.warning(
+                            "auto_correction_skipped_no_snapshot",
+                            tf_address=tf_address,
+                            reason="failed_item.data has no 'json' key",
+                        )
+                        continue
+
+                    correction_succeeded = False
+                    for attempt in range(config.MAX_LLM_RETRIES):
+                        _log.info(
+                            "auto_correction_attempt_start",
+                            tf_address=tf_address,
+                            attempt=attempt + 1,
+                            max_attempts=config.MAX_LLM_RETRIES,
+                        )
+                        print(
+                            f"   🔧 Auto-correcting {tf_address} "
+                            f"(attempt {attempt + 1}/"
+                            f"{config.MAX_LLM_RETRIES})..."
+                        )
+                        mapping, output, is_success = _attempt_correction(
+                            mapping, resource_json, current_error,
+                            attempt + 2,
+                            schemas.get(mapping['tf_type']),
+                            {},  # P4-13: empty heuristics_kb
+                        )
+                        if is_success:
+                            _log.info(
+                                "auto_correction_attempt_success",
+                                tf_address=tf_address,
+                                attempt=attempt + 1,
+                            )
+                            print(
+                                f"   ✅ {tf_address} auto-corrected on "
+                                f"attempt {attempt + 1}"
+                            )
+                            successful_imports.append(failed_item)
+                            failed_imports.remove(failed_item)
+                            auto_corrected_count += 1
+                            # This fix may have unblocked siblings
+                            # (matches CLI option [2] behavior).
+                            _refresh_blocked_after_fix(
+                                failed_imports,
+                                successful_imports,
+                                mapping['filename'],
+                            )
+                            correction_succeeded = True
+                            break
+                        # Retry: feed this attempt's error to next
+                        # iteration. Re-classify -- a different error
+                        # may now surface (e.g., now blocked by sibling).
+                        current_error = output
+                        failed_item['data']['error'] = output
+                        kind, blocker = _classify_blockage(failed_item)
+                        failed_item['_blockage'] = kind
+                        failed_item['_blocker'] = blocker
+                        if kind != 'self_broken':
+                            # No longer self_broken -> stop retrying;
+                            # let the sibling-unblock pass below
+                            # handle it.
+                            _log.info(
+                                "auto_correction_classified_blocked",
+                                tf_address=tf_address,
+                                attempt=attempt + 1,
+                                new_blockage=kind,
+                                blocker=blocker,
+                            )
+                            break
+                    if not correction_succeeded:
+                        _log.warning(
+                            "auto_correction_attempts_exhausted",
+                            tf_address=tf_address,
+                            attempts=config.MAX_LLM_RETRIES,
+                        )
+                        print(
+                            f"   ❌ {tf_address} still failing after "
+                            f"{config.MAX_LLM_RETRIES} retries; "
+                            f"will quarantine."
+                        )
+                if auto_corrected_count:
+                    print(
+                        f"\n   ✓ Auto-Correction Loop fixed "
+                        f"{auto_corrected_count}/{len(self_broken_items)} "
+                        f"resource(s); falling through to quarantine "
+                        f"for the rest."
+                    )
+
+            # Quarantine the still-self_broken items (ACL didn't save them).
             for failed_item in list(failed_imports):
                 if failed_item.get('_blockage') != 'self_broken':
                     continue
@@ -1136,7 +1457,8 @@ def run_workflow(
                 workdir = mapping.get('workdir')
                 reason = (
                     f"Auto-quarantined after import + plan verification "
-                    f"failed.\n\n"
+                    f"failed (and {config.MAX_LLM_RETRIES} auto-correction "
+                    f"retries didn't resolve it).\n\n"
                     f"Terraform error (truncated):\n"
                     f"{(failed_item['data'].get('error') or '')[:1000]}"
                 )
@@ -1178,34 +1500,170 @@ def run_workflow(
             for failed_item in list(failed_imports):
                 mapping = failed_item['mapping']
                 tf_address = f"{mapping['tf_type']}.{mapping['hcl_name']}"
-                is_success, _plan_output = terraform_client.plan_for_resource(mapping)
+                is_success, plan_output = terraform_client.plan_for_resource(mapping)
                 if is_success:
                     # Auto-promoted to imported.
                     successful_imports.append(failed_item)
                     failed_imports.remove(failed_item)
                     print(f"   ✅ Auto-promoted (sibling unblocked): {tf_address}")
                 else:
-                    still_failing.append(tf_address)
+                    # Save the latest error so v3.5's ACL pass can use
+                    # it as retry context (was discarded pre-v3.5).
+                    failed_item['data']['error'] = plan_output
+                    still_failing.append(failed_item)
 
+            # PUI-1F v3.5 (2026-04-29 cluster smoke): blocked-item ACL.
+            # Pre-v3.5, items that were classified as `blocked` (their
+            # initial plan-verify error pointed at a sibling's bad .tf)
+            # got ONE re-verify chance after siblings were quarantined.
+            # If they failed re-verify, they were silently lost from
+            # accounting (failed_imports = [] at the end nuked them, +
+            # math put them in catch-all skipped). Worse: their
+            # broken .tf stayed at the workdir top level, lying to
+            # operators about being "imported".
+            #
+            # Fix: give blocked-then-failed items the SAME 5-retry ACL
+            # budget self_broken items get. CLI parity (the HITL menu
+            # offered "[2] AI self-correct" on these too). Then if ACL
+            # exhausts, QUARANTINE them so the broken .tf moves to
+            # _quarantine/ with a sidecar -- no more silent broken
+            # state at top level.
             if still_failing:
-                print(f"\n   {len(still_failing)} resource(s) still failing after "
-                      f"quarantine of self-broken siblings:")
-                for addr in still_failing:
-                    print(f"     • {addr}")
-                # These remain in failed_imports and will land in
-                # the WorkflowResult's `failed` bucket.
+                print(
+                    f"\n--- Auto-Correction Loop (re-verify survivors): "
+                    f"{len(still_failing)} item(s), up to "
+                    f"{config.MAX_LLM_RETRIES} retries each ---"
+                )
+                for failed_item in list(still_failing):
+                    mapping = failed_item['mapping']
+                    tf_address = (
+                        f"{mapping['tf_type']}.{mapping['hcl_name']}"
+                    )
+                    current_error = failed_item['data'].get('error', '')
+                    resource_json = failed_item['data'].get('json', '')
+                    if not resource_json:
+                        _log.warning(
+                            "auto_correction_skipped_no_snapshot",
+                            tf_address=tf_address,
+                            phase="reverify_survivors",
+                            reason="failed_item.data has no 'json' key",
+                        )
+                        continue
+
+                    correction_succeeded = False
+                    for attempt in range(config.MAX_LLM_RETRIES):
+                        _log.info(
+                            "auto_correction_attempt_start",
+                            tf_address=tf_address,
+                            attempt=attempt + 1,
+                            max_attempts=config.MAX_LLM_RETRIES,
+                            phase="reverify_survivors",
+                        )
+                        print(
+                            f"   🔧 Auto-correcting {tf_address} "
+                            f"(reverify retry "
+                            f"{attempt + 1}/{config.MAX_LLM_RETRIES})..."
+                        )
+                        mapping, output, is_success = _attempt_correction(
+                            mapping, resource_json, current_error,
+                            attempt + 2,
+                            schemas.get(mapping['tf_type']),
+                            {},
+                        )
+                        if is_success:
+                            _log.info(
+                                "auto_correction_attempt_success",
+                                tf_address=tf_address,
+                                attempt=attempt + 1,
+                                phase="reverify_survivors",
+                            )
+                            print(
+                                f"   ✅ {tf_address} auto-corrected "
+                                f"on reverify-retry {attempt + 1}"
+                            )
+                            successful_imports.append(failed_item)
+                            failed_imports.remove(failed_item)
+                            still_failing.remove(failed_item)
+                            auto_corrected_count += 1
+                            correction_succeeded = True
+                            break
+                        current_error = output
+                        failed_item['data']['error'] = output
+
+                    if not correction_succeeded:
+                        _log.warning(
+                            "auto_correction_attempts_exhausted",
+                            tf_address=tf_address,
+                            attempts=config.MAX_LLM_RETRIES,
+                            phase="reverify_survivors",
+                        )
+
+                # PUI-1F v3.5 (continued): quarantine still_failing
+                # items that ACL didn't save. This ELIMINATES the
+                # silent-broken-state bug -- broken .tf moves out of
+                # the top-level workdir, gets a sidecar with the
+                # error, and surfaces in the UI's Needs Attention
+                # section. Operator sees "this needs review" instead
+                # of an apparently-clean import.
+                for failed_item in list(still_failing):
+                    if failed_item not in failed_imports:
+                        # Was promoted by ACL above; skip.
+                        continue
+                    mapping = failed_item['mapping']
+                    tf_address = (
+                        f"{mapping['tf_type']}.{mapping['hcl_name']}"
+                    )
+                    hcl_filename = mapping.get('filename')
+                    workdir = mapping.get('workdir')
+                    reason = (
+                        f"Auto-quarantined after re-verify failed (item was "
+                        f"initially classified as blocked-by-sibling; "
+                        f"after sibling was quarantined, this resource's "
+                        f"own plan-verify still failed; "
+                        f"{config.MAX_LLM_RETRIES} ACL retries didn't "
+                        f"resolve it).\n\n"
+                        f"Terraform error (truncated):\n"
+                        f"{(failed_item['data'].get('error') or '')[:1000]}"
+                    )
+                    ok = _quarantine.quarantine_resource(
+                        workdir=workdir,
+                        tf_address=tf_address,
+                        hcl_filename=hcl_filename,
+                        reason=reason,
+                    )
+                    if ok:
+                        quarantined_count += 1
+                        failed_imports.remove(failed_item)
+                        print(
+                            f"   ⚠  Quarantined (reverify-survivor) "
+                            f"{tf_address} -> _quarantine/{hcl_filename}"
+                        )
+                    else:
+                        # quarantine_resource already logged the
+                        # reason; leave the item in failed_imports
+                        # so it lands in the `failed` bucket of the
+                        # WorkflowResult instead of being silently
+                        # cleared.
+                        print(
+                            f"   ❌ Quarantine failed for {tf_address} "
+                            f"(reverify-survivor); will report as failed."
+                        )
+
+            # PUI-1F v3.5 accounting fix: capture remaining failed
+            # count BEFORE clearing the list. Pre-v3.5, the clear
+            # below nuked these items from `failed` accounting and
+            # they landed in catch-all `skipped`. Now we propagate
+            # the count to _build_result via auto_quarantine_unrecovered.
+            auto_quarantine_unrecovered_count = len(failed_imports)
 
             # CG-7 headless mode finished -- skip the interactive HITL
             # menu entirely. The remaining failed_imports (if any) are
-            # unrecoverable; they'll land in WorkflowResult's `failed`
-            # bucket and the customer-facing UI surfaces them as
-            # "Couldn't process".
+            # unrecoverable; their count is captured above and surfaced
+            # in the WorkflowResult's `failed` bucket.
             print(f"\n   CG-7 quarantine summary: {quarantined_count} quarantined, "
-                  f"{len(failed_imports)} hard-failed")
+                  f"{auto_quarantine_unrecovered_count} hard-failed")
             print("="*70 + "\n")
-            # Skip to result construction at the bottom of run_workflow
-            # by clearing the list -- the existing CLI menu loop below
-            # is gated on `failed_imports` being truthy.
+            # Clear so the CLI HITL menu below doesn't fire.
             failed_imports = []
 
         # Existing interactive CLI menu (only runs when CG-7 headless
@@ -1429,20 +1887,47 @@ def run_workflow(
         project_id=project_id,
         selected=len(selected_assets),
         imported=len(successful_imports),
-        failed=len(failed_imports),
+        # PUI-1F v3 follow-up: include hcl_gen_failed_count in the
+        # `failed` total so partial-HCL-gen-failure runs don't leak
+        # the lost resources into `skipped` via the catch-all math.
+        # PUI-1F v3.5: also include auto_quarantine_unrecovered_count
+        # so blocked-then-failed-reverify-then-failed-ACL-then-failed-
+        # quarantine items land in `failed` instead of catch-all
+        # `skipped` (the 2026-04-29 Autopilot bug).
+        failed=(
+            len(failed_imports)
+            + hcl_gen_failed_count
+            + auto_quarantine_unrecovered_count
+        ),
         started=started,
         needs_attention=quarantined_count,
+        # PUI-1F: carry the engine-guard's skip count through so even
+        # mixed runs (some auto-skipped + some genuinely imported) can
+        # surface the auto-skipped tally separately in the UI.
+        auto_skipped=skipped_already_imported_count,
+        # PUI-1F v3.3 Fix 1: subset of `imported` that the
+        # Auto-Correction Loop rescued from quarantine. Surfaced in
+        # the UI so operators see the correction loop is doing real
+        # work (otherwise it's invisible -- the resource just shows
+        # "imported" with no hint that it took retries).
+        auto_corrected=auto_corrected_count,
     )
 
 
 def _build_empty_result(*, project_id: str, selected: int,
-                        started: float) -> WorkflowResult:
+                        started: float,
+                        auto_skipped: int = 0) -> WorkflowResult:
     """Shortcut for zero-activity completions (no discovery / user cancel / no mappings).
 
     ``selected`` is passed explicitly because the meaning differs by
     call site: 0 for "nothing discovered" / "user cancelled", and
     ``len(selected_assets)`` for "nothing mapped" (everything fell
     into the skipped bucket).
+
+    PUI-1F: ``auto_skipped`` lets the engine-guard "everything was
+    already imported" path tag the result so the UI can render the
+    Option-C success banner ("8 resources already imported; nothing
+    to do") instead of the neutral skipped metric.
     """
     return _build_result(
         project_id=project_id,
@@ -1450,12 +1935,15 @@ def _build_empty_result(*, project_id: str, selected: int,
         imported=0,
         failed=0,
         started=started,
+        auto_skipped=auto_skipped,
     )
 
 
 def _build_result(*, project_id: str, selected: int, imported: int,
                   failed: int, started: float,
-                  needs_attention: int = 0) -> WorkflowResult:
+                  needs_attention: int = 0,
+                  auto_skipped: int = 0,
+                  auto_corrected: int = 0) -> WorkflowResult:
     """Assemble the final WorkflowResult and emit the completion event.
 
     Centralises three concerns that must stay in lockstep:
@@ -1472,6 +1960,12 @@ def _build_result(*, project_id: str, selected: int, imported: int,
     CG-7 (P4 hotfix): added ``needs_attention`` param. Defaults 0 to
     preserve back-compat for the existing CLI-only call sites that
     didn't account for quarantined resources.
+
+    PUI-1F (2026-04-29): added ``auto_skipped`` param -- a SUBSET of
+    ``skipped`` that was specifically auto-skipped by the engine guard
+    (already-imported resources; no LLM call). Lets the UI show a
+    positive "already imported" success message instead of the neutral
+    "skipped" metric. Math invariant unchanged: auto_skipped <= skipped.
     """
     skipped = max(0, selected - imported - failed - needs_attention)
     duration_s = round(time.monotonic() - started, 2)
@@ -1483,6 +1977,8 @@ def _build_result(*, project_id: str, selected: int, imported: int,
         skipped=skipped,
         duration_s=duration_s,
         needs_attention=needs_attention,
+        auto_skipped=auto_skipped,
+        auto_corrected=auto_corrected,
     )
     _log.info("workflow_complete", **result.as_fields())
 

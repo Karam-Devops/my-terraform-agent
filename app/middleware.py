@@ -279,6 +279,95 @@ def workdir_context(
             os.environ["MTAGENT_IMPORT_BASE"] = prev_base
 
 
+def bust_workdir_cache(
+    project_id: str,
+    *,
+    tenant_id: Optional[str] = None,
+) -> dict:
+    """Drop the per-(tenant, project) workdir handle from session cache.
+
+    PUI-1C (2026-04-29): companion to ``common.storage.reset_workdir``.
+    The GCS wipe alone isn't enough -- the Streamlit session also
+    caches a local ``/tmp/<uuid>/<project>/`` directory in
+    ``session.handles[(tenant, project)]`` and reuses it across
+    Run-import clicks. After an external GCS wipe, the next
+    ``workdir_context()`` call would hit this cache (NO re-hydrate),
+    yielding a stale local /tmp -- which subsequent ``persist_workdir``
+    re-uploads, repopulating GCS with phantom data.
+
+    This function bursts the cache for one (tenant, project) pair so
+    the next ``workdir_context()`` is a fresh hydrate. Best-effort
+    cleans up the local /tmp tree too (frees disk; Cloud Run's
+    ephemeral /tmp would clean it on container restart anyway).
+
+    Args:
+        project_id: GCP project ID being reset.
+        tenant_id: Multi-tenant identifier (defaults "default").
+
+    Returns:
+        Dict for audit-log emission::
+
+            {
+              "cache_hit": True,             # was there a handle to bust?
+              "local_path_removed": "/tmp/imported/.../dev-proj-470211",
+              "tenant_id": "default",
+              "project_id": "dev-proj-470211",
+            }
+
+        ``cache_hit == False`` is a valid no-op result (no session
+        handle existed -- e.g., fresh tab that hadn't done Discover
+        yet). Caller can render as success ("nothing to clear")
+        rather than error.
+    """
+    tenant = tenant_id or "default"
+    session = _get_session()
+    cache_key = (tenant, project_id)
+
+    handle = session.handles.pop(cache_key, None)
+    if handle is None:
+        _log.info(
+            "workdir_cache_bust_no_op",
+            tenant_id=tenant,
+            project_id=project_id,
+            reason="no_cached_handle",
+        )
+        return {
+            "cache_hit": False,
+            "local_path_removed": None,
+            "tenant_id": tenant,
+            "project_id": project_id,
+        }
+
+    parent = os.path.dirname(handle.local_path)
+    local_removed = None
+    if os.path.isdir(parent):
+        try:
+            shutil.rmtree(parent)
+            local_removed = parent
+        except OSError as e:
+            _log.warning(
+                "workdir_cache_bust_local_rmtree_failed",
+                tenant_id=tenant,
+                project_id=project_id,
+                request_uuid=handle.request_uuid,
+                local_path=parent,
+                error=str(e),
+            )
+    _log.info(
+        "workdir_cache_bust_complete",
+        tenant_id=tenant,
+        project_id=project_id,
+        request_uuid=handle.request_uuid,
+        local_path_removed=local_removed,
+    )
+    return {
+        "cache_hit": True,
+        "local_path_removed": local_removed,
+        "tenant_id": tenant,
+        "project_id": project_id,
+    }
+
+
 def cleanup_session_workdirs() -> None:
     """Remove all session-cached local /tmp dirs.
 

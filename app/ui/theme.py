@@ -88,6 +88,58 @@ _BASE_CSS = f"""
     box-shadow: 0 4px 16px rgba(0, 196, 167, 0.45);
 }}
 
+/* Danger button: primary buttons INSIDE expanders render red, not
+   teal. Streamlit doesn't expose a `kind="danger"` -- we ride on the
+   convention that the only primary buttons we put inside expanders
+   are destructive ones (today: PUI-1C "Reset workdir" in the Danger
+   Zone expander). Adding a non-destructive primary button inside an
+   expander in the future would inherit the red treatment, which is
+   wrong -- comment is here so future contributors see the convention.
+   If we ever need a non-danger primary button inside an expander,
+   wrap it in a CSS marker container OR pin the danger styling to a
+   data attribute we set ourselves.
+
+   PUI-1F v3.1 follow-up (CSS specificity fix): Streamlit's own
+   primary-color style targets `[data-baseweb="button"]` with high
+   specificity / inline style. Without `!important`, our selector
+   loses the cascade and the button stays mint. Same `!important`
+   pattern used by the existing data_editor row-hover override
+   above. */
+/* Selectors are belt-and-braces:
+     * `kind="primary"` -- legacy Streamlit attribute (still emitted
+       in 1.56 but may be deprecated in later versions)
+     * `data-testid="stBaseButton-primary"` -- modern Streamlit
+       (1.30+) test attribute used by Streamlit's own internal CSS
+     * `data-testid="baseButton-primary"` -- intermediate spelling
+       used in some 1.2x releases
+   Combining all three guarantees a match across Streamlit versions
+   without needing to track the exact DOM-attribute migration. */
+[data-testid="stExpander"] .stButton > button[kind="primary"],
+[data-testid="stExpander"] button[data-testid="stBaseButton-primary"],
+[data-testid="stExpander"] button[data-testid="baseButton-primary"] {{
+    background-color: {_ERROR} !important;
+    border-color: {_ERROR} !important;
+    color: #FFFFFF !important;
+}}
+[data-testid="stExpander"] .stButton > button[kind="primary"]:hover,
+[data-testid="stExpander"] button[data-testid="stBaseButton-primary"]:hover,
+[data-testid="stExpander"] button[data-testid="baseButton-primary"]:hover {{
+    /* Slightly darker red on hover (Material Design red 700-ish) */
+    background-color: #D32F2F !important;
+    border-color: #D32F2F !important;
+    /* Red glow instead of the teal one */
+    box-shadow: 0 4px 16px rgba(239, 83, 80, 0.45) !important;
+}}
+[data-testid="stExpander"] .stButton > button[kind="primary"]:disabled,
+[data-testid="stExpander"] button[data-testid="stBaseButton-primary"]:disabled,
+[data-testid="stExpander"] button[data-testid="baseButton-primary"]:disabled {{
+    /* Disabled state: muted red so it's still visually a danger
+       button but clearly inactive (no hover/click affordance). */
+    background-color: rgba(239, 83, 80, 0.35) !important;
+    border-color: rgba(239, 83, 80, 0.5) !important;
+    color: rgba(255, 255, 255, 0.6) !important;
+}}
+
 /* Sidebar header spacing -- Firefly uses tighter section gaps */
 [data-testid="stSidebar"] h3 {{
     margin-top: 1rem;

@@ -760,6 +760,30 @@ def list_workdir_tf_files(
 
     # Pass 2: read quarantine.txt sidecars for error previews.
     # Each is a small text file (~few KB); cheap to download inline.
+    #
+    # PUI-1F v3.1 (2026-04-29 smoke 4 fix): two improvements over the
+    # original 300-char preview:
+    #
+    # (a) Skip the preamble. The sidecar template (from
+    #     importer/quarantine.py) starts with ~250 chars of metadata
+    #     ("Quarantined: <addr>\nSource file: <name>\nReason:\n
+    #     Auto-quarantined after...\n\nTerraform error (truncated):\n")
+    #     before the actual terraform output begins. The previous
+    #     300-char preview consumed the entire preamble and showed
+    #     ZERO of the actual diagnostic. Now we skip past
+    #     "Terraform error (truncated):\n" if present.
+    #
+    # (b) Anchor on the actual "Error:" line when possible. terraform
+    #     plan output starts with progress lines ("Refreshing
+    #     state... [id=...]") that aren't useful for diagnosis. The
+    #     "Error:" block (or "│ Error:" with the gutter) is what the
+    #     operator needs to see. If present in the text, we slice
+    #     from there.
+    #
+    # (c) Bumped cap 300 -> 1500 chars. Most provider error blocks +
+    #     2-3 lines of HCL context fit in 1500. Beyond that, the
+    #     operator should open the full sidecar (PUI-1F v3.1 added
+    #     a "Show full quarantine details" button on each card).
     for q in quarantined:
         sidecar_path = quarantine_sidecars.get(q["name"])
         if not sidecar_path:
@@ -767,11 +791,27 @@ def list_workdir_tf_files(
         try:
             sidecar_blob = client.bucket(bucket_name).blob(sidecar_path)
             text = sidecar_blob.download_as_text()
-            # Truncate to first 300 chars for the picker preview;
-            # full content is available via read_workdir_file (UI
-            # detects status=needs_attention and reads from
-            # _quarantine/ instead of top-level).
-            q["error_preview"] = text[:300].strip()
+
+            # (a) Skip the preamble.
+            preview_start = 0
+            marker = "Terraform error (truncated):\n"
+            idx_marker = text.find(marker)
+            if idx_marker >= 0:
+                preview_start = idx_marker + len(marker)
+
+            # (b) Anchor on the actual Error: block if present.
+            # Look for both styles: bare "Error:" and the gutter form
+            # "│ Error:" terraform uses on multi-line errors.
+            for needle in ("\n│ Error:", "\nError:"):
+                err_idx = text.find(needle, preview_start)
+                if err_idx >= 0:
+                    preview_start = err_idx + 1  # past the leading \n
+                    break
+
+            # (c) 1500-char preview from the chosen anchor.
+            q["error_preview"] = text[
+                preview_start:preview_start + 1500
+            ].strip()
         except Exception:  # noqa: BLE001
             # Sidecar read failure is non-fatal -- file still listed
             # without error preview.
@@ -783,6 +823,180 @@ def list_workdir_tf_files(
     imported.sort(key=lambda f: f["name"])
     quarantined.sort(key=lambda f: f["name"])
     return imported + quarantined
+
+
+def reset_workdir(
+    project_id: str,
+    *,
+    tenant_id: Optional[str] = None,
+) -> dict:
+    """Wipe ALL persisted state for a (tenant, project) pair from GCS.
+
+    PUI-1C (2026-04-29): customer-grade replacement for the operator-
+    grade ``gcloud storage rm -r gs://.../tenants/<t>/projects/<p>/``
+    workflow. Performs a single batch delete across the entire prefix
+    (Terraform .tf files, _quarantine sidecars, .terraform/ provider
+    caches, terraform-state/, snapshots/, _diagnostics/ -- everything).
+
+    The deletion includes ALL versioned generations (not just the
+    live ones), so the project comes back to truly first-run state.
+    Without versioning-aware delete, re-importing the same resources
+    would inherit the prior generation's metadata (object locks,
+    custom-time, etc.) and behave unpredictably.
+
+    Args:
+        project_id: GCP project ID being reset.
+        tenant_id: Multi-tenant identifier (defaults "default").
+
+    Returns:
+        Dict with operational counters for audit-log emission and UI
+        display::
+
+            {
+              "deleted_blobs": 47,         # live generation deletes
+              "deleted_versions": 152,     # archived generation deletes
+              "prefix": "tenants/default/projects/dev-proj-470211/",
+              "bucket": "mtagent-state-dev",
+            }
+
+        ``deleted_blobs == 0 and deleted_versions == 0`` is a valid
+        no-op result (prefix was already empty); callers should
+        render this as "Nothing to reset" rather than as failure.
+
+    Raises:
+        ValueError: project_id / tenant_id failed validation.
+        google.api_core exceptions for genuine API failures (auth,
+            permissions, network). Caller should surface to UI.
+    """
+    tenant = tenant_id or _DEFAULT_TENANT_ID
+    _validate_ids(tenant, project_id)
+
+    bucket_name = state_bucket()
+    prefix = f"tenants/{tenant}/projects/{project_id}/"
+
+    _log.info(
+        "storage_reset_start",
+        tenant_id=tenant,
+        project_id=project_id,
+        bucket=bucket_name,
+        prefix=prefix,
+    )
+
+    client = _get_gcs_client()
+    bucket = client.bucket(bucket_name)
+
+    deleted_blobs = 0
+    deleted_versions = 0
+
+    # First pass: delete LIVE generations. With versioning ON in the
+    # bucket, this creates a "deletion marker" but the prior generation
+    # remains accessible. Counted separately so the caller can show
+    # "X live + Y archived" if that detail matters in the UI.
+    for blob in client.list_blobs(bucket, prefix=prefix):
+        try:
+            blob.delete()
+            deleted_blobs += 1
+        except Exception as e:  # noqa: BLE001 -- best-effort batch delete
+            _log.warning(
+                "storage_reset_blob_delete_failed",
+                tenant_id=tenant,
+                project_id=project_id,
+                blob_name=blob.name,
+                error_type=type(e).__name__,
+                error=str(e)[:200],
+            )
+
+    # Second pass: delete ARCHIVED generations (versioned objects).
+    # With ``versions=True``, list_blobs returns one entry per
+    # generation. We've already deleted the live ones in pass 1; here
+    # we sweep the archive so the project is genuinely empty.
+    #
+    # API: blob.delete(generation=blob.generation) targets a specific
+    # generation; without it, delete() targets the live one.
+    for blob in client.list_blobs(bucket, prefix=prefix, versions=True):
+        try:
+            blob.delete()
+            deleted_versions += 1
+        except Exception as e:  # noqa: BLE001 -- best-effort
+            _log.warning(
+                "storage_reset_version_delete_failed",
+                tenant_id=tenant,
+                project_id=project_id,
+                blob_name=blob.name,
+                generation=blob.generation,
+                error_type=type(e).__name__,
+                error=str(e)[:200],
+            )
+
+    result = {
+        "deleted_blobs": deleted_blobs,
+        "deleted_versions": deleted_versions,
+        "prefix": prefix,
+        "bucket": bucket_name,
+    }
+    _log.info(
+        "storage_reset_complete",
+        tenant_id=tenant,
+        project_id=project_id,
+        **result,
+    )
+    return result
+
+
+def read_quarantine_sidecar(
+    project_id: str,
+    tf_filename: str,
+    *,
+    tenant_id: Optional[str] = None,
+) -> str:
+    """Read the full quarantine sidecar (`<name>.tf.quarantine.txt`).
+
+    PUI-1F v3.1 (2026-04-29 smoke 4 follow-up): operator-facing
+    "Show full quarantine details" UI needs the verbatim sidecar
+    text -- not the truncated preview from list_workdir_tf_files.
+    Most quarantine errors are 500-3000 chars; cheap to download
+    inline when the operator opens an expander.
+
+    Args:
+        project_id: GCP project (validated).
+        tf_filename: BARE basename of the quarantined .tf file
+            (e.g. "google_cloud_run_v2_service_poc_cloudrun.tf").
+            Path-traversal-validated. Caller passes the same name
+            shown in the UI's "Needs attention" list.
+        tenant_id: Multi-tenant identifier (defaults "default").
+
+    Returns:
+        Full sidecar content as a UTF-8 string.
+
+    Raises:
+        ValueError: project_id / tenant_id failed validation, OR
+            tf_filename contains a path separator.
+        google.api_core.exceptions.NotFound: sidecar doesn't exist
+            (older quarantine where reason file write failed; UI
+            should catch + show "no sidecar available").
+    """
+    tenant = tenant_id or _DEFAULT_TENANT_ID
+    _validate_ids(tenant, project_id)
+    if (
+        "/" in tf_filename
+        or "\\" in tf_filename
+        or tf_filename.startswith(".")
+    ):
+        raise ValueError(
+            f"tf_filename must be a bare basename, got {tf_filename!r}",
+        )
+
+    bucket_name = state_bucket()
+    # Sidecar naming convention: dst + ".quarantine.txt" where dst is
+    # the moved .tf path. So sidecar = <name>.tf.quarantine.txt
+    # (with .tf infix). See importer/quarantine.py:166.
+    blob_path = (
+        f"tenants/{tenant}/projects/{project_id}/_quarantine/"
+        f"{tf_filename}.quarantine.txt"
+    )
+    client = _get_gcs_client()
+    blob = client.bucket(bucket_name).blob(blob_path)
+    return blob.download_as_text()
 
 
 def read_workdir_file(

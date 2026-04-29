@@ -56,8 +56,45 @@ resource "google_container_cluster" "autopilot_example" {
     workload_pool = "example-project.svc.id.goog"
   }
 
+  # logging_config and monitoring_config: CRITICAL schema note
+  # (P4-9c, 2026-04-29 cluster smoke). The cloud snapshot's API JSON
+  # nests the components inside a `componentConfig` wrapper:
+  #   "monitoringConfig": {
+  #     "componentConfig": {
+  #       "enableComponents": ["SYSTEM_COMPONENTS", ...]
+  #     }
+  #   }
+  # The TF provider v6+ schema FLATTENED this -- `enable_components`
+  # lives DIRECTLY inside monitoring_config / logging_config, NOT
+  # inside a component_config sub-block. Writing the v1-style nested
+  # wrapper produces TWO terraform errors:
+  #   * "argument enable_components is required" (parent has none)
+  #   * "Blocks of type component_config are not expected here"
+  # mtagent's snapshot_scrubber._PER_TYPE_UNWRAPS pre-flattens the
+  # snapshot so the LLM sees the correct shape -- this golden example
+  # reinforces it as the canonical form.
+  logging_config {
+    enable_components = ["SYSTEM_COMPONENTS", "WORKLOADS"]
+  }
+
+  monitoring_config {
+    enable_components = ["SYSTEM_COMPONENTS"]
+    # managed_prometheus is a sibling block inside monitoring_config,
+    # NOT a top-level resource attribute. The cloud snapshot's
+    # `managedPrometheusConfig` (note _Config suffix on the API name)
+    # gets stripped post-LLM by post_llm_overrides.json's
+    # block_deletions rule -- the CORRECT block name is just
+    # `managed_prometheus` (no _config suffix).
+    managed_prometheus {
+      enabled = true
+    }
+  }
+
   # ignore_changes for fields the GCP control plane recomputes on
-  # cluster maintenance windows / upgrades.
+  # cluster maintenance windows / upgrades. NOTE: identifiers are
+  # bare (no quotes). Quoted strings here ("min_master_version")
+  # are Terraform 0.11 syntax; Terraform 1.x emits a deprecation
+  # warning that may become an error in future major versions.
   lifecycle {
     ignore_changes = [
       node_version,
