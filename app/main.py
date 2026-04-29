@@ -55,7 +55,7 @@ st.markdown(
 # operators see what each engine does at a glance.
 col1, col2 = st.columns(2)
 with col1:
-    st.markdown("#### 📥 Importer")
+    st.markdown("#### 📦 Inventory")
     st.caption(
         "Discover GCP resources and generate Terraform code. "
         "Run this first on a new project."

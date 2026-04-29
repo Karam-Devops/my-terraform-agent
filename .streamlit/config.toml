@@ -24,27 +24,42 @@
 # server restart (Cloud Run revision rollout, or `streamlit run`
 # re-launch in local dev). NOT picked up by hot-reload.
 
+# PUI-1B v3.6 (Firefly dark): switched from light to dark base.
+# Firefly's production Inventory page is dark-mode-only; matching it
+# makes the demo "feel like Firefly" instantly. The accent (mint/teal
+# #00C4A7) carries over unchanged -- the brand color was already
+# chosen to read well on either background.
 [theme]
+# Tell Streamlit to start from the dark base. Affects defaults for
+# widget chrome (sliders, file uploaders, code blocks) that we don't
+# explicitly override below -- they pick up dark-mode-appropriate
+# styling automatically.
+base = "dark"
+
 # Primary accent -- used for buttons, links, focused widget borders.
 # Firefly's brand is in the teal/mint family; this is close to their
 # "Codify" button color from public demos. Bright enough to draw the
-# eye, calm enough not to clash with status oranges/reds.
+# eye on either light OR dark canvas (we keep it identical across
+# theme modes for brand consistency).
 primaryColor = "#00C4A7"
 
-# Main content background -- clean white. Firefly's inventory page
-# uses pure white for the main canvas with subtle gray accents only
-# in the sidebar + card backgrounds.
-backgroundColor = "#FFFFFF"
+# Main content background -- near-black with a hint of navy (matches
+# Streamlit's `base = "dark"` default but pinned explicitly so future
+# Streamlit upgrades can't drift it). Firefly's inventory canvas is
+# very close to this tone -- pure black would feel oppressive; the
+# slight navy tint reads as "designed" rather than "terminal."
+backgroundColor = "#0E1117"
 
-# Sidebar + expander + card background -- cool light gray. Provides
-# subtle separation from the white main canvas without the harsh
-# borders some SaaS apps use. Matches Firefly's left-nav tone.
-secondaryBackgroundColor = "#F5F7FA"
+# Sidebar + expander + card background -- one elevation step lighter
+# than backgroundColor. Provides subtle separation between sidebar/
+# cards and the main canvas without harsh borders. Mirrors Firefly's
+# left-nav being slightly lighter than the data area.
+secondaryBackgroundColor = "#1A1F2C"
 
-# Base text -- dark navy (NOT pure black). Pure black on white feels
-# harsh; navy keeps high contrast while feeling more "designed."
-# Firefly + most modern SaaS apps use a similar #1A1F36-ish tone.
-textColor = "#1A1F36"
+# Base text -- off-white (NOT pure white). Pure white on dark feels
+# harsh and over-bright; a slight blue tint matches the navy bg
+# undertone and reduces eye strain on long inventory scrolls.
+textColor = "#E5E9F2"
 
 # Sans-serif feels right for SaaS dashboards (not "documenty"
 # serif, not "code-y" mono). Streamlit's default sans stack is

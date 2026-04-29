@@ -25,10 +25,16 @@ import streamlit as st
 # Colors must match `.streamlit/config.toml`'s [theme] block.
 # Defining as constants here avoids drift if someone updates the
 # CSS without updating the toml (or vice versa).
+#
+# PUI-1B v3.6: switched to Firefly dark palette. Background tones are
+# inverted (near-black canvas + slightly elevated cards); accent +
+# status colors stay the same (they're brand colors, not theme colors).
 _PRIMARY = "#00C4A7"
-_BG = "#FFFFFF"
-_BG_ALT = "#F5F7FA"
-_TEXT = "#1A1F36"
+_BG = "#0E1117"          # main canvas (matches config.toml backgroundColor)
+_BG_ALT = "#1A1F2C"      # one-step elevated (matches secondaryBackgroundColor)
+_BG_HOVER = "#232938"    # two-step elevated -- used for table-row hover
+_BORDER = "#2A3142"      # subtle dark border (visible on _BG_ALT, not on _BG)
+_TEXT = "#E5E9F2"
 _SUCCESS = "#00C853"
 _WARNING = "#FFA726"
 _ERROR = "#EF5350"
@@ -43,9 +49,11 @@ _BASE_CSS = f"""
    for a Firefly-like data-dense inventory view we want less chrome.
    ------------------------------------------------------------------ */
 
-/* Expander: replace heavy box-shadow with a subtle border */
+/* Expander: replace heavy box-shadow with a subtle dark border.
+   On dark canvas the border is the only chrome, so the color matters
+   more than on light -- too dark = invisible, too light = noisy. */
 [data-testid="stExpander"] {{
-    border: 1px solid #E5E9F2;
+    border: 1px solid {_BORDER};
     border-radius: 8px;
     box-shadow: none;
     transition: border-color 120ms ease;
@@ -56,24 +64,28 @@ _BASE_CSS = f"""
 
 /* DataFrame / data_editor: tighter row padding + hover highlight.
    Firefly's inventory page uses ~32px row height; Streamlit defaults
-   to ~40px. Tightening lets us show ~25% more rows per scroll. */
+   to ~40px. Tightening lets us show ~25% more rows per scroll.
+   On dark theme the hover bg is a 2nd elevation step (not _BG_ALT,
+   which IS the table's own bg already -- would give zero contrast). */
 [data-testid="stDataFrame"] tbody tr,
 [data-testid="stDataEditor"] tbody tr {{
     transition: background-color 100ms ease;
 }}
 [data-testid="stDataFrame"] tbody tr:hover,
 [data-testid="stDataEditor"] tbody tr:hover {{
-    background-color: {_BG_ALT} !important;
+    background-color: {_BG_HOVER} !important;
 }}
 
 /* Primary button: subtle lift on hover (matches Firefly's
-   button-feels-clickable affordance). */
+   button-feels-clickable affordance). The teal glow on dark bg
+   reads even better than on light -- Firefly relies on this same
+   glow effect for their "Codify" button. */
 .stButton > button[kind="primary"] {{
     transition: transform 80ms ease, box-shadow 80ms ease;
 }}
 .stButton > button[kind="primary"]:hover {{
     transform: translateY(-1px);
-    box-shadow: 0 4px 12px rgba(0, 196, 167, 0.25);
+    box-shadow: 0 4px 16px rgba(0, 196, 167, 0.45);
 }}
 
 /* Sidebar header spacing -- Firefly uses tighter section gaps */
@@ -83,12 +95,13 @@ _BASE_CSS = f"""
 }}
 
 /* Metric card: subtle border so the 4-column metric row looks
-   like discrete cards rather than floating numbers */
+   like discrete cards rather than floating numbers. Dark variant
+   uses _BORDER (matches expander) for visual consistency. */
 [data-testid="stMetric"] {{
     background: {_BG_ALT};
     padding: 12px 16px;
     border-radius: 8px;
-    border: 1px solid #E5E9F2;
+    border: 1px solid {_BORDER};
 }}
 </style>
 """
@@ -128,15 +141,19 @@ def status_pill(label: str, kind: str = "info") -> str:
         "info": _INFO,
     }
     color = color_map.get(kind, _INFO)
+    # Alpha values tuned for DARK backgrounds (PUI-1B v3.6):
+    # On a near-black canvas, a 10% color overlay almost disappears.
+    # Bumped bg to 26 (~15%) and border to 80 (~50%) so the pill keeps
+    # the same "subtle but readable" feel it had on the light theme.
     return (
         f'<span style="'
         f'display: inline-block; '
         f'padding: 2px 10px; '
         f'border-radius: 12px; '
-        f'background-color: {color}1A; '  # 1A = ~10% alpha for subtle bg
+        f'background-color: {color}26; '  # ~15% alpha bg
         f'color: {color}; '
         f'font-size: 0.85em; '
         f'font-weight: 600; '
-        f'border: 1px solid {color}66;'  # 66 = ~40% alpha border
+        f'border: 1px solid {color}80;'   # ~50% alpha border
         f'">{label}</span>'
     )

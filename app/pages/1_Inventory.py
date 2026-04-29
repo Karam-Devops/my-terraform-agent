@@ -1,5 +1,10 @@
-# app/pages/1_Importer.py
-"""Importer page (PUI-1 + PUI-1B per-resource picker).
+# app/pages/1_Inventory.py
+"""Inventory page (PUI-1 + PUI-1B per-resource picker).
+
+NOTE: file was named ``1_Importer.py`` until PUI-1B v3.6 -- renamed to
+"Inventory" so the sidebar nav matches Firefly's vocabulary. The
+underlying engine is still the importer (``importer.run.run_workflow``,
+``importer.inventory.inventory``); only the UX label changed.
 
 Two-stage workflow matching the CLI's behaviour:
 
@@ -42,9 +47,14 @@ from app.ui.theme import apply_theme_polish
 
 
 # Page chrome
+# PUI-1B v3.6 RENAME: "Importer" -> "Inventory" to match Firefly's
+# vocabulary. The underlying engine is still the importer (run_workflow,
+# inventory.inventory) -- this is a UX-only relabel. We picked
+# "Inventory" because that's the operator's mental model: "show me
+# everything I own in this project, then let me codify what I want."
 st.set_page_config(
-    page_title="mtagent · Importer",
-    page_icon="📥",
+    page_title="mtagent · Inventory",
+    page_icon="📦",
     layout="wide",
 )
 
@@ -53,7 +63,7 @@ apply_theme_polish()
 
 project_id = render_sidebar()
 
-st.title("📥 Importer")
+st.title("📦 Inventory")
 st.caption(
     "Discover supported GCP resources, then pick which ones to "
     "codify as Terraform."
@@ -350,9 +360,30 @@ if last_result and not import_button:
 st.markdown("---")
 _SS_TF_FILES = f"_importer_tf_files_{project_id}"
 with st.expander(
-    "📄 Generated Terraform files (from last successful import)",
+    "📄 All generated Terraform files for this project",
     expanded=False,
 ):
+    # PUI-1B v3.5 (count-reconciliation note): operators noticed the
+    # totals here can differ from the "Last import result" card above.
+    # That's by design but easy to misread, so we name the relationship
+    # explicitly:
+    #
+    #   * The result card counts ONLY the resources picked in the most
+    #     recent click (engine bookkeeping; reset on every run).
+    #   * The list below shows EVERY .tf file persisted in GCS for this
+    #     project across ALL prior runs (filesystem view; cumulative).
+    #
+    # Example: a project with 3 buckets imported last week + 11 GCE
+    # resources today shows "11 imported" on the card and "14 imported"
+    # in this section. Both are correct -- they answer different
+    # questions ("what did this run do?" vs "what does my project look
+    # like end-to-end?").
+    st.caption(
+        "Cumulative view: every Terraform file persisted for this "
+        "project, across all prior import runs. The **Last import "
+        "result** card above only counts the resources picked in the "
+        "most recent click — that's why the totals differ."
+    )
     refresh_col, _spacer_col = st.columns([1, 4])
     with refresh_col:
         if st.button("↻ Refresh list", key="refresh_tf_files_btn"):
@@ -437,16 +468,33 @@ with st.expander(
             st.markdown(
                 f"#### ⚠️ Needs attention ({len(needs_attn_files)})"
             )
-            st.warning(
-                "These resources imported into terraform state, but "
-                "their generated HCL **failed `terraform plan` "
-                "verification**. The most common cause is the LLM "
-                "generating mutually-exclusive fields (e.g., GKE "
-                "clusters with both `default_node_pool` and "
-                "`remove_default_node_pool=true`). Review the error "
-                "below + the HCL, then either edit the .tf manually "
-                "or skip the resource.",
-                icon="⚠️",
+            # PUI-1B v3.5 (review-queue framing):
+            # Earlier copy here led with "the LLM generated mutually-
+            # exclusive fields" -- factually accurate for one common
+            # case but unfairly framed every needs_attention row as a
+            # codegen failure. Real-world drivers are broader: the
+            # cloud snapshot may carry deprecated arguments, location-
+            # locked enums, or schema mutex pairs the provider rejects
+            # on plan even though the resource itself imported cleanly.
+            #
+            # Reframe as a NORMAL triage queue (Firefly's "review"
+            # pattern) instead of an apology. The operator's job here
+            # is the same -- read the provider error, edit or skip --
+            # but the affordance reads as "expected workflow step,"
+            # not "the system failed and you're cleaning up."
+            st.info(
+                "**Review queue.** Terraform state was imported "
+                "successfully for these resources, but `terraform "
+                "plan` flagged HCL-level differences that need a "
+                "human decision — typically schema constraints "
+                "(mutually-exclusive field pairs, deprecated "
+                "arguments, or values the provider doesn't accept "
+                "verbatim from the cloud snapshot).\n\n"
+                "**Next step:** open each card below to see the exact "
+                "provider error and the generated HCL. Edit the file "
+                "inline, or leave it aside — the import is preserved "
+                "either way.",
+                icon="📝",
             )
             for tf_file in needs_attn_files:
                 fname = tf_file["name"]
