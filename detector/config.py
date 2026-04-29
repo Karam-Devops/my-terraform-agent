@@ -74,6 +74,24 @@ IN_SCOPE_TF_TYPES = set(_importer_config.TF_TYPE_TO_GCLOUD_INFO.keys())
 DRIFT_AWARE_TF_TYPES = {
     "google_compute_instance",
     "google_storage_bucket",
+    # PUI-4p (2026-04-30): expanded to cover the user's full
+    # imported-resource set so SaaS Detector can surface drift on
+    # types beyond just compute/storage. Each newly-aware type runs
+    # the deterministic per-field diff_engine; per-type normalization
+    # rules (FIELDS_TO_IGNORE_FOR / ALIAS_FIELDS / PATH_IGNORE_FIELDS)
+    # may need PUI-4q follow-ups to silence false-positive drift on
+    # cloud-vs-state shape mismatches (similar to storage_bucket's
+    # iam_configuration noise tracked in PUI-4o).
+    #
+    # Coverage rationale: every type the importer can import should
+    # be drift-aware so the customer's "Detector covers everything I
+    # codified" mental model holds.
+    "google_pubsub_topic",
+    "google_pubsub_subscription",
+    "google_compute_disk",
+    "google_kms_key_ring",
+    "google_kms_crypto_key",
+    "google_service_account",
 }
 
 # --- Path to the local Terraform state file (POC: local only) ---
