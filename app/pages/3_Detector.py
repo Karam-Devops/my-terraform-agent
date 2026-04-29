@@ -776,21 +776,17 @@ if last_result and not rescan_button:
                         "🗑️ **Stop managing**: `terraform state rm`"
                     )
 
-                    # Type-to-confirm gate.
-                    _confirm_key = f"_drift_confirm_{_tfa}"
-                    _typed = st.text_input(
-                        f"Type the TF address `{_tfa}` to enable actions:",
-                        key=_confirm_key,
-                        placeholder=_tfa,
-                        label_visibility="visible",
-                    )
-                    _enabled = _typed.strip() == _tfa
-
+                    # PUI-4s (2026-04-30): typed-confirm gate removed for
+                    # demo UX. Operator clicks the action button directly.
+                    # Trade-off: easier mis-click on destructive actions
+                    # (Recreate, Drop). Acceptable for demo / friendly
+                    # internal use; reconsider for production-grade
+                    # multi-tenant deployments by adding a 2-step confirm
+                    # dialog (PUI-4s-prod follow-up).
                     ba1, ba2, ba3, ba4 = st.columns(4)
                     if ba1.button(
                         "🔄 Restore",
                         key=f"_btn_restore_{_tfa}",
-                        disabled=not _enabled,
                         use_container_width=True,
                         help="terraform apply -target (HCL→Cloud)",
                     ):
@@ -801,7 +797,6 @@ if last_result and not rescan_button:
                     if ba2.button(
                         "✅ Accept",
                         key=f"_btn_accept_{_tfa}",
-                        disabled=not _enabled,
                         use_container_width=True,
                         help="terraform refresh-only (Cloud→State)",
                     ):
@@ -812,7 +807,6 @@ if last_result and not rescan_button:
                     if ba3.button(
                         "♻️ Recreate",
                         key=f"_btn_recreate_{_tfa}",
-                        disabled=not _enabled,
                         use_container_width=True,
                         help="terraform destroy + apply (DESTRUCTIVE)",
                         type="primary",
@@ -824,7 +818,6 @@ if last_result and not rescan_button:
                     if ba4.button(
                         "🗑️ Stop managing",
                         key=f"_btn_drop_{_tfa}",
-                        disabled=not _enabled,
                         use_container_width=True,
                         help="terraform state rm (no cloud change)",
                     ):

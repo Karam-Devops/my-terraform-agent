@@ -153,6 +153,54 @@ RESOURCE_IGNORE_FIELDS = {
         # because list-vs-None doesn't recurse into the all-default content.
         # Hard-ignore until a user actually opts in (then cloud will return data).
         "hierarchical_namespace", "hierarchicalNamespace",
+        # PUI-4o-mini (2026-04-30) -- LOSSY DEMO FIX. SUPERSEDED BY PUI-4o.
+        #
+        # Cloud returns these as a NESTED `iam_configuration` block:
+        #   iam_configuration:
+        #     bucket_policy_only:           {enabled: false}
+        #     uniform_bucket_level_access:  {enabled: false}
+        #     public_access_prevention:     "inherited"
+        #
+        # Terraform state stores them as FLAT top-level fields:
+        #   uniform_bucket_level_access:  false
+        #   public_access_prevention:     "inherited"
+        #   bucket_policy_only:           (legacy alias of uniform_bucket_level_access)
+        #
+        # The terraform GCS provider handles the cloud<->state mapping
+        # internally during refresh, so terraform plan only sees the
+        # 1 real change (storage_class etc.). mtagent's diff_engine
+        # does naive JSON-vs-JSON compare and lacks the provider's
+        # mapping intelligence -> sees 3 false-positive drift items
+        # ("iam_configuration added", "public_access_prevention removed",
+        # "uniform_bucket_level_access removed") on EVERY storage_bucket
+        # rescan, regardless of actual drift.
+        #
+        # *** CONS OF THIS FIX ***: real changes to these IAM fields are
+        # ALSO suppressed. If an operator toggles
+        # `uniform_bucket_level_access` (uniform vs fine-grained ACL,
+        # security-relevant) or changes `public_access_prevention`
+        # (inherited vs enforced) via console, mtagent will silently
+        # miss the change. Acceptable trade-off ONLY for the demo --
+        # PUI-4o (full alias/unwrap rules) restores full visibility
+        # without false positives.
+        #
+        # *** TODO PUI-4o (POST-DEMO) ***: replace this hard-ignore with
+        # proper alias rules:
+        #   ALIAS_FIELDS["google_storage_bucket"] += {
+        #       "iam_configuration.public_access_prevention":
+        #           "public_access_prevention",
+        #       "iam_configuration.uniform_bucket_level_access.enabled":
+        #           "uniform_bucket_level_access",
+        #       "iam_configuration.bucket_policy_only.enabled":
+        #           "bucket_policy_only",
+        #   }
+        # plus path_ignore for `iam_configuration` itself once children
+        # are aliased out. ~50 LOC + careful smoke. Revert the lines
+        # below in the same commit.
+        "iam_configuration", "iamConfiguration",
+        "public_access_prevention", "publicAccessPrevention",
+        "uniform_bucket_level_access", "uniformBucketLevelAccess",
+        "bucket_policy_only", "bucketPolicyOnly",
     },
 }
 
