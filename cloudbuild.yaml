@@ -112,6 +112,12 @@ steps:
       # silently empty. common/snapshots.py reads this env var at
       # snapshots_enabled().
       - --set-env-vars=MTAGENT_PERSIST_SNAPSHOTS=1
+      # PUI-5i (2026-04-30): pre-populate sidebar project picker so
+      # the operator doesn't have to type / pick on every page load
+      # during the demo. app/ui/sidebar.py reads this env var via
+      # os.environ.get("TARGET_PROJECT_ID", "") and uses it as the
+      # default selection.
+      - --set-env-vars=TARGET_PROJECT_ID=dev-proj-470211
       - --set-env-vars=MTAGENT_LOG_LEVEL=INFO
       - --set-env-vars=PYTHONUNBUFFERED=1
     waitFor: [push-sha]
