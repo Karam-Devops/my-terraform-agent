@@ -1,18 +1,23 @@
-# app/main.py
-"""mtagent Streamlit landing page (PUI-1).
+# app/🏠_Home.py
+"""mtagent Streamlit home page (PUI-1, renamed from main.py in PUI-5f).
 
 Entry point Cloud Run hits via the Dockerfile CMD:
 
-    streamlit run app/main.py --server.port=$PORT --server.address=0.0.0.0
+    streamlit run app/🏠_Home.py --server.port=$PORT --server.address=0.0.0.0
 
-Streamlit treats ``app/main.py`` as the home page and auto-discovers
-files under ``app/pages/`` as additional pages, ordered by their
-numeric prefix and shown in the sidebar nav. Each page calls
+Streamlit treats this file (the entry script) as the home page and
+auto-discovers files under ``app/pages/`` as additional pages, ordered
+by their numeric prefix and shown in the sidebar nav. Each page calls
 ``render_sidebar()`` from ``app.ui.sidebar`` so the global project
 picker is consistent everywhere.
 
+PUI-5f rename rationale: pre-rename the entry script was ``app/main.py``
+which Streamlit displayed in the sidebar as plain ``main`` -- visually
+out of place next to the emoji-prefixed engine pages. Renaming to
+``🏠_Home.py`` makes the sidebar consistent (🏠 Home as the landing).
+
 Why this file is small: the per-engine work lives in the page files
-(``app/pages/N_*.py``). Keeping main.py minimal means the cold-start
+(``app/pages/N_*.py``). Keeping the entry minimal means the cold-start
 import cost is just Streamlit + the sidebar helper -- engine modules
 are imported lazily by the pages that need them.
 """

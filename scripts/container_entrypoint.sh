@@ -48,7 +48,7 @@ fi
 
 # Exec replaces this shell PID with streamlit's, so tini's signal
 # forwarding lands on the actual process, not this wrapper.
-exec streamlit run app/main.py \
+exec streamlit run "app/🏠_Home.py" \
     --server.port="${PORT:-8080}" \
     --server.address=0.0.0.0 \
     --server.headless=true

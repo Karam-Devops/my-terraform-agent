@@ -101,7 +101,7 @@ ENV PORT=8080 \
     PYTHONPATH=/app \
     TF_IN_AUTOMATION=1 \
     TF_NO_COLOR=1
-# PYTHONPATH=/app: when streamlit runs `app/main.py`, only the script's
+# PYTHONPATH=/app: when streamlit runs `app/🏠_Home.py`, only the script's
 # dir (`/app/app/`) lands on sys.path, NOT the WORKDIR. Without
 # PYTHONPATH=/app, top-level package imports like `from app.ui.sidebar`,
 # `from common.storage`, `from importer.run` all fail with
