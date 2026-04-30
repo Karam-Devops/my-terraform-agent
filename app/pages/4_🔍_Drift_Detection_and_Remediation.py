@@ -482,14 +482,17 @@ if last_result and not rescan_button:
                 )
             with t_col:
                 show_children = st.checkbox(
-                    "Show child resources of managed parents",
+                    "Show child resources of Unmanaged parents",
                     value=False,
                     key="dt_unm_show_children",
                     help=(
                         "OFF (default): only genuinely-orphan resources "
                         "count as Unmanaged. ON: also show resources "
-                        "auto-managed by a parent in Compliant -- useful "
-                        "for auditing the heuristic."
+                        "auto-managed by a parent (cluster, keyring, "
+                        "topic, etc.) -- useful for auditing the "
+                        "classifier heuristic. The parent itself may "
+                        "be either Unmanaged (not yet imported) or "
+                        "Compliant (already imported)."
                     ),
                 )
 
@@ -538,7 +541,7 @@ if last_result and not rescan_button:
             # Render orphans (the demo's hero finding).
             if orphan_rows:
                 st.markdown(
-                    f"#### 🔴 Genuinely unmanaged "
+                    f"#### 🔴 Unmanaged "
                     f"({len(orphan_rows)})"
                 )
                 st.dataframe(
@@ -572,9 +575,9 @@ if last_result and not rescan_button:
                 )
             elif _unmanaged_child and not show_children:
                 st.success(
-                    f"🎉 Zero genuinely-unmanaged resources. "
-                    f"({len(_unmanaged_child)} auto-managed child "
-                    f"resource(s) hidden — toggle above to view.)",
+                    f"🎉 Zero Unmanaged resources. "
+                    f"({len(_unmanaged_child)} child resource(s) of "
+                    f"Unmanaged parents hidden — toggle above to view.)",
                     icon="🎉",
                 )
 
@@ -582,7 +585,7 @@ if last_result and not rescan_button:
             if show_children and child_rows:
                 st.markdown("---")
                 st.markdown(
-                    f"#### 🟦 Auto-managed by parent in Compliant "
+                    f"#### 🟦 Children of Unmanaged parents "
                     f"({len(child_rows)})"
                 )
                 st.caption(
