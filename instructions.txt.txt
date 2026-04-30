@@ -1,19 +1,26 @@
 prod-470211
+dev-proj-470211
+
+
+gcloud run services proxy mtagent-app --port=8080 --region=us-central1 --project=mtagent-internal-dev
+
+
+
+
 
 python -m my-terraform-agent.importer.run
-python -m detector.run
-python -m policy.run
+python -m my-terraform-agent.translator.run
+python -m my-terraform-agent.detector.run
+python -m my-terraform-agent.policy.run
 
 
-my-terraform-agent/google_compute_instance_poc_gce.tf
-my-terraform-agent/google_storage_bucket_poc_bucket_karam.tf
-my-terraform-agent/google_container_cluster_poc_autocluster_1.tf
-
-
+my-terraform-agent\imported\dev-proj-470211\google_storage_bucket_poc_smoke_bucket_dev_proj_470211.tf
 
 
 
-Demo: gcloud storage buckets update gs://poc_bucket_karam --default-storage-class=NEARLINE --project=prod-470211
+
+
+Demo: gcloud storage buckets update gs://poc-smoke-bucket-dev-proj-470211 --default-storage-class=NEARLINE --project=dev-proj-470211
 
 
 
