@@ -324,13 +324,85 @@ def _render_danger_zone() -> None:
 _render_danger_zone()
 
 
+# PUI-1S (2026-04-30): show an "Already imported" pre-flight summary
+# ABOVE the Discover gate so operators returning to a project (new
+# tab, fresh session) see what's already there without re-running
+# Discovery (which costs 10-30s for a full Cloud Asset Inventory pass).
+# Discovery is still needed to find NEW unmanaged resources to import.
+@st.cache_data(ttl=30, show_spinner=False)
+def _fetch_already_imported(project: str) -> tuple:
+    """(imported_files, quarantined_files, error_or_None).
+
+    Same TTL pattern as the Translator's _fetch_imported_source_files
+    (PUI-3d). Newly-imported files appear within 30s without manual
+    refresh; back-to-back renders are still cheap.
+    """
+    try:
+        from common.storage import list_workdir_tf_files
+        all_files = list_workdir_tf_files(project)
+        imported = [f for f in all_files if f["status"] == "imported"]
+        quarantined = [
+            f for f in all_files if f["status"] == "needs_attention"
+        ]
+        return (imported, quarantined, None)
+    except Exception as _e:  # noqa: BLE001
+        return ([], [], f"{type(_e).__name__}: {_e}"[:200])
+
+
 if not discovered:
-    st.info(
-        "Click **Discover resources** above to see what's importable in "
-        "this project. The list is cached in this session until you "
-        "Re-discover or Clear.",
-        icon="ℹ️",
-    )
+    _imp_pre, _quar_pre, _pre_err = _fetch_already_imported(project_id)
+    if _pre_err:
+        st.warning(
+            f"⚠ Couldn't list already-imported files from GCS: "
+            f"`{_pre_err}`",
+            icon="⚠️",
+        )
+    elif _imp_pre or _quar_pre:
+        st.success(
+            f"📦 **{len(_imp_pre)} resource(s) already imported** "
+            f"for this project"
+            + (f" · {len(_quar_pre)} in needs-attention queue"
+               if _quar_pre else "")
+            + ". Click **Discover resources** above to find NEW "
+              "unmanaged resources to import, or open the expander "
+              "below to see what's already codified.",
+            icon="📦",
+        )
+        with st.expander(
+            f"📋 View already-imported files ({len(_imp_pre)})",
+            expanded=False,
+        ):
+            import pandas as _pd
+            st.dataframe(
+                _pd.DataFrame([
+                    {
+                        "#": i + 1,
+                        "Filename": f["name"],
+                        "Size (bytes)": f.get("size_bytes", 0),
+                    }
+                    for i, f in enumerate(sorted(
+                        _imp_pre, key=lambda x: x["name"],
+                    ))
+                ]),
+                hide_index=True,
+                use_container_width=True,
+            )
+            if _quar_pre:
+                st.markdown("##### ⚠️ In needs-attention queue")
+                for q in sorted(_quar_pre, key=lambda x: x["name"]):
+                    st.markdown(f"- `{q['name']}`")
+        st.info(
+            "_Click **Discover resources** above to refresh the picker "
+            "and see what NEW resources can be imported._",
+            icon="ℹ️",
+        )
+    else:
+        st.info(
+            "Click **Discover resources** above to see what's "
+            "importable in this project. The list is cached in this "
+            "session until you Re-discover or Clear.",
+            icon="ℹ️",
+        )
     st.stop()
 
 # --- PUI-1F: compute per-row import status ----------------------------
