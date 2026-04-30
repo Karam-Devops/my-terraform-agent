@@ -39,6 +39,8 @@ import time as _time
 from datetime import datetime, timezone
 from typing import Optional
 
+import altair as alt
+import pandas as pd
 import streamlit as st
 
 from app.ui.sidebar import render_sidebar
@@ -283,6 +285,97 @@ _card_slots = {
 }
 
 
+def _engine_pie_slices(engine: str, data: dict) -> list:
+    """Return pie-chart slice spec for one engine: [(label, value, color)].
+
+    PUI-2v (2026-04-30) -- industry-parity engine cards:
+    instead of just showing a one-line headline, each card includes a
+    donut chart so the operator's eye lands on the relative proportions
+    immediately. Color choices match the rest of the UI:
+      green   = success / compliant / passing
+      yellow  = needs attention / warning / drift / MED severity
+      red     = HIGH severity / failed
+      blue    = LOW severity (informational)
+      gray    = skipped / no-op
+    """
+    if engine == "importer":
+        return [
+            ("Imported",        data.get("imported", 0),         "#22c55e"),
+            ("Needs attention", data.get("needs_attention", 0),  "#f59e0b"),
+            ("Failed",          data.get("failed", 0),           "#ef4444"),
+            ("Skipped",         data.get("skipped", 0),          "#6b7280"),
+        ]
+    if engine == "translator":
+        return [
+            ("Translated",      data.get("translated", 0),       "#22c55e"),
+            ("Needs attention", data.get("needs_attention", 0),  "#f59e0b"),
+            ("Failed",          data.get("failed", 0),           "#ef4444"),
+            ("Skipped",         data.get("skipped", 0),          "#6b7280"),
+        ]
+    if engine == "detector":
+        return [
+            ("Compliant",  data.get("compliant_count", 0),         "#22c55e"),
+            ("Drift",      data.get("drifted_count", 0),           "#f59e0b"),
+            ("Unmanaged",  data.get("unmanaged_orphan_count",
+                                     data.get("unmanaged_count", 0)),
+                                                                    "#ef4444"),
+        ]
+    if engine == "policy":
+        return [
+            ("Compliant", data.get("compliant_resources", 0),     "#22c55e"),
+            ("HIGH",      data.get("high_count", 0),              "#ef4444"),
+            ("MED",       data.get("med_count", 0),               "#f59e0b"),
+            ("LOW",       data.get("low_count", 0),               "#3b82f6"),
+        ]
+    return []
+
+
+def _render_engine_pie(engine: str, data: dict) -> Optional[alt.Chart]:
+    """Build an Altair donut chart for one engine. Returns None if no
+    non-zero slices (engine ran but produced 0/0/0/0 -- chart would
+    be empty + visually confusing; show "no data" caption instead).
+    """
+    slices = _engine_pie_slices(engine, data)
+    # Drop zero-value slices so the donut shows actual proportions
+    # (Altair would render them as 0-degree wedges otherwise).
+    nonzero = [(label, val, color) for (label, val, color) in slices if val > 0]
+    if not nonzero:
+        return None
+    df = pd.DataFrame(
+        [{"category": lbl, "value": val} for (lbl, val, _) in nonzero]
+    )
+    color_scale = alt.Scale(
+        domain=[lbl for (lbl, _, _) in nonzero],
+        range=[color for (_, _, color) in nonzero],
+    )
+    chart = (
+        alt.Chart(df)
+        .mark_arc(innerRadius=40, outerRadius=70)
+        .encode(
+            theta=alt.Theta(field="value", type="quantitative", stack=True),
+            color=alt.Color(
+                field="category",
+                type="nominal",
+                scale=color_scale,
+                legend=alt.Legend(
+                    orient="right",
+                    title=None,
+                    labelFontSize=11,
+                    symbolType="square",
+                ),
+            ),
+            tooltip=[
+                alt.Tooltip("category:N", title="Bucket"),
+                alt.Tooltip("value:Q", title="Count"),
+            ],
+        )
+        .properties(width=180, height=160)
+        .configure_view(strokeOpacity=0)
+        .configure(background="transparent")
+    )
+    return chart
+
+
 def _render_engine_card(engine: str, container) -> None:
     """Render one engine card into a Streamlit container."""
     env = snapshots.get(engine)
@@ -303,7 +396,18 @@ def _render_engine_card(engine: str, container) -> None:
                     + (f" · {round(data.get('duration_s', 0), 1)}s"
                        if data.get("duration_s") else "")
                 )
-                st.markdown(f"_{_engine_headline(engine, data)}_")
+                # PUI-2v: 2-column layout per card -- donut chart on the
+                # left for instant visual parse, headline text on the
+                # right for the precise numbers.
+                pie_col, text_col = st.columns([1, 1])
+                pie = _render_engine_pie(engine, data)
+                with pie_col:
+                    if pie is not None:
+                        st.altair_chart(pie, use_container_width=True)
+                    else:
+                        st.caption("_(no non-zero slices)_")
+                with text_col:
+                    st.markdown(f"_{_engine_headline(engine, data)}_")
 
             # Page link (works only with new st.page_link API; gracefully
             # falls back to a plain markdown link).
