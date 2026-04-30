@@ -676,7 +676,8 @@ if last_result and not rescan_button:
     # Cloud) and 4 remediation actions matching the CLI:
     #   * Restore  -- terraform apply -target (HCL -> Cloud)
     #   * Accept   -- terraform refresh-only (Cloud -> State, .tf untouched)
-    #   * Recreate -- destroy + apply (DESTRUCTIVE)
+    #   * Recreate -- terraform apply -target on a DELETED-OUT-OF-BAND
+    #                 resource (re-provisions; data NOT recovered)
     #   * Drop     -- terraform state rm (stop managing)
     # Type-to-confirm gate (matches Danger Zone pattern) prevents
     # mis-clicks. Policy gate disabled in v1 -- the dedicated Policy
@@ -776,7 +777,8 @@ if last_result and not rescan_button:
                         "— overwrites cloud changes  ·  "
                         "✅ **Accept Cloud→State**: `terraform refresh -target` "
                         "— acknowledges the cloud change (.tf unchanged)  ·  "
-                        "♻️ **Recreate**: `destroy + apply` (DESTRUCTIVE)  ·  "
+                        "♻️ **Recreate**: re-provision a deleted resource "
+                        "from HCL (data NOT recovered)  ·  "
                         "🗑️ **Stop managing**: `terraform state rm`"
                     )
 
@@ -812,7 +814,13 @@ if last_result and not rescan_button:
                         "♻️ Recreate",
                         key=f"_btn_recreate_{_tfa}",
                         use_container_width=True,
-                        help="terraform destroy + apply (DESTRUCTIVE)",
+                        help=(
+                            "terraform apply -target -- re-provision a "
+                            "resource that was DELETED out-of-band "
+                            "(NOT destroy+apply). Data on the original "
+                            "(bucket objects, disk contents) is NOT "
+                            "recovered."
+                        ),
                         type="primary",
                     ):
                         st.session_state["_pending_remediation"] = {
