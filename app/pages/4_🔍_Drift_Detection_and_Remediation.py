@@ -1,7 +1,7 @@
 # app/pages/3_Drift_Detection.py
 """Detector page (PUI-4) — the star of the SaaS demo.
 
-Firefly's killer pattern is "show me what's NOT in IaC" -- coverage
+the killer pattern is "show me what's NOT in IaC" -- coverage
 percentage at the top, color-coded buckets, per-resource Codify CTAs
 that flow back to the Inventory page in one click. This page maps
 detector.rescan.rescan() output (a DriftReport) onto that UX.
@@ -47,7 +47,7 @@ Engine wiring:
   * common.snapshots.write_snapshot already wired inside rescan
     (Dashboard reads from there in PUI-2)
 
-Theme: same Firefly DARK polish as Inventory + Translator via
+Theme: same dark theme polish as Inventory + Translator via
 apply_theme_polish(). Mint accent on Run rescan; red on Danger Zone;
 status pills follow the Material palette.
 """
@@ -225,7 +225,7 @@ if last_result and not rescan_button:
     _in_cloud = last_result.get("total_in_cloud", 0)
 
     # ------------------------------------------------------------------
-    # PUI-4g (2026-04-30): Firefly-style "Unmanaged" definition.
+    # PUI-4g (2026-04-30): orphan-filtered "Unmanaged" definition.
     # ------------------------------------------------------------------
     # The strict engine-side definition counts ANY resource not in
     # state as Unmanaged. That over-reports for resources auto-spawned
@@ -235,7 +235,7 @@ if last_result and not rescan_button:
     # Operators don't separately codify these in HCL -- the parent
     # resource manages them.
     #
-    # Firefly's UX: hide auto-managed children from the Unmanaged
+    # Common UX: hide auto-managed children from the Unmanaged
     # count by default; toggle to reveal. Counts the genuinely-orphan
     # resources only (= "things you should probably codify").
     #
@@ -397,14 +397,14 @@ if last_result and not rescan_button:
     _unmanaged = len(_unmanaged_orphan)
     _unmanaged_hidden = len(_unmanaged_child)
 
-    # PUI-4k (2026-04-30): Firefly-parity coverage formula.
+    # PUI-4k (2026-04-30): industry-parity coverage formula.
     # Pre-PUI-4k denominator was total_in_cloud (in_state + ALL
     # unmanaged INCLUDING auto-managed children). That over-counts the
     # denominator with resources nobody would ever write Terraform for
     # (GKE node-pool VMs, default GCP service accounts, etc.) -- making
     # coverage look ~3x worse than it really is and demoralizing
     # operators who DID codify everything they reasonably could.
-    # Firefly's metric: only count IaC-eligible resources in the
+    # The industry-standard metric: only count IaC-eligible resources in the
     # denominator (compliant + drifted + GENUINELY-unmanaged orphans).
     # Auto-managed children are excluded -- they're managed by the
     # parent's HCL, not separately codifiable.
@@ -449,7 +449,7 @@ if last_result and not rescan_button:
 
     import pandas as pd
 
-    # ---- UNMANAGED TAB (PUI-4g Firefly-style) -------------------------
+    # ---- UNMANAGED TAB (PUI-4g category-standard) -------------------------
     with tab_unm:
         if not _unmanaged_orphan and not _unmanaged_child:
             st.success(
@@ -486,10 +486,10 @@ if last_result and not rescan_button:
                     value=False,
                     key="dt_unm_show_children",
                     help=(
-                        "OFF (default, Firefly-style): only genuinely-"
-                        "orphan resources count as Unmanaged. ON: also "
-                        "show resources auto-managed by a parent in "
-                        "Compliant -- useful for auditing the heuristic."
+                        "OFF (default): only genuinely-orphan resources "
+                        "count as Unmanaged. ON: also show resources "
+                        "auto-managed by a parent in Compliant -- useful "
+                        "for auditing the heuristic."
                     ),
                 )
 

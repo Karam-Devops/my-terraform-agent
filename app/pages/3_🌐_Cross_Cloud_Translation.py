@@ -36,7 +36,7 @@ Engine wiring:
   * app.middleware.workdir_context handles per-request hydrate +
     persist (translated/<target>/*.tf gets uploaded on exit).
 
-Theme: same Firefly DARK polish as Inventory via apply_theme_polish().
+Theme: same dark theme polish as Inventory via apply_theme_polish().
 Mint accent (#00C4A7) on the primary "Translate" button; red on the
 Danger Zone reset; status pills follow the Material palette
 documented in app/ui/theme.py.
@@ -81,7 +81,7 @@ st.set_page_config(
     layout="wide",
 )
 
-# Same Firefly DARK polish + CSS overrides as Inventory.
+# Same dark theme polish + CSS overrides as Inventory.
 apply_theme_polish()
 
 project_id = render_sidebar()
@@ -399,7 +399,7 @@ for f in source_files:
         "translated" if expected in _translated_set else "not_translated"
     )
 
-# Top-line counters above the picker (Firefly-style "Translated vs
+# Top-line counters above the picker ("Translated vs
 # Not translated" call-out). Matches Inventory's metrics-row.
 _n_translated = sum(1 for s in _row_status if s == "translated")
 _n_pending = len(source_files) - _n_translated

@@ -2,7 +2,7 @@
 """Inventory page (PUI-1 + PUI-1B per-resource picker).
 
 NOTE: file was named ``1_Importer.py`` until PUI-1B v3.6 -- renamed to
-"Inventory" so the sidebar nav matches Firefly's vocabulary. The
+"Inventory" so the sidebar nav matches the industry vocabulary. The
 underlying engine is still the importer (``importer.run.run_workflow``,
 ``importer.inventory.inventory``); only the UX label changed.
 
@@ -47,7 +47,7 @@ from app.ui.theme import apply_theme_polish
 
 
 # Page chrome
-# PUI-1B v3.6 RENAME: "Importer" -> "Inventory" to match Firefly's
+# PUI-1B v3.6 RENAME: "Importer" -> "Inventory" to match the industry
 # vocabulary. The underlying engine is still the importer (run_workflow,
 # inventory.inventory) -- this is a UX-only relabel. We picked
 # "Inventory" because that's the operator's mental model: "show me
@@ -58,7 +58,7 @@ st.set_page_config(
     layout="wide",
 )
 
-# PUI-1B v3.4: Firefly-inspired theme polish (CSS injection).
+# PUI-1B v3.4: dark theme polish (industry standard) (CSS injection).
 apply_theme_polish()
 
 project_id = render_sidebar()
@@ -406,7 +406,7 @@ for r in discovered:
 
 st.markdown("---")
 
-# Top-line counters (Firefly-style "Codified vs Un-codified" call-out
+# Top-line counters ("Codified vs Un-codified" call-out
 # above the picker). Operator sees at a glance how much of the project
 # is already managed -- the demo story we want to lead with.
 _n_imported = sum(1 for s in _row_status if s == "imported")
@@ -474,7 +474,7 @@ with filter_col:
     )
 with hide_col:
     # PUI-1F: "Hide already imported" defaults to True (on) -- the
-    # Firefly default. Operators rarely need to re-codify; making it
+    # common default. Operators rarely need to re-codify; making it
     # one extra click instead of the default keeps the picker focused
     # on un-codified work and makes re-codify a deliberate action.
     hide_imported = st.checkbox(
@@ -790,7 +790,7 @@ with st.expander(
             "this section."
         )
     else:
-        # PUI-1B v3.3 (Firefly-style status grouping):
+        # PUI-1B v3.3 (status grouping):
         # Split files by status -> two clearly-labelled subsections
         # with color-coded headers + badges. Imported (green/✅) on top
         # because that's the celebration; needs_attention (orange/⚠️)
@@ -856,7 +856,7 @@ with st.expander(
             # locked enums, or schema mutex pairs the provider rejects
             # on plan even though the resource itself imported cleanly.
             #
-            # Reframe as a NORMAL triage queue (Firefly's "review"
+            # Reframe as a NORMAL triage queue (the "review"
             # pattern) instead of an apology. The operator's job here
             # is the same -- read the provider error, edit or skip --
             # but the affordance reads as "expected workflow step,"

@@ -1,5 +1,5 @@
 # app/pages/5_📊_Dashboard.py
-"""Dashboard page (PUI-2) -- Firefly-parity hero overview.
+"""Dashboard page (PUI-2) -- industry-parity hero overview.
 
 Reads per-engine snapshots from GCS (PSA-9 + PUI-2pre) and renders:
 
@@ -30,7 +30,7 @@ Defenses:
   * GCS read failures already swallowed inside snapshots.py
     (returns None / [] -> empty-state UX).
 
-Theme: same Firefly DARK polish as the other pages.
+Theme: same dark theme polish as the other pages.
 """
 
 from __future__ import annotations
@@ -58,9 +58,8 @@ project_id = render_sidebar()
 
 st.title("📊 Dashboard")
 st.caption(
-    "Firefly-style overview of every engine's last run. Reads "
-    "per-engine snapshots from GCS (no engine re-execution; results "
-    "are cached for 60s)."
+    "Cross-engine overview. Reads per-engine snapshots from GCS "
+    "(no engine re-execution; results are cached for 60s)."
 )
 
 if not project_id:
@@ -80,11 +79,12 @@ _ENGINE_LABELS = {
     "policy":     "🛡️ Policy as Code",
 }
 # Streamlit page_link targets (filename without extension).
+# PUI-5g (2026-04-30): renumbered after Dashboard moved to slot 1.
 _ENGINE_PAGE_PATHS = {
-    "importer":   "app/pages/1_📋_Inventory.py",
-    "translator": "app/pages/2_🌐_Cross_Cloud_Translation.py",
-    "detector":   "app/pages/3_🔍_Drift_Detection_and_Remediation.py",
-    "policy":     "app/pages/4_🛡️_Policy_as_Code.py",
+    "importer":   "app/pages/2_📋_Inventory.py",
+    "translator": "app/pages/3_🌐_Cross_Cloud_Translation.py",
+    "detector":   "app/pages/4_🔍_Drift_Detection_and_Remediation.py",
+    "policy":     "app/pages/5_🛡️_Policy_as_Code.py",
 }
 
 
@@ -233,7 +233,7 @@ h1.metric(
     "🎯 Coverage",
     f"{_coverage}%" if det else "—",
     help="% of IaC-eligible resources tracked by Terraform "
-         "(orphan-filtered Firefly formula).",
+         "(orphan-filtered: auto-managed children excluded from denominator).",
 )
 h2.metric(
     "✅ Compliance",

@@ -1,12 +1,12 @@
 # app/ui/theme.py
-"""Page-wide theme polish (PUI-1B v3.4: Firefly-style visual upgrade).
+"""Page-wide theme polish (PUI-1B v3.4: visual upgrade).
 
 Streamlit's ``.streamlit/config.toml`` sets the base palette, but a
-few Firefly-style touches need CSS injection:
+few category-standard touches need CSS injection:
 
   * Subtler expander borders + rounded corners (Streamlit's default
     expander has heavy borders that feel "form-y")
-  * Tighter table row padding for higher info density (Firefly's
+  * Tighter table row padding for higher info density (the industry standard's
     inventory page packs ~25 rows per screen vs Streamlit's default
     ~12)
   * Hover-row highlight on data_editor (default has no hover affordance)
@@ -26,7 +26,7 @@ import streamlit as st
 # Defining as constants here avoids drift if someone updates the
 # CSS without updating the toml (or vice versa).
 #
-# PUI-1B v3.6: switched to Firefly dark palette. Background tones are
+# PUI-1B v3.6: switched to the industry standard dark palette. Background tones are
 # inverted (near-black canvas + slightly elevated cards); accent +
 # status colors stay the same (they're brand colors, not theme colors).
 _PRIMARY = "#00C4A7"
@@ -46,7 +46,7 @@ _BASE_CSS = f"""
 /* ------------------------------------------------------------------
    PUI-1B v3.4 polish: tighter expanders + subtler borders.
    Streamlit's defaults are designed for survey-form-style pages;
-   for a Firefly-like data-dense inventory view we want less chrome.
+   for a the industry standard-like data-dense inventory view we want less chrome.
    ------------------------------------------------------------------ */
 
 /* Expander: replace heavy box-shadow with a subtle dark border.
@@ -63,7 +63,7 @@ _BASE_CSS = f"""
 }}
 
 /* DataFrame / data_editor: tighter row padding + hover highlight.
-   Firefly's inventory page uses ~32px row height; Streamlit defaults
+   data-dense inventory pages uses ~32px row height; Streamlit defaults
    to ~40px. Tightening lets us show ~25% more rows per scroll.
    On dark theme the hover bg is a 2nd elevation step (not _BG_ALT,
    which IS the table's own bg already -- would give zero contrast). */
@@ -76,9 +76,9 @@ _BASE_CSS = f"""
     background-color: {_BG_HOVER} !important;
 }}
 
-/* Primary button: subtle lift on hover (matches Firefly's
+/* Primary button: subtle lift on hover (matches the industry standard's
    button-feels-clickable affordance). The teal glow on dark bg
-   reads even better than on light -- Firefly relies on this same
+   reads even better than on light -- many tools rely on this same
    glow effect for their "Codify" button. */
 .stButton > button[kind="primary"] {{
     transition: transform 80ms ease, box-shadow 80ms ease;
@@ -140,7 +140,7 @@ _BASE_CSS = f"""
     color: rgba(255, 255, 255, 0.6) !important;
 }}
 
-/* Sidebar header spacing -- Firefly uses tighter section gaps */
+/* Sidebar header spacing -- many dashboards use tighter section gaps */
 [data-testid="stSidebar"] h3 {{
     margin-top: 1rem;
     margin-bottom: 0.5rem;

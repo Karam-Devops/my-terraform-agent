@@ -35,7 +35,7 @@ st.set_page_config(
     initial_sidebar_state="expanded",
 )
 
-# PUI-1B v3.4: page-wide CSS polish (Firefly-inspired). Runs after
+# PUI-1B v3.4: page-wide CSS polish (industry-inspired). Runs after
 # set_page_config (Streamlit requirement) and before any content.
 apply_theme_polish()
 

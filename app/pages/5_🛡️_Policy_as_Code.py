@@ -42,7 +42,7 @@ SaaS-specific defenses (added here):
   D19 conftest-missing banner   -> dedicated UI, not generic error
   D20 cap-hit truncation banner -> mandatory if cap_hit=True
 
-Theme: same Firefly DARK polish as Inventory + Translator + Detector.
+Theme: same dark theme polish as Inventory + Translator + Detector.
 """
 
 import json
@@ -252,7 +252,7 @@ if last_result and not scan_button:
             icon="⚠️",
         )
 
-    # Compliance score gauge (Firefly's hero metric).
+    # Compliance score gauge (the hero compliance metric).
     if _n_resources > 0:
         _compliance_pct = round(100.0 * _compliant_resources / _n_resources)
     else:
