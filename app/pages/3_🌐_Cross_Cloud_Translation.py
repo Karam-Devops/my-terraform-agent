@@ -106,8 +106,9 @@ _SS_RUN_LOCK = "_translator_run_lock"
 _SS_LAST_RESULT = f"_translator_last_result_{project_id}"
 _SS_TRANSLATED_AWS = f"_translator_translated_aws_{project_id}"
 _SS_TRANSLATED_AZURE = f"_translator_translated_azure_{project_id}"
-_SS_SOURCE_FILES = f"_translator_source_files_{project_id}"
-_SS_SOURCE_FILES_ERROR = f"_translator_source_files_err_{project_id}"
+# PUI-3d (2026-04-30): _SS_SOURCE_FILES + _SS_SOURCE_FILES_ERROR
+# session_state keys removed -- replaced by @st.cache_data(ttl=30)
+# wrapped fetch in `_fetch_imported_source_files` (see below).
 
 
 # --- Tier-A run lock ----------------------------------------------------
@@ -157,24 +158,34 @@ if _lock is not None:
 # We list .tf files at the project's GCS top-level (= imported,
 # importer-output) and filter to status="imported" -- quarantined
 # files are not translatable until the operator fixes them in
-# Inventory. Cached in session_state so the picker grid + Danger
-# Zone pre-flight share one round-trip.
-if _SS_SOURCE_FILES not in st.session_state:
-    try:
-        from common.storage import list_workdir_tf_files  # noqa: E402
-        all_files = list_workdir_tf_files(project_id)
-        st.session_state[_SS_SOURCE_FILES] = [
-            f for f in all_files if f["status"] == "imported"
-        ]
-        st.session_state[_SS_SOURCE_FILES_ERROR] = None
-    except Exception as _e:  # noqa: BLE001
-        st.session_state[_SS_SOURCE_FILES] = []
-        st.session_state[_SS_SOURCE_FILES_ERROR] = (
-            f"{type(_e).__name__}: {_e}"[:200]
-        )
+# Inventory.
+#
+# PUI-3d (2026-04-30) -- BUGFIX. Pre-PUI-3d this was a hard
+# session_state cache with no invalidation: if the operator visited
+# the Translator BEFORE running an import, the empty result got
+# stuck in session_state forever; subsequent imports never appeared
+# in the picker until the operator restarted the proxy. Replaced
+# with @st.cache_data(ttl=30) so the GCS round-trip is amortized
+# (back-to-back renders cheap) but newly-imported files surface
+# within 30s.
+@st.cache_data(ttl=30, show_spinner=False)
+def _fetch_imported_source_files(project: str) -> tuple:
+    """Return (source_files_list, error_str_or_None) for a project.
 
-source_files = st.session_state.get(_SS_SOURCE_FILES, [])
-source_err = st.session_state.get(_SS_SOURCE_FILES_ERROR)
+    Wrapped in a tuple so the cache key is the project_id only
+    (mutable lists/dicts can't go through st.cache_data return
+    types cleanly). Caller unpacks.
+    """
+    try:
+        from common.storage import list_workdir_tf_files
+        all_files = list_workdir_tf_files(project)
+        imported = [f for f in all_files if f["status"] == "imported"]
+        return (imported, None)
+    except Exception as _e:  # noqa: BLE001
+        return ([], f"{type(_e).__name__}: {_e}"[:200])
+
+
+source_files, source_err = _fetch_imported_source_files(project_id)
 if source_err:
     st.warning(
         f"⚠ Couldn't read the imported-file list from GCS — the "
