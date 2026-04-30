@@ -77,6 +77,164 @@ def _normalized_state_name(resource: ManagedResource) -> str:
     return friendly_name_from_display(raw) or ""
 
 
+def _classify_parent_owner(
+    resource: CloudResource,
+    *,
+    compliant_cluster_names: set,
+    compliant_vm_names: set,
+    compliant_keyring_names: set,
+    compliant_topic_names: set,
+) -> str:
+    """Return human-readable parent ownership tag, or empty string
+    if the resource is genuinely orphan.
+
+    PUI-2pre gap #5 (2026-04-30): hoisted from
+    app/pages/3_Drift_Detection.py:_classify_parent_owner so
+    the engine produces the orphan-vs-child split natively (the
+    Dashboard's Coverage % hero metric needs the orphan-filtered
+    numerator from the snapshot, not from page-side recomputation).
+
+    Heuristics (ordered most-specific to least):
+      * GKE node-pool VMs / boot disks / NEGs -- prefix `gke-`
+        (reserved by GKE; safe unconditional match)
+      * Default project service accounts -- well-known @-domains
+        + numeric-prefix locals
+      * GCE auto-spawned boot disks -- name matches a managed VM
+      * KMS keys nested under a managed keyring -- URN check
+      * Pub/Sub subscriptions nested under a managed topic
+      * Default VPC / subnetwork (name == "default")
+
+    Returns the human-readable tag string when classified as a
+    child, empty string when genuinely orphan. Page renders the
+    tag verbatim; Dashboard just counts orphans-vs-children.
+
+    Argument shape mirrors the page's pre-PUI-2pre pre-built sets
+    so callers can pass cached lookup sets if classifying many
+    resources in a tight loop.
+    """
+    name = (resource.cloud_name or "")
+    urn = (getattr(resource, "cloud_urn", "") or "")
+    tf_type = resource.tf_type
+
+    # GKE auto-spawn: node-pool VMs, boot disks, NEGs, instance
+    # groups, etc. All have name prefix `gke-`. Reserved by GKE
+    # so unconditional matching is safe.
+    if name.startswith("gke-"):
+        for cluster in compliant_cluster_names:
+            cluster_hyphen = cluster.replace("_", "-")
+            if (
+                name.startswith(f"gke-{cluster}-")
+                or name.startswith(f"gke-{cluster_hyphen}-")
+            ):
+                return f"GKE cluster `{cluster_hyphen}`"
+        return "GKE cluster (not yet imported)"
+
+    # Default project service accounts.
+    if tf_type == "google_service_account":
+        sa_default_domains = (
+            "@cloudservices.gserviceaccount.com",
+            "@developer.gserviceaccount.com",
+            "@cloudbuild.gserviceaccount.com",
+            "@compute-system.iam.gserviceaccount.com",
+            "@container-engine-robot.iam.gserviceaccount.com",
+            "@gcp-sa-",  # any "gcp-sa-*" Google-managed SA
+            "@dataproc-accounts.iam.gserviceaccount.com",
+            "@cloud-tpu.iam.gserviceaccount.com",
+        )
+        if any(d in urn or d in name for d in sa_default_domains):
+            return "GCP default service account"
+        local = name.split("@", 1)[0] if "@" in name else name
+        if local.split("-")[0].isdigit():
+            return "GCP default service account"
+        if local.endswith("-compute") or local == "default":
+            return "GCP default service account"
+
+    # GCE auto-created boot disk.
+    if tf_type == "google_compute_disk":
+        if name in compliant_vm_names:
+            return f"VM `{name}` (boot disk)"
+        for vm in compliant_vm_names:
+            if name == vm.replace("_", "-"):
+                return f"VM `{vm.replace('_', '-')}` (boot disk)"
+
+    # KMS keys nested under a managed keyring.
+    if tf_type == "google_kms_crypto_key":
+        for keyring in compliant_keyring_names:
+            if (
+                f"/keyRings/{keyring}/" in urn
+                or f"/keyRings/{keyring.replace('_', '-')}/" in urn
+            ):
+                return f"KMS key ring `{keyring.replace('_', '-')}`"
+
+    # Pub/Sub subscriptions nested under a managed topic.
+    if tf_type == "google_pubsub_subscription":
+        for topic in compliant_topic_names:
+            topic_hyphen = topic.replace("_", "-")
+            if (
+                f"/topics/{topic}" in urn
+                or f"/topics/{topic_hyphen}" in urn
+                or topic in name
+                or topic_hyphen in name
+            ):
+                return f"Pub/Sub topic `{topic_hyphen}`"
+
+    # Default networks/subnets that GCP creates per-project.
+    if tf_type in ("google_compute_network", "google_compute_subnetwork"):
+        if name == "default":
+            return "GCP default VPC"
+
+    return ""  # genuinely orphan
+
+
+def _partition_unmanaged(
+    unmanaged: List[CloudResource],
+    state_resources: List[ManagedResource],
+) -> tuple[List[CloudResource], List[CloudResource]]:
+    """Split unmanaged into (orphan, child) based on parent heuristics.
+
+    PUI-2pre gap #5: produces the orphan-vs-child split that the
+    Dashboard's Coverage % hero metric needs. Pure function -- no
+    I/O. Both buckets together always equal the input list.
+
+    Looks up ``state_resources`` for the well-known parent types
+    (clusters, VMs, keyrings, topics) so the heuristic can attribute
+    a child to a SPECIFIC managed parent rather than just "auto-managed
+    by something".
+    """
+    compliant_cluster_names = {
+        r.hcl_name for r in state_resources
+        if r.tf_type == "google_container_cluster"
+    }
+    compliant_vm_names = {
+        r.hcl_name for r in state_resources
+        if r.tf_type == "google_compute_instance"
+    }
+    compliant_keyring_names = {
+        r.hcl_name for r in state_resources
+        if r.tf_type == "google_kms_key_ring"
+    }
+    compliant_topic_names = {
+        r.hcl_name for r in state_resources
+        if r.tf_type == "google_pubsub_topic"
+    }
+
+    orphans: List[CloudResource] = []
+    children: List[CloudResource] = []
+    for r in unmanaged:
+        owner = _classify_parent_owner(
+            r,
+            compliant_cluster_names=compliant_cluster_names,
+            compliant_vm_names=compliant_vm_names,
+            compliant_keyring_names=compliant_keyring_names,
+            compliant_topic_names=compliant_topic_names,
+        )
+        if owner:
+            children.append(r)
+        else:
+            orphans.append(r)
+    return orphans, children
+
+
 def _build_unmanaged(
     cloud_resources: List[CloudResource],
     state_resources: List[ManagedResource],
@@ -287,6 +445,21 @@ def rescan(
     # Diff: unmanaged = cloud - state (by (tf_type, name) key).
     unmanaged = _build_unmanaged(cloud_resources, state_resources)
 
+    # PUI-2pre gap #5: orphan-vs-child split for Coverage % hero.
+    # Engine-side classification so the snapshot persists pre-computed
+    # counts; Dashboard reads them directly without re-classifying.
+    unmanaged_orphans, unmanaged_children = _partition_unmanaged(
+        unmanaged, state_resources,
+    )
+
+    # PUI-2pre gap #6: per-tf_type discovery counts. Powers the
+    # Dashboard's Inventory card "discovered by tf_type (top 5)"
+    # without an extra GCS write. Single source of truth: the
+    # cloud_resources we already enumerated above.
+    discovered_by_type: dict = {}
+    for r in cloud_resources:
+        discovered_by_type[r.tf_type] = discovered_by_type.get(r.tf_type, 0) + 1
+
     # Bucket assignment for in-state resources. PUI-4e: when
     # drift_check is True, run the per-resource diff to partition
     # compliant vs drifted. Otherwise keep the cheap default
@@ -298,6 +471,13 @@ def rescan(
         drifted: List[ResourceDrift] = []
 
     elapsed = time.monotonic() - started
+    # PUI-2pre Coverage % calc (Firefly parity): denominator excludes
+    # auto-managed children since those aren't IaC-eligible.
+    _in_state = len(compliant) + len(drifted)
+    _iac_eligible = _in_state + len(unmanaged_orphans)
+    coverage_pct = (
+        round(100.0 * _in_state / _iac_eligible) if _iac_eligible > 0 else 0
+    )
     report = DriftReport(
         project_id=project_id,
         drifted=drifted,
@@ -305,6 +485,11 @@ def rescan(
         unmanaged=unmanaged,
         inventory_errors=inventory_errors,
         duration_s=round(elapsed, 2),
+        # PUI-2pre gap #5 + #6: hoisted classification counts.
+        unmanaged_orphan_count=len(unmanaged_orphans),
+        unmanaged_child_count=len(unmanaged_children),
+        coverage_pct=coverage_pct,
+        discovered_by_type=discovered_by_type,
     )
     log.info("rescan_complete", **report.as_fields())
 

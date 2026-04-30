@@ -92,6 +92,28 @@ class DriftReport:
     unmanaged: List[CloudResource] = field(default_factory=list)
     inventory_errors: List[str] = field(default_factory=list)
     duration_s: float = 0.0
+    # PUI-2pre gap #5 (2026-04-30): orphan-vs-child split + Coverage %.
+    # Pre-PUI-2pre this lived as inline JS-style code in
+    # app/pages/3_Drift_Detection.py:_classify_parent_owner.
+    # Hoisted into the engine so:
+    #   (a) the snapshot persists the orphan-filtered numbers for
+    #       the Dashboard's Coverage % hero metric (PUI-2),
+    #   (b) the Drift Detection page reads pre-computed counts
+    #       instead of re-classifying on every render, and
+    #   (c) future engines (Policy, etc.) can reuse the classifier
+    #       without page-side duplication.
+    # `unmanaged_orphan_count + unmanaged_child_count` always equals
+    # `len(unmanaged)`. `coverage_pct` is rounded to nearest int and
+    # uses the Firefly-parity denominator (in_state + orphan).
+    unmanaged_orphan_count: int = 0
+    unmanaged_child_count: int = 0
+    coverage_pct: int = 0
+    # PUI-2pre gap #6: per-tf_type discovery counts. Powers the
+    # Dashboard's Inventory card "discovered by tf_type (top 5)"
+    # without an extra GCS write. Single source of truth: the
+    # detector's rescan already enumerates the cloud once via
+    # importer.inventory.inventory().
+    discovered_by_type: dict = field(default_factory=dict)
 
     # D-4 fix (2026-04-28): expose the per-bucket counts as properties
     # so callers can write `report.compliant_count` (the natural name)
@@ -147,6 +169,11 @@ class DriftReport:
         events during the rescan, not re-emitted here. Same
         convention as WorkflowResult.as_fields and
         TranslationResult.as_fields.
+
+        PUI-2pre (2026-04-30) added orphan/child split,
+        coverage_pct, and discovered_by_type so the Dashboard
+        (PUI-2) can render Coverage % + per-tf_type breakdown
+        from the snapshot alone (no re-classification on read).
         """
         d: dict[str, Any] = {
             "project_id": self.project_id,
@@ -156,5 +183,12 @@ class DriftReport:
             "inventory_error_count": len(self.inventory_errors),
             "duration_s": self.duration_s,
             "exit_code": self.exit_code,
+            # PUI-2pre gap #5 + #6: snapshot the orphan-filtered
+            # counts + coverage + discovery-by-type so the Dashboard
+            # reads pre-computed values from snapshots/<engine>/latest.
+            "unmanaged_orphan_count": self.unmanaged_orphan_count,
+            "unmanaged_child_count": self.unmanaged_child_count,
+            "coverage_pct": self.coverage_pct,
+            "discovered_by_type": dict(self.discovered_by_type),
         }
         return d

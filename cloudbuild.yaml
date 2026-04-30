@@ -105,6 +105,13 @@ steps:
       # helper in common/storage.py is gated on this env var so
       # local-dev runs without the var keep using local state.
       - --set-env-vars=MTAGENT_USE_GCS_BACKEND=1
+      # PUI-2pre (2026-04-30): enable PSA-9 snapshot persistence so
+      # the Dashboard page (PUI-2) can read per-engine result history
+      # from gs://<bucket>/.../snapshots/<engine>/. Pre-PUI-2pre this
+      # was unset = no-op everywhere = Dashboard would have been
+      # silently empty. common/snapshots.py reads this env var at
+      # snapshots_enabled().
+      - --set-env-vars=MTAGENT_PERSIST_SNAPSHOTS=1
       - --set-env-vars=MTAGENT_LOG_LEVEL=INFO
       - --set-env-vars=PYTHONUNBUFFERED=1
     waitFor: [push-sha]

@@ -219,9 +219,25 @@ def write_snapshot(
     tenant = tenant_id or "default"
     _validate_ids(tenant, project_id)
 
-    payload = json.dumps(result, indent=2, sort_keys=True, default=str)
-    prefix = _snapshot_prefix(tenant, project_id, engine_name)
+    # PUI-2pre (2026-04-30) gap #2: wrap the engine result in a
+    # standard envelope. Pre-PUI-2pre we serialised `result` directly,
+    # which meant the Dashboard couldn't show "last scan X minutes ago"
+    # because the payload had no timestamp -- it lived only in the
+    # GCS object name (history/<ts>.json) which `read_latest_snapshot`
+    # discards. Envelope keeps the original engine fields under `data`
+    # while adding `written_at` (UTC ISO-8601) and `engine` for fast
+    # rendering without an extra GCS metadata fetch.
     timestamp = _utc_timestamp()
+    envelope = {
+        "engine": engine_name,
+        "written_at": timestamp,  # UTC ISO-8601, sortable
+        "tenant_id": tenant,
+        "project_id": project_id,
+        "data": result,
+    }
+
+    payload = json.dumps(envelope, indent=2, sort_keys=True, default=str)
+    prefix = _snapshot_prefix(tenant, project_id, engine_name)
 
     _log.info(
         "snapshot_write_start",
@@ -338,5 +354,151 @@ def read_latest_snapshot(
             tenant_id=tenant,
             project_id=project_id,
             error=str(e),
+        )
+        return None
+
+
+def list_history(
+    engine_name: str,
+    project_id: str,
+    *,
+    tenant_id: Optional[str] = None,
+    limit: int = 10,
+) -> list:
+    """Enumerate snapshot history for an engine, newest first.
+
+    PUI-2pre (2026-04-30) gap #3: the Dashboard's recent-activity feed
+    needs to walk multiple snapshots per engine to render a timeline
+    ("Last 10 scans across the project"). Pre-PUI-2pre this helper
+    didn't exist -- only ``read_latest_snapshot`` did, which limits
+    callers to one snapshot per engine.
+
+    Lists blobs under ``snapshots/<engine>/history/`` and returns the
+    most recent ``limit`` entries. Each entry is a dict with the
+    timestamp + GCS URI; callers may then call read_history_entry()
+    (future) or use blob.download_as_text directly to read the
+    payload. Only metadata is loaded here -- listing 1000s of blobs
+    is still cheap because we don't read their content.
+
+    Args:
+        engine_name: One of {"importer", "translator", "detector",
+            "policy"}.
+        project_id: GCP project ID.
+        tenant_id: Multi-tenant identifier (defaults to "default").
+        limit: Max entries to return. Default 10 (matches typical
+            Dashboard "Recent activity" panel size).
+
+    Returns:
+        List of dicts, newest first::
+
+            [
+              {"timestamp": "2026-04-30T08:42:15Z",
+               "gs_uri":    "gs://.../snapshots/<engine>/history/<ts>.json",
+               "size_bytes": 1234},
+              ...
+            ]
+
+        Empty list if no history exists yet (engine never ran for
+        this project) OR on read failure (network/perms). Same
+        "tolerant of empty" disposition as read_latest_snapshot.
+
+    Raises:
+        ValueError: engine_name / IDs failed validation.
+
+    Notes:
+        Sort key is the GCS object name (which contains the ISO-8601
+        timestamp), not blob.time_created. Equivalent for our use
+        because _utc_timestamp() generates monotonic-ish names.
+    """
+    _validate_engine(engine_name)
+    tenant = tenant_id or "default"
+    _validate_ids(tenant, project_id)
+
+    prefix = _snapshot_prefix(tenant, project_id, engine_name)
+    history_prefix = f"{prefix}history/"
+
+    # Strip the gs://<bucket>/ portion to get the object-prefix that
+    # list_blobs expects (it operates on the bucket scope, not URIs).
+    rest = history_prefix[len("gs://"):]
+    bucket_name, _, object_prefix = rest.partition("/")
+
+    client = _get_gcs_client()
+    bucket = client.bucket(bucket_name)
+
+    try:
+        blobs = list(client.list_blobs(bucket, prefix=object_prefix))
+    except gcs_exceptions.NotFound:
+        _log.info(
+            "snapshot_history_listing_missing",
+            engine=engine_name,
+            tenant_id=tenant,
+            project_id=project_id,
+            history_prefix=history_prefix,
+        )
+        return []
+    except Exception as e:  # noqa: BLE001 -- best-effort enumerate
+        _log.warning(
+            "snapshot_history_listing_failed",
+            engine=engine_name,
+            tenant_id=tenant,
+            project_id=project_id,
+            history_prefix=history_prefix,
+            error_type=type(e).__name__,
+            error=str(e)[:200],
+        )
+        return []
+
+    # Sort newest-first by object name (which contains the
+    # iso8601-with-dashes timestamp -- lexicographic == chronological).
+    # Filter out anything that isn't a .json file (defensive; the
+    # write path only ever creates .json).
+    json_blobs = [b for b in blobs if b.name.endswith(".json")]
+    json_blobs.sort(key=lambda b: b.name, reverse=True)
+
+    out = []
+    for blob in json_blobs[:limit]:
+        # Strip the prefix to get just the timestamp filename, then
+        # strip .json. Result is the same string _utc_timestamp()
+        # produced when the snapshot was written.
+        basename = blob.name.rsplit("/", 1)[-1]
+        ts = basename[:-len(".json")] if basename.endswith(".json") else basename
+        out.append({
+            "timestamp": ts,
+            "gs_uri": f"gs://{bucket_name}/{blob.name}",
+            "size_bytes": blob.size or 0,
+        })
+
+    return out
+
+
+def read_history_entry(gs_uri: str) -> Optional[dict]:
+    """Read a single history snapshot by its gs:// URI.
+
+    PUI-2pre (2026-04-30) gap #3 companion: the Dashboard's recent
+    activity feed renders a row per (engine, timestamp) tuple AND
+    needs the headline metric for that specific run. After
+    list_history() returns the URIs, the Dashboard calls this for
+    each row to fetch the actual envelope.
+
+    Args:
+        gs_uri: Full ``gs://bucket/path`` URI -- typically from
+            ``list_history()`` output.
+
+    Returns:
+        The decoded envelope dict (the same shape ``write_snapshot``
+        wrote: ``{engine, written_at, tenant_id, project_id, data}``)
+        or ``None`` on any read failure.
+    """
+    client = _get_gcs_client()
+    try:
+        blob = _blob_for_path(client, gs_uri)
+        raw = blob.download_as_text()
+        return json.loads(raw)
+    except Exception as e:  # noqa: BLE001 -- best-effort read
+        _log.warning(
+            "snapshot_history_read_failed",
+            gs_uri=gs_uri,
+            error_type=type(e).__name__,
+            error=str(e)[:200],
         )
         return None

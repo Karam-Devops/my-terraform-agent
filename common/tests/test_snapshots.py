@@ -136,7 +136,10 @@ class WriteSnapshotEnabledPathTests(unittest.TestCase):
         )
 
     def test_payload_is_valid_json_with_result_dict(self):
-        """Both uploads carry the JSON-serialized result dict."""
+        """Both uploads carry the JSON-serialized envelope wrapping
+        the result dict (PUI-2pre gap #2 -- pre-PUI-2pre payload
+        was the bare result; now it's
+        {engine, written_at, tenant_id, project_id, data: result})."""
         result_dict = {
             "imported": 13, "needs_attention": 3,
             "skipped": 0, "failed": 0,
@@ -144,10 +147,18 @@ class WriteSnapshotEnabledPathTests(unittest.TestCase):
         snapshots.write_snapshot(
             "importer", result_dict, "dev-proj-470211",
         )
-        # Both upload payloads parse back to the same dict.
+        # Both upload payloads parse back to an envelope whose .data
+        # equals the original result dict + envelope metadata fields.
         for _bucket, _blob, payload in self.upload_log:
             parsed = json.loads(payload)
-            self.assertEqual(parsed, result_dict)
+            self.assertEqual(parsed["data"], result_dict)
+            self.assertEqual(parsed["engine"], "importer")
+            self.assertEqual(parsed["project_id"], "dev-proj-470211")
+            self.assertEqual(parsed["tenant_id"], "default")
+            # written_at is an ISO-8601 timestamp -- shape-test only
+            # (exact value is mocked time-dependent).
+            self.assertIsInstance(parsed["written_at"], str)
+            self.assertTrue(parsed["written_at"].endswith("Z"))
 
     def test_destination_blob_path_uses_correct_tenant_and_engine(self):
         snapshots.write_snapshot(
