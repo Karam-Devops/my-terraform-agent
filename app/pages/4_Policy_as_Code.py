@@ -1,4 +1,4 @@
-# app/pages/4_Policy.py
+# app/pages/4_Policy_as_Code.py
 """Policy page -- Streamlit wrapper around policy.scan.scan().
 
 PUI-5b2 (2026-04-30): the SaaS surface for the Policy compliance
@@ -58,7 +58,7 @@ from app.ui.theme import apply_theme_polish
 
 # Page chrome
 st.set_page_config(
-    page_title="mtagent · Policy",
+    page_title="mtagent · Policy as Code",
     page_icon="🛡️",
     layout="wide",
 )
@@ -67,7 +67,7 @@ apply_theme_polish()
 
 project_id = render_sidebar()
 
-st.title("🛡️ Policy")
+st.title("🛡️ Policy as Code")
 st.caption(
     "Evaluate every codified resource against the vendored OPA / Rego "
     "policy bundle. Surfaces HIGH / MED / LOW compliance violations + "

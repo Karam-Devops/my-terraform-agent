@@ -104,7 +104,7 @@ if _lock is not None:
     # the connection during long blocking calls). Detection: a result
     # was cached AFTER this lock acquired -> the engine ran to
     # completion -> safe to clear the stale lock and render the
-    # success card. Same fix mirrored in app/pages/2_Translator.py.
+    # success card. Same fix mirrored in app/pages/2_Cross_Cloud_Translation.py.
     elif (
         _last_result_for_recover is not None
         and _last_result_for_recover.get("_cached_at", 0)

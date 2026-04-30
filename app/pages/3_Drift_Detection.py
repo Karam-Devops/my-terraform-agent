@@ -1,4 +1,4 @@
-# app/pages/3_Detector.py
+# app/pages/3_Drift_Detection.py
 """Detector page (PUI-4) — the star of the SaaS demo.
 
 Firefly's killer pattern is "show me what's NOT in IaC" -- coverage
@@ -65,7 +65,7 @@ from app.ui.theme import apply_theme_polish
 
 # Page chrome
 st.set_page_config(
-    page_title="mtagent · Detector",
+    page_title="mtagent · Drift Detection",
     page_icon="🔍",
     layout="wide",
 )
@@ -74,11 +74,12 @@ apply_theme_polish()
 
 project_id = render_sidebar()
 
-st.title("🔍 Detector")
+st.title("🔍 Drift Detection & Remediation")
 st.caption(
     "Compare cloud reality vs terraform state. Find resources NOT yet "
-    "codified (Unmanaged) and resources whose HCL drifted from cloud "
-    "values (Drift)."
+    "codified (Unmanaged), resources whose HCL drifted from cloud "
+    "values (Drift), and remediate per resource (Restore HCL→Cloud, "
+    "Accept Cloud→State, Recreate, Stop managing)."
 )
 
 if not project_id:

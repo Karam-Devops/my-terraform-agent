@@ -1,4 +1,4 @@
-# app/pages/2_Translator.py
+# app/pages/2_Cross_Cloud_Translation.py
 """Translator page (PUI-3).
 
 Three-stage workflow mirroring the Inventory page's UX:
@@ -76,8 +76,8 @@ if not _UI_TARGETS:
 
 # Page chrome
 st.set_page_config(
-    page_title="mtagent · Translator",
-    page_icon="📤",
+    page_title="mtagent · Cross-Cloud Translation",
+    page_icon="🌐",
     layout="wide",
 )
 
@@ -86,9 +86,9 @@ apply_theme_polish()
 
 project_id = render_sidebar()
 
-st.title("📤 Translator")
+st.title("🌐 Cross-Cloud Translation")
 st.caption(
-    "Convert imported `google_*` HCL into AWS or Azure equivalents. "
+    "Translate imported GCP `google_*` HCL into AWS or Azure equivalents. "
     "Each translation runs through Phase 1 (blueprint extract) + "
     "Phase 2 (target-cloud HCL gen) with up to 3 validate-feedback "
     "retries."
