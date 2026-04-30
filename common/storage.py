@@ -159,6 +159,17 @@ _PERSIST_EXCLUDES = (
     "terraform.tfstate.lock.info",
     "terraform-state/**",
     ".terraform/terraform.tfstate",
+    # PUI-1D (2026-04-30): same class of bug as PUI-1Q.
+    # ``snapshots/<engine>/{latest,history/*.json}`` is written
+    # directly to GCS by ``common.snapshots.write_snapshot`` -- it
+    # never touches local disk. Pre-PUI-1D persist's delete-orphans
+    # loop saw it remote-but-not-local and deleted it on the next
+    # persist (~5s after the engine wrote it). Caught during PUI-2c
+    # Dashboard smoke (Dashboard showed empty cards despite
+    # snapshot_write_complete events in the logs). The PUI-1Q
+    # exclude semantic ("ignore = neither upload nor delete remotely")
+    # already applies in step 4 -- we just need to list the path.
+    "snapshots/**",
 )
 
 
