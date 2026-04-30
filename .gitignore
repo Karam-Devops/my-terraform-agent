@@ -74,3 +74,21 @@ archive/
 
 # Local Claude Code settings (per-developer).
 .claude/settings.local.json
+
+# Whole .claude/ dir (per-developer scratch + agent state). Not a
+# refinement of the line above -- some Claude Code installs drop
+# additional files (history, agent state) we don't want shared.
+.claude/
+
+# Local /tmp-style scratch dirs created by hydrate_workdir for
+# debugging. Production hydrates into Cloud Run /tmp; local-dev may
+# drop them at repo root if MTAGENT_IMPORT_BASE points here.
+imported/
+
+# One-off diagnostic scripts dropped at repo root during smokes
+# (e.g., _strip_firefly.py, _inspect_gen.sh, _tmp_state.json).
+# Pattern catches anything starting with underscore at repo root --
+# matches our convention for "this is throwaway local-dev tooling."
+/_*.sh
+/_*.py
+/_tmp_*.json
