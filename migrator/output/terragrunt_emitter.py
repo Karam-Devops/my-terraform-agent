@@ -18,6 +18,19 @@ Two emission modes per leaf stack:
      source GCP inputs as inline comments and an empty
      ``inputs = {}`` block — operator-fillable.
 
+Post-emission steps:
+  * **GCP→AWS local-reference substitution** — translated ``inputs = {...}``
+    blocks may carry over verbatim references to source GCP locals
+    like ``${local._project.locals.project_id}`` or
+    ``${local._env_configs.locals.env}``. These resolve in the source
+    repo via per-project ``project.hcl`` / ``env.hcl`` includes; in our
+    AWS target we substitute them to AWS-equivalents
+    (``local.environment``, ``local.region``, ``local.account_id``)
+    defined at the leaf level via a synthesized locals block.
+  * **terragrunt hcl format** — best-effort canonicalization so Tier 1
+    of the validation report passes by construction. Skipped if the
+    terragrunt CLI isn't on PATH.
+
 The swap-friendly architecture lets the customer replace AWS module
 sources later by editing one file (``target/_common/modules.hcl``).
 See module-by-module README.md for the input/output contract.
@@ -25,15 +38,81 @@ See module-by-module README.md for the input/output contract.
 
 from __future__ import annotations
 
+import logging
 import os
+import shutil
+import subprocess
 from typing import Dict, List, Optional, Set
 
 from migrator.results import ConfidenceFinding, DiscoveredResource
 from migrator.translate import all_aws_module_specs, translate_resource
 
 
+logger = logging.getLogger(__name__)
+
+
 # Default AWS region target — operator overrides via the Clarify form.
 _DEFAULT_AWS_REGION = "us-east-1"
+
+
+# GCP-style local references → AWS-equivalent local references.
+# Applied as straight string substitution after the per-stack rendering.
+# Order matters: longer keys first so we don't partially-match shorter ones.
+_GCP_TO_AWS_LOCAL_REFS = [
+    # _project.locals.* — customer's project.hcl pattern
+    ("local._project.locals.project_id",            "local.environment"),
+    ("local._project.locals.primary_region",        "local.region"),
+    ("local._project.locals.primary_zone",          '"${local.region}a"'),
+    ("local._project.locals.primary_region_suffix", "local.region"),
+    ("local._project.locals.project_number",        "local.account_id"),
+    # _env_configs / env.hcl pattern
+    ("local._env_configs.locals.env",               "local.environment"),
+    ("local._env_configs.locals.environment",       "local.environment"),
+    # Bare local.env (less common)
+    # NOTE: this is fragile — `local.env` could be a name collision in
+    # other contexts. Apply last so other rules with longer prefixes
+    # have already substituted out.
+    ("local.env ",   "local.environment "),   # space-suffix to avoid prefix-match
+    ("local.env}",   "local.environment}"),   # interpolation tail
+    ("local.env)",   "local.environment)"),
+    ("local.env,",   "local.environment,"),
+    ("local.env\n",  "local.environment\n"),
+    # python-hcl2 sometimes emits `${local.env}` as `${local_env}` —
+    # underscored token. Catch both shapes.
+    ("${local_env}",  "${local.environment}"),
+    ("local_env",     "local.environment"),
+]
+
+
+def _substitute_gcp_local_refs(text: str) -> str:
+    """Rewrite GCP-style local references to AWS-equivalents.
+
+    Applied to each leaf's rendered HCL after the translator produces
+    the inputs block. Pure string substitution — preserves everything
+    else verbatim.
+    """
+    out = text
+    for src, dst in _GCP_TO_AWS_LOCAL_REFS:
+        out = out.replace(src, dst)
+    return out
+
+
+def _format_with_terragrunt(target_dir: str) -> bool:
+    """Best-effort: run `terragrunt hcl format` to canonicalize the
+    emitted tree. Returns True on success, False if terragrunt isn't
+    on PATH or the command failed. Never raises.
+    """
+    if shutil.which("terragrunt") is None:
+        return False
+    try:
+        proc = subprocess.run(
+            ["terragrunt", "hcl", "format",
+             "--working-dir", target_dir, "--no-color"],
+            capture_output=True, text=True, timeout=60,
+        )
+        return proc.returncode == 0
+    except (subprocess.TimeoutExpired, OSError):
+        return False
 
 
 def emit_terragrunt_skeleton(
@@ -84,8 +163,10 @@ def emit_terragrunt_skeleton(
     written.append(modules_path)
 
     # Per-environment env.hcl files (synthesized so leaves can include them).
-    # We emit one env.hcl per top-level environment found in the source.
-    env_paths = _emit_env_hcls(target_root, resources)
+    # Mirror every env.hcl from source at the same relative path in target,
+    # plus emit a fallback env.hcl at the input root so leaves whose module
+    # path doesn't have an env.hcl ancestor still resolve `find_in_parent_folders("env.hcl")`.
+    env_paths = _emit_env_hcls(target_root, repo_path, resources)
     written.extend(env_paths)
 
     # ---- 3. AWS module bodies (one dir per registered translator service) ----
@@ -155,6 +236,16 @@ def emit_terragrunt_skeleton(
     ))
     written.append(readme_path)
 
+    # ---- 6. Best-effort canonical formatting via terragrunt CLI ----
+    # If terragrunt is on PATH, run `terragrunt hcl format` to make
+    # every file conform to canonical formatting. This makes Tier 1
+    # of the validation report pass by construction (rather than
+    # always failing because our Python templates don't match
+    # terragrunt's exact whitespace rules).
+    formatted = _format_with_terragrunt(target_root)
+    if formatted:
+        logger.info("emitter_terragrunt_format_applied", extra={"target": target_root})
+
     return written
 
 
@@ -164,47 +255,72 @@ def emit_terragrunt_skeleton(
 
 def _emit_env_hcls(
     target_root: str,
+    repo_path: str,
     resources: List[DiscoveredResource],
 ) -> List[str]:
-    """Emit a synthesized env.hcl per top-level environment in source.
+    """Mirror every env.hcl from source at the same relative path in target.
 
-    Customer's GCP repo has env.hcl per environment (dev/qa/prod/...).
-    Their leaf terragrunt.hcl files do `read_terragrunt_config(find_in_parent_folders("env.hcl"))`,
-    so the AWS skeleton needs equivalent env.hcl files at the same
-    relative paths or its terragrunt-renders will fail.
+    Customer's GCP repo has env.hcl files at various depths
+    (e.g. environments/dev/env.hcl). Their leaf terragrunt.hcl files
+    do `read_terragrunt_config(find_in_parent_folders("env.hcl"))`, so
+    the AWS skeleton needs equivalent env.hcl files at the same relative
+    paths or terragrunt resolution fails.
+
+    Strategy:
+      1. Walk source `repo_path` for any file named `env.hcl`. For each,
+         emit a synthesized AWS-flavored env.hcl at the same relative
+         path under target/ — preserves the parent-folder lookup chain.
+      2. Always emit a fallback env.hcl at target/ root so leaves whose
+         path has no env.hcl ancestor still resolve.
     """
     written: List[str] = []
-    seen_envs: Set[str] = set()
+    seen_paths: Set[str] = set()
+    abs_repo = os.path.abspath(repo_path)
 
-    # Look for env.hcl ancestors of every resource's module path.
-    # Group by the directory two-levels-up (typical: environments/<env>/).
-    for r in resources:
-        parts = r.module_path.split("/")
-        # e.g. "environments/dev/.../gcs" -> emit env.hcl at "environments/dev/"
-        if len(parts) >= 2 and parts[0] in ("environments", "common"):
-            env_top = "/".join(parts[:2])
-            if env_top in seen_envs:
+    # 1. Mirror every source env.hcl
+    if os.path.isdir(abs_repo):
+        for root, _dirs, files in os.walk(abs_repo):
+            if "env.hcl" not in files:
                 continue
-            seen_envs.add(env_top)
+            # Skip migrator output trees if any were committed
+            if "migrator_output" in root.split(os.sep):
+                continue
+            rel_dir = os.path.relpath(root, abs_repo).replace(os.sep, "/")
+            if rel_dir == ".":
+                rel_dir = ""
 
-            env_path = os.path.join(target_root, env_top, "env.hcl")
-            _write_text(env_path, _render_env_hcl(env_top))
-            written.append(env_path)
+            target_env_path = os.path.join(target_root, rel_dir, "env.hcl") \
+                if rel_dir else os.path.join(target_root, "env.hcl")
+            if target_env_path in seen_paths:
+                continue
+            seen_paths.add(target_env_path)
+
+            # Derive env name from rel_dir's last segment, falling back
+            # to "default" for the input-root case.
+            env_name = rel_dir.split("/")[-1] if rel_dir else "default"
+            _write_text(target_env_path, _render_env_hcl(env_name))
+            written.append(target_env_path)
+
+    # 2. Always-on fallback env.hcl at target root.
+    fallback = os.path.join(target_root, "env.hcl")
+    if fallback not in seen_paths:
+        _write_text(fallback, _render_env_hcl("default"))
+        written.append(fallback)
 
     return written
 
 
-def _render_env_hcl(env_top: str) -> str:
+def _render_env_hcl(env_name: str) -> str:
     """Synthesize a per-environment env.hcl for the AWS target tree."""
-    env_name = env_top.split("/")[-1]
+    is_prod = env_name in ("prod", "stage", "production", "stg")
     return (
-        f"# Per-environment locals for {env_top} (AWS target).\n"
+        f"# Per-environment locals for env={env_name} (AWS target).\n"
         f"# Synthesized by Cloud Lifecycle Intelligence Migrator.\n"
         f"# Read by leaf terragrunt.hcl files via\n"
         f"# read_terragrunt_config(find_in_parent_folders(\"env.hcl\")).\n\n"
         "locals {\n"
         f'  environment    = "{env_name}"\n'
-        '  is_production  = ' + ("true" if env_name in ("prod", "stage") else "false") + "\n"
+        f'  is_production  = {"true" if is_prod else "false"}\n'
         "}\n"
     )
 
@@ -216,16 +332,26 @@ def _render_env_hcl(env_top: str) -> str:
 def _render_root_terragrunt(aws_region: str) -> str:
     return (
         "# AWS Terragrunt root — synthesized by Cloud Lifecycle Intelligence Migrator.\n"
-        "# Replace placeholder values (account_id, bucket name, DynamoDB table)\n"
-        "# with your real AWS landing-zone configuration before running\n"
-        "# `terragrunt run-all init`.\n\n"
+        "# Replace the placeholder values below with your real AWS landing-zone\n"
+        "# configuration before running `terragrunt run-all init`.\n"
+        "#\n"
+        "# Locals are hardcoded here (rather than read from sibling config files)\n"
+        "# so the root validates standalone with `terragrunt hcl validate`. The\n"
+        "# files at target/_common/account.hcl + tags.hcl are documentation/\n"
+        "# checklist; they're optionally consumed by leaves via\n"
+        "# `find_in_parent_folders('_common/account.hcl')` if you want per-account\n"
+        "# overrides without editing this root.\n\n"
         "locals {\n"
-        '  account = read_terragrunt_config(find_in_parent_folders("account.hcl"))\n'
-        '  tags    = read_terragrunt_config(find_in_parent_folders("tags.hcl"))\n'
-        '  env     = read_terragrunt_config(find_in_parent_folders("env.hcl"))\n\n'
-        "  account_id  = local.account.locals.aws_account_id\n"
-        "  environment = local.env.locals.environment\n"
-        f'  region      = "{aws_region}"\n'
+        '  account_id  = "REPLACE-WITH-AWS-ACCOUNT-ID"\n'
+        '  org_id      = "REPLACE-WITH-AWS-ORG-ID"\n'
+        f'  region      = "{aws_region}"\n\n'
+        "  default_tags = {\n"
+        '    managed-by  = "terraform"\n'
+        '    cost-center = "platform"\n'
+        '    owner       = "platform-team"\n'
+        '    compliance  = "internal"\n'
+        '    repo        = "REPLACE-WITH-AWS-REPO-NAME"\n'
+        "  }\n"
         "}\n\n"
         "remote_state {\n"
         '  backend = "s3"\n'
@@ -235,7 +361,7 @@ def _render_root_terragrunt(aws_region: str) -> str:
         "  }\n"
         "  config = {\n"
         '    bucket         = "${local.account_id}-tfstate"\n'
-        '    key            = "${local.environment}/${path_relative_to_include()}/terraform.tfstate"\n'
+        '    key            = "${path_relative_to_include()}/terraform.tfstate"\n'
         "    region         = local.region\n"
         "    encrypt        = true\n"
         '    dynamodb_table = "tfstate-lock"\n'
@@ -248,7 +374,7 @@ def _render_root_terragrunt(aws_region: str) -> str:
         'provider "aws" {\n'
         '  region = "${local.region}"\n\n'
         "  default_tags {\n"
-        "    tags = ${jsonencode(local.tags.locals.labels)}\n"
+        "    tags = ${jsonencode(local.default_tags)}\n"
         "  }\n"
         "}\n"
         "EOF\n"
@@ -269,10 +395,9 @@ def _render_root_terragrunt(aws_region: str) -> str:
         "EOF\n"
         "}\n\n"
         "inputs = {\n"
-        "  aws_account_id = local.account.locals.aws_account_id\n"
-        "  environment    = local.environment\n"
+        "  aws_account_id = local.account_id\n"
         "  region         = local.region\n"
-        "  tags           = local.tags.locals.labels\n"
+        "  tags           = local.default_tags\n"
         "}\n"
     )
 
@@ -409,11 +534,26 @@ def _render_stack_terragrunt(
 
     if has_translation:
         service_name = translation.service_name
-        # Swap-friendly module source via lookup against modules.hcl.
+        # Leaf locals block: read AWS-target's account.hcl + env.hcl so
+        # leaves can reference `local.environment`, `local.account_id`,
+        # `local.region` directly. Mirrors the customer's source pattern
+        # of having per-leaf `read_terragrunt_config(find_in_parent_folders(...))`
+        # for project + env config.
         lines.append("locals {")
+        lines.append(
+            '  _account = read_terragrunt_config(find_in_parent_folders("_common/account.hcl"))'
+        )
+        lines.append(
+            '  _env     = read_terragrunt_config(find_in_parent_folders("env.hcl"))'
+        )
         lines.append(
             '  _modules = read_terragrunt_config(find_in_parent_folders("_common/modules.hcl"))'
         )
+        lines.append("")
+        lines.append("  account_id  = local._account.locals.aws_account_id")
+        lines.append("  environment = local._env.locals.environment")
+        lines.append('  region      = "us-east-1"')
+        lines.append("")
         lines.append(f'  _service_name  = "{service_name}"')
         lines.append("  _module_source = lookup(")
         lines.append("    local._modules.locals._module_overrides,")
@@ -442,7 +582,12 @@ def _render_stack_terragrunt(
             lines.append("")
 
         lines.append("inputs = {")
-        lines.append(translation.aws_inputs_hcl.rstrip())
+        # Apply GCP→AWS local-reference substitution to the
+        # translator's rendered inputs HCL. Catches things like
+        # `${local._project.locals.project_id}` carried over from
+        # the source bucket name and rewrites to `${local.environment}`.
+        substituted_inputs = _substitute_gcp_local_refs(translation.aws_inputs_hcl)
+        lines.append(substituted_inputs.rstrip())
         lines.append("}")
 
     elif aws_eq == "MANUAL_REVIEW":
