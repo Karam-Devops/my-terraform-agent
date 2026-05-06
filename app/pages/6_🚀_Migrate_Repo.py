@@ -287,8 +287,14 @@ with tab_conf:
     if not result.confidence:
         st.warning("No confidence findings — check Inventory tab first.")
     else:
-        # Build a sortable table; sort by ascending score so the
-        # MANUAL_REVIEW + LOW items surface at the top.
+        # Sort by band priority: HIGH → MEDIUM → LOW → MANUAL_REVIEW.
+        # Within each band, descending score then resource address.
+        _BAND_PRIORITY = {
+            CONFIDENCE_HIGH:    0,
+            CONFIDENCE_MEDIUM:  1,
+            CONFIDENCE_LOW:     2,
+            CONFIDENCE_MANUAL:  3,
+        }
         rows = [
             {
                 "Resource": c.resource_address,
@@ -298,7 +304,14 @@ with tab_conf:
                 "Reason": c.reason,
                 "Notes": " · ".join(c.notes) if c.notes else "",
             }
-            for c in sorted(result.confidence, key=lambda x: (x.score_pct, x.resource_address))
+            for c in sorted(
+                result.confidence,
+                key=lambda x: (
+                    _BAND_PRIORITY.get(x.band, 99),
+                    -x.score_pct,
+                    x.resource_address,
+                ),
+            )
         ]
         st.dataframe(rows, hide_index=True, use_container_width=True)
 
