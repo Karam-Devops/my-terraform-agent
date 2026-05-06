@@ -295,12 +295,26 @@ with tab_conf:
             CONFIDENCE_LOW:     2,
             CONFIDENCE_MANUAL:  3,
         }
+        # Detect which tf_types have translators registered (for the
+        # Translator status column). Imports the dispatcher's TRANSLATORS
+        # map so the UI doesn't go stale when new translators are added.
+        from migrator.translate import TRANSLATORS as _TRANSLATORS
+        _registered = set(_TRANSLATORS.keys())
+
+        def _translator_status(c) -> str:
+            if c.band == CONFIDENCE_MANUAL:
+                return "🚫 N/A (no AWS analog)"
+            if c.tf_type in _registered:
+                return "✅ Translated"
+            return "⏳ Scaffold (translator pending)"
+
         rows = [
             {
                 "Resource": c.resource_address,
                 "AWS equivalent": c.aws_equivalent or "(none)",
                 "Band": _band_with_emoji(c.band),
                 "Score": c.score_pct,
+                "Translator": _translator_status(c),
                 "Reason": c.reason,
                 "Notes": " · ".join(c.notes) if c.notes else "",
             }
@@ -314,6 +328,12 @@ with tab_conf:
             )
         ]
         st.dataframe(rows, hide_index=True, use_container_width=True)
+        st.caption(
+            "**Translator** column shows whether a per-resource translator is registered. "
+            "✅ Translated = populated `inputs = {...}` + AWS module body emitted. "
+            "⏳ Scaffold = mapping known but no translator code yet (commented-out inputs block; operator fills in or we register a translator). "
+            "🚫 N/A = no AWS equivalent."
+        )
 
 # ---------------- Dep Graph ----------------
 with tab_deps:

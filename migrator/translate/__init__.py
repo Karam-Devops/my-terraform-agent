@@ -49,6 +49,7 @@ from . import (
     secrets,
     security_group,
     sns_sqs,
+    subnet,
     vpc,
 )
 from .base import AWSModuleSpec, Translation
@@ -72,6 +73,7 @@ TRANSLATORS = {
     "google_certificate_manager_certificate":    acm,
     "google_dns_managed_zone":                   route53,
     "google_compute_network":                    vpc,
+    "google_compute_subnetwork":                 subnet,
     "google_compute_firewall":                   security_group,
 }
 
@@ -110,8 +112,8 @@ def all_aws_module_specs() -> List[AWSModuleSpec]:
     all_modules = (
         # Tier B (initial 7)
         gcs_to_s3, eip, elasticache, nat_gateway, rds, ec2, sns_sqs,
-        # Tier 1 expansion
-        secrets, ecr, acm, route53, vpc, security_group,
+        # Tier 1 expansion + subnet (architectural-gap fix)
+        secrets, ecr, acm, route53, vpc, security_group, subnet,
     )
     for mod in all_modules:
         spec = mod.aws_module_spec()

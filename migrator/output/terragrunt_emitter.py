@@ -97,6 +97,47 @@ def _substitute_gcp_local_refs(text: str) -> str:
     return out
 
 
+# Locals that ARE defined at our leaf level (so leaving these
+# `${local.X}` interpolations alone is safe).
+_AWS_KNOWN_LEAF_LOCALS = (
+    "local.environment",
+    "local.region",
+    "local.account_id",
+    "local._account",
+    "local._env",
+    "local._modules",
+    "local._service_name",
+    "local._module_source",
+)
+
+# Match any `${local.X[.Y...]}` interpolation token.
+import re as _re
+_LOCAL_INTERP_RE = _re.compile(r"\$\{(local\.[A-Za-z0-9_.\-\[\]]+)\}")
+
+
+def _strip_unresolved_locals(text: str) -> str:
+    """Replace any `${local.X}` reference that's NOT in our known AWS-leaf
+    locals list with a TODO placeholder string.
+
+    Customer source repos define many leaf-level locals (e.g.
+    `${local.secondary_region_suffix}`, deeply-nested
+    `${local.secondary_subnet_cfgs.primary-subnet-1.ip_cidr_range}`) that
+    we can't resolve in our AWS target. Substituting them keeps Tier 2
+    `terragrunt hcl validate` green; the operator inspects each TODO
+    against the source GCP inputs comment block above it.
+    """
+    def _replace(m: "_re.Match") -> str:
+        ref = m.group(1)
+        # Keep if exact match or sub-attribute of a known local.
+        for known in _AWS_KNOWN_LEAF_LOCALS:
+            if ref == known or ref.startswith(known + "."):
+                return m.group(0)
+        # Otherwise replace with a slug that's a valid HCL string fragment.
+        slug = ref.replace(".", "-").replace("[", "-").replace("]", "")
+        return f"TODO-{slug}"
+    return _LOCAL_INTERP_RE.sub(_replace, text)
+
+
 def _format_with_terragrunt(target_dir: str) -> bool:
     """Best-effort: run `terragrunt hcl format` to canonicalize the
     emitted tree. Returns True on success, False if terragrunt isn't
@@ -505,12 +546,29 @@ def _render_stack_terragrunt(
             src_url = u
             break
 
+    # Decide translated vs scaffold-only path UP-FRONT so the header
+    # message can reflect the actual emission status (was previously
+    # confusing — header said "Confidence HIGH" but body was scaffold).
+    has_translation = (
+        translation is not None
+        and translation.service_name in available_module_services
+    )
+
     lines: List[str] = []
     lines.append(f"# Source GCP module: {module_path}")
     if src_url:
         lines.append(f"# Source Terragrunt source: {src_url}")
     lines.append(f"# Inferred AWS equivalent: {aws_eq}")
-    lines.append(f"# Confidence: {band} ({score}%)")
+    if has_translation:
+        lines.append(f"# Confidence: {band} ({score}%) — translator implemented")
+        lines.append(f"# Status: TRANSLATED — populated `inputs = {{...}}` block below")
+    elif aws_eq == "MANUAL_REVIEW":
+        lines.append(f"# Confidence: {band} ({score}%) — no AWS equivalent")
+        lines.append(f"# Status: MANUAL_REVIEW — operator must decide AWS architecture")
+    else:
+        lines.append(f"# Confidence: {band} ({score}%) — mapping known, translator pending")
+        lines.append(f"# Status: SCAFFOLD-ONLY — register a translator at "
+                     f"migrator/translate/<service>.py to populate inputs + module body")
     lines.append(f"# Reason: {reason}")
     if confidence and confidence.notes:
         lines.append("# Notes:")
@@ -525,12 +583,6 @@ def _render_stack_terragrunt(
     lines.append("  path = find_in_parent_folders()")
     lines.append("}")
     lines.append("")
-
-    # Decide translated vs scaffold-only path.
-    has_translation = (
-        translation is not None
-        and translation.service_name in available_module_services
-    )
 
     if has_translation:
         service_name = translation.service_name
@@ -582,11 +634,15 @@ def _render_stack_terragrunt(
             lines.append("")
 
         lines.append("inputs = {")
-        # Apply GCP→AWS local-reference substitution to the
-        # translator's rendered inputs HCL. Catches things like
-        # `${local._project.locals.project_id}` carried over from
-        # the source bucket name and rewrites to `${local.environment}`.
+        # Two-pass cleanup of the translator's rendered inputs HCL:
+        #   1. GCP→AWS substitution catches the common Gruntwork
+        #      pattern (`local._project.locals.project_id` etc.)
+        #   2. Unresolved-local sanitization replaces customer-specific
+        #      `${local.X}` references that don't have a substitution
+        #      rule, with TODO placeholders so Tier 2 stays green
+        #      while the operator does a manual review.
         substituted_inputs = _substitute_gcp_local_refs(translation.aws_inputs_hcl)
+        substituted_inputs = _strip_unresolved_locals(substituted_inputs)
         lines.append(substituted_inputs.rstrip())
         lines.append("}")
 
