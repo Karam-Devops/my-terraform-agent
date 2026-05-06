@@ -29,6 +29,7 @@ from .ingest.repo_walker import walk_repo
 from .output.helpers import emit_helper_scripts
 from .output.migration_guide import emit_migration_guide
 from .output.terragrunt_emitter import emit_terragrunt_skeleton
+from .validate import validate_target as _validate_target
 from .plan.coverage import score_resources
 from .plan.dep_graph import build_dep_graph
 from .results import MigrationResult
@@ -168,6 +169,16 @@ def run_migration(
     )
     log.info("migrator_skeleton_emitted", count=len(skeleton_paths))
 
+    # ---- validate (Tiers 0–3, no cloud creds needed) ----
+    target_dir = os.path.join(output_dir, "target")
+    validation_report = _validate_target(target_dir)
+    validation_dict = validation_report.summary
+    log.info(
+        "migrator_validation_complete",
+        overall_passed=validation_dict.get("overall_passed"),
+        tiers=validation_dict.get("tiers"),
+    )
+
     duration = round(time.monotonic() - started, 2)
     result = MigrationResult(
         project_id=project_id,
@@ -182,6 +193,7 @@ def run_migration(
         migration_guide_path=guide_path,
         helper_script_paths=helper_paths,
         skeleton_paths=skeleton_paths,
+        validation=validation_dict,
         duration_s=duration,
         errors=ingest_errors,
     )

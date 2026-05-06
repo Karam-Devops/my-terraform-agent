@@ -108,6 +108,12 @@ class MigrationResult:
     helper_script_paths: List[str] = field(default_factory=list)
     skeleton_paths: List[str] = field(default_factory=list)
 
+    # Validation phase (Tiers 0–3, post-emission)
+    # Stored as a plain dict (not the ValidationReport class) so the
+    # snapshot+JSON round-trip is trivial. UI page reconstructs
+    # display from the dict.
+    validation: Optional[Dict[str, Any]] = None
+
     # Bookkeeping
     duration_s: float = 0.0
     errors: List[str] = field(default_factory=list)
@@ -147,6 +153,10 @@ class MigrationResult:
             "migration_guide_path": self.migration_guide_path or "",
             "helper_script_count": len(self.helper_script_paths),
             "skeleton_path_count": len(self.skeleton_paths),
+            "validation_overall_passed": (
+                bool(self.validation.get("overall_passed"))
+                if self.validation else None
+            ),
             "duration_s": self.duration_s,
             "errors": self.errors,
             "exit_code": self.exit_code,

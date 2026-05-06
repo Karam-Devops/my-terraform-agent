@@ -111,13 +111,13 @@ with st.form(key="migrator_form"):
         "Local path to GCP repo",
         value=st.session_state.get(
             "migrator_repo_path",
-            r"C:\Users\41708\gcp-iac-fixtures\simple-gcp",
+            r"C:\Users\41708\gcp-iac-fixtures\simple-gcp\environments\dev",
         ),
         help=(
-            "Absolute path to a checked-out customer repo. "
-            "Demo input: `C:\\Users\\41708\\gcp-iac-fixtures\\simple-gcp` "
-            "(vanilla TF) or `\\complex-gcp-terragrunt` (Terragrunt). "
-            "Future: paste a GitHub URL and the Platform clones it."
+            "Absolute path to a checked-out customer repo (or any subdirectory). "
+            "Demo default points at the `dev` environment subset (~77 stacks). "
+            "Pass the full repo root for an end-to-end run. "
+            "Future: paste a Git URL and the Platform clones it."
         ),
     )
 
@@ -250,12 +250,13 @@ if result.errors:
             st.code(err, language="text")
 
 # Tabs for the rest
-tab_inv, tab_conf, tab_deps, tab_guide, tab_aws, tab_files = st.tabs([
+tab_inv, tab_conf, tab_deps, tab_guide, tab_aws, tab_validate, tab_files = st.tabs([
     "📋 Inventory",
     "🎯 Confidence",
     "🔗 Dep Graph",
     "📖 Migration Guide",
     "🚀 AWS Skeleton",
+    "🛡️ Validation",
     "💾 Output Files",
 ])
 
@@ -403,6 +404,75 @@ with tab_aws:
                             f"... and {len(members) - cap} more files in `{top}/`. "
                             f"Download the full ZIP under the **Output Files** tab to inspect them all."
                         )
+
+
+# ---------------- Validation (Tiers 0–3) ----------------
+with tab_validate:
+    val = result.validation or {}
+    if not val:
+        st.warning("Validation was not run.")
+    else:
+        overall = val.get("overall_passed")
+        if overall:
+            st.success(
+                f"✅ Validation passed — every available tier reports clean. "
+                f"Total wall clock: {val.get('total_duration_s', 0)}s.",
+                icon="✅",
+            )
+        else:
+            st.error(
+                f"⚠️ Validation has failures or skipped tiers — see per-tier breakdown below. "
+                f"Total wall clock: {val.get('total_duration_s', 0)}s.",
+                icon="⚠️",
+            )
+
+        st.markdown("---")
+        st.markdown("### Tier-by-tier results")
+        st.caption(
+            "Tiers 0–3 require no cloud credentials and run automatically. "
+            "Tiers 4–6 (`terragrunt run-all validate` / `plan` / `apply`) are deferred — "
+            "they need AWS sandbox credentials. See the strategy memory."
+        )
+
+        tiers = val.get("tiers") or []
+        for t in tiers:
+            tier_num = t.get("tier", "?")
+            name = t.get("name", "")
+            status = t.get("status", "unknown")
+            files_checked = t.get("files_checked", 0)
+            failure_count = t.get("failure_count", 0)
+            skip_reason = t.get("skip_reason", "")
+
+            badge = {
+                "passed":  "🟢 PASSED",
+                "failed":  "🔴 FAILED",
+                "skipped": "⚪ SKIPPED",
+            }.get(status, "❓")
+
+            label = f"Tier {tier_num} — {name}    {badge}"
+            with st.expander(label, expanded=(status == "failed")):
+                col1, col2, col3 = st.columns(3)
+                with col1:
+                    st.metric("Files checked", files_checked)
+                with col2:
+                    st.metric("Failures", failure_count)
+                with col3:
+                    st.metric("Status", status)
+                if skip_reason:
+                    st.info(f"Skipped: {skip_reason}", icon="ℹ️")
+                # Note: failure details not in summary dict (only count).
+                # For detail surfacing in v2, store full failures list.
+
+        st.markdown("---")
+        st.markdown(
+            "**What's not yet automated** (deferred to v2 per `phase7_migrator_strategy` memory):"
+        )
+        st.markdown(
+            "- **Tier 4** — `terragrunt run-all validate` (real AWS provider schema check). "
+            "Needs cloud credentials.\n"
+            "- **Tier 5** — `terragrunt run-all plan -input=false`. Needs cloud credentials + state backend.\n"
+            "- **Tier 6** — apply-and-destroy on a sandbox AWS account. Needs sandbox + budget guard.\n"
+        )
 
 
 # ---------------- Output Files ----------------

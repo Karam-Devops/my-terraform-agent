@@ -28,6 +28,9 @@ _SKIP_DIRS = frozenset({
     ".idea",
     ".vscode",
     "node_modules",
+    # Migrator's own output directory — never re-scan our own output
+    # from a previous run (prevents circular re-translation).
+    "migrator_output",
 })
 
 
