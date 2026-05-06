@@ -37,19 +37,26 @@ from typing import Dict, List, Optional
 from migrator.results import DiscoveredResource
 
 from . import (
+    acm,
     ec2,
+    ecr,
     eip,
     elasticache,
     gcs_to_s3,
     nat_gateway,
     rds,
+    route53,
+    secrets,
+    security_group,
     sns_sqs,
+    vpc,
 )
 from .base import AWSModuleSpec, Translation
 
 
 # GCP tf_type → translator module
 TRANSLATORS = {
+    # Tier B (initial 7)
     "google_storage_bucket":         gcs_to_s3,
     "google_compute_address":        eip,
     "google_compute_global_address": eip,
@@ -59,6 +66,13 @@ TRANSLATORS = {
     "google_compute_instance":       ec2,
     "google_pubsub_topic":           sns_sqs,
     "google_pubsub_subscription":    sns_sqs,
+    # Tier 1 expansion (added 2026-05-07)
+    "google_secret_manager_secret":              secrets,
+    "google_artifact_registry_repository":       ecr,
+    "google_certificate_manager_certificate":    acm,
+    "google_dns_managed_zone":                   route53,
+    "google_compute_network":                    vpc,
+    "google_compute_firewall":                   security_group,
 }
 
 
@@ -93,7 +107,13 @@ def all_aws_module_specs() -> List[AWSModuleSpec]:
     """
     seen = set()
     out: List[AWSModuleSpec] = []
-    for mod in (gcs_to_s3, eip, elasticache, nat_gateway, rds, ec2, sns_sqs):
+    all_modules = (
+        # Tier B (initial 7)
+        gcs_to_s3, eip, elasticache, nat_gateway, rds, ec2, sns_sqs,
+        # Tier 1 expansion
+        secrets, ecr, acm, route53, vpc, security_group,
+    )
+    for mod in all_modules:
         spec = mod.aws_module_spec()
         if spec.service_name in seen:
             continue
