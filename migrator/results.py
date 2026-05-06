@@ -33,17 +33,27 @@ class DiscoveredResource:
 
     The `address` is the canonical Terraform reference: `<tf_type>.<name>`
     inside its module. The `module_path` is the relative path of the
-    file/module that declared it.
+    file/module that declared it. In Terragrunt-mode the same `address`
+    can repeat across environments — `qualified_id` (which includes
+    `module_path`) is the unique key.
     """
     tf_type: str                      # e.g. "google_compute_network"
     name: str                         # the HCL resource label
     module_path: str                  # path within repo (e.g. "modules/networking")
     file_path: str                    # absolute or repo-relative file path
     arguments: Dict[str, Any] = field(default_factory=dict)
+    # Relative paths from `dependencies { paths = [...] }` blocks in
+    # this stack's terragrunt.hcl. Empty for vanilla TF resources.
+    terragrunt_deps: List[str] = field(default_factory=list)
 
     @property
     def address(self) -> str:
         return f"{self.tf_type}.{self.name}"
+
+    @property
+    def qualified_id(self) -> str:
+        """Globally unique identifier (module_path + address)."""
+        return f"{self.module_path}::{self.address}"
 
 
 @dataclass

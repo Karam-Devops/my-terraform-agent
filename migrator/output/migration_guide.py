@@ -17,10 +17,20 @@ from typing import Dict, List, Optional
 from migrator.plan.dep_graph import topological_order
 from migrator.results import (
     CONFIDENCE_BANDS,
+    CONFIDENCE_HIGH,
+    CONFIDENCE_LOW,
+    CONFIDENCE_MANUAL,
+    CONFIDENCE_MEDIUM,
     ConfidenceFinding,
     DependencyEdge,
     DiscoveredResource,
 )
+
+# Cap on how many "lowest-confidence" resources get a per-resource
+# notes block. With 941 resources, the per-resource section is
+# unreadable as a wall of text; we focus the operator on the items
+# that need attention.
+_PER_RESOURCE_NOTES_CAP = 50
 
 
 def emit_migration_guide(
@@ -33,15 +43,21 @@ def emit_migration_guide(
     confidence: List[ConfidenceFinding],
     dep_edges: List[DependencyEdge],
 ) -> str:
-    """Write MIGRATION_GUIDE.md (and migration_plan.json) under output_dir.
-
-    Returns the absolute path to the markdown file. JSON sidecar is
-    emitted alongside.
-    """
+    """Write MIGRATION_GUIDE.md (and migration_plan.json) under output_dir."""
     os.makedirs(output_dir, exist_ok=True)
 
     confidence_by_addr = {c.resource_address: c for c in confidence}
-    deploy_order = topological_order(resources, dep_edges)
+
+    # qualified_id-keyed deploy order (so 941 doesn't collapse to 134
+    # via address collision in Terragrunt mode).
+    deploy_qids = topological_order(resources, dep_edges)
+    by_qid = {r.qualified_id: r for r in resources}
+
+    # For each resource, list the addresses it depends on (= edges
+    # whose source is this resource's address).
+    deps_by_source: Dict[str, List[str]] = {}
+    for e in dep_edges:
+        deps_by_source.setdefault(e.source, []).append(e.target)
 
     summary = {b: 0 for b in CONFIDENCE_BANDS}
     for c in confidence:
@@ -59,7 +75,9 @@ def emit_migration_guide(
             source_iac=source_iac,
             resources=resources,
             confidence_by_addr=confidence_by_addr,
-            deploy_order=deploy_order,
+            deploy_qids=deploy_qids,
+            by_qid=by_qid,
+            deps_by_source=deps_by_source,
             summary=summary,
         ))
 
@@ -72,13 +90,15 @@ def emit_migration_guide(
             "target_cloud": target_cloud,
             "source_iac": source_iac,
             "summary": summary,
-            "deploy_order": deploy_order,
+            "deploy_order_qualified_ids": deploy_qids,
             "resources": [
                 {
+                    "qualified_id": r.qualified_id,
                     "address": r.address,
                     "tf_type": r.tf_type,
                     "name": r.name,
                     "module_path": r.module_path,
+                    "depends_on_addresses": deps_by_source.get(r.address, []),
                     "confidence": _conf_to_dict(confidence_by_addr.get(r.address)),
                 }
                 for r in resources
@@ -104,7 +124,9 @@ def _render_markdown(
     source_iac: str,
     resources: List[DiscoveredResource],
     confidence_by_addr: Dict[str, ConfidenceFinding],
-    deploy_order: List[str],
+    deploy_qids: List[str],
+    by_qid: Dict[str, DiscoveredResource],
+    deps_by_source: Dict[str, List[str]],
     summary: Dict[str, int],
 ) -> str:
     lines: List[str] = []
@@ -121,10 +143,10 @@ def _render_markdown(
     lines.append("")
     lines.append("| Band | Count |")
     lines.append("|---|---|")
-    lines.append(f"| 🟢 HIGH (≥85%)         | {summary.get('HIGH', 0)} |")
-    lines.append(f"| 🟡 MEDIUM (60–84%)     | {summary.get('MEDIUM', 0)} |")
-    lines.append(f"| 🔴 LOW (<60%)          | {summary.get('LOW', 0)} |")
-    lines.append(f"| ⚠️  MANUAL REVIEW       | {summary.get('MANUAL_REVIEW', 0)} |")
+    lines.append(f"| 🟢 HIGH (≥85%)         | {summary.get(CONFIDENCE_HIGH, 0)} |")
+    lines.append(f"| 🟡 MEDIUM (60–84%)     | {summary.get(CONFIDENCE_MEDIUM, 0)} |")
+    lines.append(f"| 🔴 LOW (<60%)          | {summary.get(CONFIDENCE_LOW, 0)} |")
+    lines.append(f"| ⚠️  MANUAL REVIEW       | {summary.get(CONFIDENCE_MANUAL, 0)} |")
     lines.append("")
     lines.append("HIGH-band resources translate with minimal review. MEDIUM-band ")
     lines.append("require an engineer pass per resource. LOW-band involve paradigm ")
@@ -145,58 +167,67 @@ def _render_markdown(
     lines.append("- [ ] Rollback runbook reviewed and approved")
     lines.append("")
 
-    # ---- Deployment sequence (dep-ordered) ----
-    lines.append("## Deployment sequence (dependency-ordered)")
+    # ---- Deployment sequence (dep-ordered, every resource visible) ----
+    total = len(deploy_qids)
+    lines.append(f"## Deployment sequence ({total} stacks)")
     lines.append("")
-    lines.append("Deploy resources in this order. Each row's `Depends on` column lists ")
-    lines.append("the resources that must exist before this one is applied.")
+    lines.append("Deploy stacks in this order. Each row's **Depends on** column lists ")
+    lines.append("the AWS resource addresses that must exist before this stack is ")
+    lines.append("applied (resolved from Terragrunt `dependencies { paths = [...] }` ")
+    lines.append("blocks plus inline `<tf_type>.<name>.<attr>` references).")
     lines.append("")
-    if not deploy_order:
+    if not deploy_qids:
         lines.append("_No resources discovered — nothing to deploy._")
         lines.append("")
     else:
-        # Build reverse-edge lookup: who does each resource depend on?
-        depends_on: Dict[str, List[str]] = {addr: [] for addr in deploy_order}
-        for r in resources:
-            pass  # filled below
-        # Re-derive depends_on from edges (source depends on target)
-        for addr in deploy_order:
-            depends_on.setdefault(addr, [])
-        # Use confidence_by_addr keys (= resource addresses) as authoritative set.
-        # This is OK for the demo; the full edge set is in migration_plan.json.
-        lines.append("| # | Resource | AWS equivalent | Confidence | Module |")
-        lines.append("|---|---|---|---|---|")
-        for i, addr in enumerate(deploy_order, start=1):
-            conf = confidence_by_addr.get(addr)
+        lines.append("| # | Stack | AWS equivalent | Confidence | Depends on | Module path |")
+        lines.append("|---|---|---|---|---|---|")
+        for i, qid in enumerate(deploy_qids, start=1):
+            r = by_qid.get(qid)
+            if r is None:
+                continue
+            conf = confidence_by_addr.get(r.address)
             aws_eq = (conf.aws_equivalent if conf and conf.aws_equivalent
                       else "_(manual review)_")
             band_label = _band_with_emoji(conf.band) if conf else "—"
-            module = next((r.module_path for r in resources if r.address == addr), "—")
-            lines.append(f"| {i} | `{addr}` | `{aws_eq}` | {band_label} | `{module}` |")
+            depends_on = deps_by_source.get(r.address, [])
+            depends_str = (
+                ", ".join(f"`{d}`" for d in depends_on[:3])
+                + (f" +{len(depends_on)-3}" if len(depends_on) > 3 else "")
+                if depends_on else "_(none)_"
+            )
+            lines.append(
+                f"| {i} | `{r.address}` | `{aws_eq}` | "
+                f"{band_label} | {depends_str} | `{r.module_path}` |"
+            )
         lines.append("")
 
-    # ---- Per-resource details ----
-    lines.append("## Per-resource translation notes")
-    lines.append("")
-    if not resources:
-        lines.append("_No resources discovered._")
+    # ---- Top N "needs attention" resources ----
+    # Surface the lowest-confidence items so the operator knows where
+    # to focus engineering review. Capped at _PER_RESOURCE_NOTES_CAP.
+    confidences = [confidence_by_addr.get(r.address) for r in resources]
+    confidences = [c for c in confidences if c is not None]
+    confidences.sort(key=lambda c: (c.score_pct, c.resource_address))
+    needs_attention = confidences[:_PER_RESOURCE_NOTES_CAP]
+
+    if needs_attention:
+        lines.append("## Resources needing attention")
         lines.append("")
-    else:
-        for r in resources:
-            conf = confidence_by_addr.get(r.address)
-            lines.append(f"### `{r.address}`")
+        lines.append(f"The {len(needs_attention)} lowest-confidence resources are listed below. ")
+        lines.append("Address these first during translation review. Higher-confidence ")
+        lines.append("resources are listed in the Deployment sequence above and in the ")
+        lines.append("`migration_plan.json` sidecar.")
+        lines.append("")
+        for c in needs_attention:
+            lines.append(f"### `{c.resource_address}` — {_band_with_emoji(c.band)} ({c.score_pct}%)")
             lines.append("")
-            lines.append(f"- **Module:** `{r.module_path}`")
-            lines.append(f"- **File:** `{r.file_path}`")
-            if conf is not None:
-                aws_eq = conf.aws_equivalent or "_(no AWS equivalent — manual review)_"
-                lines.append(f"- **AWS equivalent:** `{aws_eq}`")
-                lines.append(f"- **Confidence:** {_band_with_emoji(conf.band)} ({conf.score_pct}%)")
-                lines.append(f"- **Reason:** {conf.reason}")
-                if conf.notes:
-                    lines.append("- **Notes:**")
-                    for note in conf.notes:
-                        lines.append(f"  - {note}")
+            aws_eq = c.aws_equivalent or "_(no AWS equivalent — manual review)_"
+            lines.append(f"- **AWS equivalent:** `{aws_eq}`")
+            lines.append(f"- **Reason:** {c.reason}")
+            if c.notes:
+                lines.append("- **Notes:**")
+                for note in c.notes:
+                    lines.append(f"  - {note}")
             lines.append("")
 
     # ---- Rollback ----
@@ -216,10 +247,10 @@ def _render_markdown(
 
 def _band_with_emoji(band: str) -> str:
     return {
-        "HIGH":           "🟢 HIGH",
-        "MEDIUM":         "🟡 MEDIUM",
-        "LOW":            "🔴 LOW",
-        "MANUAL_REVIEW":  "⚠️ MANUAL_REVIEW",
+        CONFIDENCE_HIGH:    "🟢 HIGH",
+        CONFIDENCE_MEDIUM:  "🟡 MEDIUM",
+        CONFIDENCE_LOW:     "🔴 LOW",
+        CONFIDENCE_MANUAL:  "⚠️ MANUAL_REVIEW",
     }.get(band, band)
 
 

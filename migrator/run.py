@@ -28,6 +28,7 @@ from .ingest.inventory import build_inventory
 from .ingest.repo_walker import walk_repo
 from .output.helpers import emit_helper_scripts
 from .output.migration_guide import emit_migration_guide
+from .output.terragrunt_emitter import emit_terragrunt_skeleton
 from .plan.coverage import score_resources
 from .plan.dep_graph import build_dep_graph
 from .results import MigrationResult
@@ -158,6 +159,15 @@ def run_migration(
     )
     log.info("migrator_helpers_emitted", count=len(helper_paths))
 
+    skeleton_paths = emit_terragrunt_skeleton(
+        output_dir=output_dir,
+        repo_path=repo_path,
+        target_cloud=target,
+        resources=resources,
+        confidence=confidence,
+    )
+    log.info("migrator_skeleton_emitted", count=len(skeleton_paths))
+
     duration = round(time.monotonic() - started, 2)
     result = MigrationResult(
         project_id=project_id,
@@ -171,7 +181,7 @@ def run_migration(
         output_dir=output_dir,
         migration_guide_path=guide_path,
         helper_script_paths=helper_paths,
-        skeleton_paths=[],
+        skeleton_paths=skeleton_paths,
         duration_s=duration,
         errors=ingest_errors,
     )

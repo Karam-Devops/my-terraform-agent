@@ -250,11 +250,12 @@ if result.errors:
             st.code(err, language="text")
 
 # Tabs for the rest
-tab_inv, tab_conf, tab_deps, tab_guide, tab_files = st.tabs([
+tab_inv, tab_conf, tab_deps, tab_guide, tab_aws, tab_files = st.tabs([
     "📋 Inventory",
     "🎯 Confidence",
     "🔗 Dep Graph",
     "📖 Migration Guide",
+    "🚀 AWS Skeleton",
     "💾 Output Files",
 ])
 
@@ -325,7 +326,6 @@ with tab_guide:
         st.warning("MIGRATION_GUIDE.md was not generated.")
     else:
         guide_md = Path(result.migration_guide_path).read_text(encoding="utf-8")
-        st.markdown(guide_md)
 
         st.download_button(
             label="⬇ Download MIGRATION_GUIDE.md",
@@ -334,6 +334,76 @@ with tab_guide:
             mime="text/markdown",
             use_container_width=False,
         )
+
+        # Scrollable container — markdown for 941-stack repos is long;
+        # giving it a fixed height with internal scroll keeps the rest
+        # of the page navigable.
+        with st.container(height=700, border=True):
+            st.markdown(guide_md)
+
+# ---------------- AWS Skeleton ----------------
+with tab_aws:
+    if not result.skeleton_paths:
+        st.warning("AWS Terragrunt skeleton was not generated.")
+    else:
+        target_dir = os.path.join(result.output_dir or "", "target")
+
+        st.markdown(
+            f"**Generated AWS Terragrunt skeleton at:** `{target_dir}`"
+        )
+        st.caption(
+            f"{len(result.skeleton_paths)} files emitted, mirroring the source "
+            "`live/<env>/<region>/<stack>/` structure. Each `terragrunt.hcl` "
+            "includes the source GCP context (module path, inputs as comments) "
+            "plus a placeholder `terraform { source = ... }` block pointing at "
+            "where your AWS module library should live."
+        )
+        st.markdown("---")
+
+        # Show the AWS root config first — that's the most important file
+        # for the operator to inspect.
+        root_path = os.path.join(target_dir, "terragrunt.hcl")
+        if os.path.isfile(root_path):
+            st.markdown("### 🏠 Synthesized AWS root `terragrunt.hcl`")
+            st.code(Path(root_path).read_text(encoding="utf-8"), language="hcl")
+
+        # Then show the directory tree.
+        if os.path.isdir(target_dir):
+            st.markdown("### 📁 Generated stack files")
+            tree_files = []
+            for root, _dirs, fnames in os.walk(target_dir):
+                for fname in sorted(fnames):
+                    full = os.path.join(root, fname)
+                    rel = os.path.relpath(full, target_dir).replace(os.sep, "/")
+                    tree_files.append((rel, full))
+            tree_files.sort()
+
+            # Group by top-level directory under target/.
+            from collections import OrderedDict
+            grouped: "OrderedDict[str, list]" = OrderedDict()
+            for rel, full in tree_files:
+                top = rel.split("/")[0] if "/" in rel else "(root)"
+                grouped.setdefault(top, []).append((rel, full))
+
+            for top, members in grouped.items():
+                with st.expander(f"📂 `{top}/`  ({len(members)} files)"):
+                    # If this group has just a few files, show all inline.
+                    # Otherwise show first-N + a count.
+                    cap = 30
+                    for rel, full in members[:cap]:
+                        st.markdown(f"**`{rel}`**")
+                        try:
+                            content = Path(full).read_text(encoding="utf-8")
+                            st.code(content, language="hcl" if rel.endswith(".hcl")
+                                    else "markdown")
+                        except (OSError, UnicodeDecodeError):
+                            st.caption("(could not read)")
+                    if len(members) > cap:
+                        st.info(
+                            f"... and {len(members) - cap} more files in `{top}/`. "
+                            f"Download the full ZIP under the **Output Files** tab to inspect them all."
+                        )
+
 
 # ---------------- Output Files ----------------
 with tab_files:

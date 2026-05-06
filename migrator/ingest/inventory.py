@@ -98,12 +98,18 @@ def build_inventory(walk: WalkResult) -> Tuple[List[DiscoveredResource], List[st
         # show the operator exactly what module was being referenced.
         inputs.setdefault("_terragrunt_source", source_url)
 
+        # Extract `dependencies { paths = [...] }` so the dep graph
+        # can render real edges in Terragrunt mode (where there are
+        # no inline <tf_type>.<name>.<attr> references inside .tf files).
+        terragrunt_deps = _extract_dependency_paths(ast)
+
         resources.append(DiscoveredResource(
             tf_type=tf_type,
             name=stack_name,
             module_path=rel_module_path,
             file_path=tg_path,
             arguments=inputs,
+            terragrunt_deps=terragrunt_deps,
         ))
 
     # Stable order for deterministic output.
@@ -161,6 +167,27 @@ def _extract_inputs(ast: Dict[str, Any]) -> Dict[str, Any]:
     if isinstance(raw, dict):
         return dict(raw)
     return {}
+
+
+def _extract_dependency_paths(ast: Dict[str, Any]) -> List[str]:
+    """Pull relative paths out of a Terragrunt `dependencies { paths = [...] }` block.
+
+    python-hcl2 emits this as:
+        ast["dependencies"] = [{"paths": ["../cloud-armor", "../dns"]}]
+
+    Returns an empty list if the block is missing or malformed.
+    """
+    deps_blocks = ast.get("dependencies", []) or []
+    out: List[str] = []
+    for block in deps_blocks:
+        if not isinstance(block, dict):
+            continue
+        paths = block.get("paths")
+        if isinstance(paths, list):
+            for p in paths:
+                if isinstance(p, str) and p:
+                    out.append(p)
+    return out
 
 
 def _stack_name_from_dir(stack_dir: str) -> str:

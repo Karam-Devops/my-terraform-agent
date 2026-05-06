@@ -1,31 +1,31 @@
-"""Build a resource dependency graph by scanning HCL argument values
-for inter-resource references.
+"""Build a resource dependency graph.
 
-A reference looks like ``<tf_type>.<name>.<attr>`` inside an argument
-value (e.g. ``network = google_compute_network.vpc.id``). We extract
-the (tf_type, name) pair and emit a DependencyEdge from the holding
-resource to the target.
+Two sources of edges:
 
-This is best-effort string scanning — it does NOT execute HCL
-expressions or resolve variables, locals, or modules. Sufficient
-for ordering, not for semantic equivalence.
+  1. **Inline references** in vanilla Terraform argument values: a
+     string like ``google_compute_network.vpc.id`` inside an argument
+     creates an edge from the holding resource to that target.
+
+  2. **Terragrunt `dependencies { paths = [...] }` blocks**: each
+     relative path resolves to a sibling stack's directory; the
+     resource discovered at that directory becomes the edge target.
+
+The graph is keyed on each resource's ``qualified_id`` (= module_path
++ address) so duplicate addresses across environments don't collapse.
+The migration guide / UI then can map qualified_id → resource for
+display.
 """
 
 from __future__ import annotations
 
+import os
 import re
 from typing import Any, Dict, List, Set, Tuple
 
 from migrator.results import DependencyEdge, DiscoveredResource
 
 
-# Matches `<tf_type>.<name>.<attr>` where tf_type starts with a letter,
-# both labels are HCL-identifier-shaped (alpha + alnum/underscore), and
-# `.<attr>` is at least one character.
-#
-# Constrained to provider-prefixed types (google_*, google-beta_*,
-# aws_*) so we don't false-match Python module references that find
-# their way into comments. Add new prefixes as we expand coverage.
+# Provider-prefixed inline reference pattern: `<tf_type>.<name>.<attr>`.
 _REF_RE = re.compile(
     r"\b(?P<tf_type>(?:google|google-beta|aws|azurerm)_[A-Za-z0-9_]+)"
     r"\.(?P<name>[A-Za-z][A-Za-z0-9_-]*)"
@@ -34,45 +34,65 @@ _REF_RE = re.compile(
 
 
 def build_dep_graph(resources: List[DiscoveredResource]) -> List[DependencyEdge]:
-    """Scan every argument value of every resource for cross-references.
+    """Build the cross-resource dependency edge list.
 
-    Args:
-        resources: flat list from ingest.
-
-    Returns:
-        Sorted list of DependencyEdge — one edge per (source -> target)
-        unique reference. Multiple references to the same target via
-        different attrs collapse to one edge labelled with the first
-        attr seen (sufficient for ordering).
+    Edges are emitted in the operator-facing form:
+        DependencyEdge(source=..., target=..., via=...)
+    where source/target are resource ``address`` strings (not
+    qualified_id) — operator-facing display uses simpler addresses.
+    For Terragrunt-mode the same address can repeat across envs;
+    the (source, target, source_module, target_module) tuple is
+    deduplicated internally before flattening.
     """
-    # Set-of-(source, target) for dedup, plus a parallel attr lookup
-    # so the rendered edge keeps the first attr we saw.
+    # Address-based set for inline refs (vanilla TF mode).
     address_set: Set[str] = {r.address for r in resources}
-    seen: Set[Tuple[str, str]] = set()
-    first_attr: Dict[Tuple[str, str], str] = {}
+
+    # module_path → first DiscoveredResource at that path. In Terragrunt
+    # mode each leaf stack's terragrunt.hcl produces exactly one synthetic
+    # resource, so this is a 1:1 lookup.
+    by_module: Dict[str, DiscoveredResource] = {}
+    for r in resources:
+        by_module.setdefault(r.module_path, r)
+
+    seen: Set[Tuple[str, str, str]] = set()    # (src_addr, tgt_addr, via)
+    edges: List[DependencyEdge] = []
 
     for r in resources:
         source_addr = r.address
+
+        # ----- inline refs in argument values -----
         for attr_path, target_addr in _iter_refs(r.arguments):
             if target_addr == source_addr:
-                # Self-reference (rare but possible in dynamic blocks)
                 continue
-            # Only emit edges to resources we actually discovered.
-            # Cross-module references the parser couldn't resolve get
-            # silently dropped (they'd add noise to the graph).
             if target_addr not in address_set:
                 continue
-            key = (source_addr, target_addr)
+            key = (source_addr, target_addr, attr_path)
             if key in seen:
                 continue
             seen.add(key)
-            first_attr[key] = attr_path
+            edges.append(DependencyEdge(
+                source=source_addr, target=target_addr, via=attr_path,
+            ))
 
-    edges = [
-        DependencyEdge(source=src, target=tgt, via=first_attr[(src, tgt)])
-        for (src, tgt) in seen
-    ]
-    edges.sort(key=lambda e: (e.source, e.target))
+        # ----- Terragrunt `dependencies { paths = [...] }` -----
+        for rel_path in r.terragrunt_deps:
+            target_module = _resolve_relative(r.module_path, rel_path)
+            target_resource = by_module.get(target_module)
+            if target_resource is None:
+                continue  # path doesn't resolve to a discovered stack
+            target_addr = target_resource.address
+            if target_addr == source_addr:
+                continue
+            via = f"terragrunt:{rel_path}"
+            key = (source_addr, target_addr, via)
+            if key in seen:
+                continue
+            seen.add(key)
+            edges.append(DependencyEdge(
+                source=source_addr, target=target_addr, via=via,
+            ))
+
+    edges.sort(key=lambda e: (e.source, e.target, e.via))
     return edges
 
 
@@ -80,50 +100,67 @@ def topological_order(
     resources: List[DiscoveredResource],
     edges: List[DependencyEdge],
 ) -> List[str]:
-    """Return resource addresses in dependency-first order.
+    """Return resource ``qualified_id`` strings in deploy-first order.
 
     Edges go source→target where source DEPENDS ON target, so we want
     targets before sources in the output (deploy targets first, then
-    things that reference them). Cycles are broken arbitrarily — a
-    real warning is logged elsewhere; we still produce a usable
-    ordering for the migration guide.
+    things that reference them).
+
+    Keyed on ``qualified_id`` so duplicate addresses across environments
+    don't collapse — each leaf stack appears in the order independently.
+
+    Cycles are broken arbitrarily; cycle members appear at the end of
+    the list in stable alphabetical order so output stays deterministic.
     """
-    # Build adj: dependent <- dependency (we deploy dependencies first)
-    in_degree: Dict[str, int] = {r.address: 0 for r in resources}
-    rev: Dict[str, List[str]] = {r.address: [] for r in resources}
+    # Build per-qualified-id in_degree + reverse adjacency.
+    by_qid: Dict[str, DiscoveredResource] = {r.qualified_id: r for r in resources}
+    in_degree: Dict[str, int] = {qid: 0 for qid in by_qid}
+    rev: Dict[str, List[str]] = {qid: [] for qid in by_qid}
+
+    # Edges are address-based; map them back to qualified_id where
+    # possible. When an address appears in multiple modules (collision),
+    # we add the edge from EVERY source instance to EVERY target
+    # instance — that's intentional: in Terragrunt mode the same
+    # logical "depends-on" applies across all duplicates.
+    by_address: Dict[str, List[str]] = {}
+    for r in resources:
+        by_address.setdefault(r.address, []).append(r.qualified_id)
+
     for e in edges:
-        # `source` depends on `target`, so target must deploy first
-        if e.source in in_degree:
-            in_degree[e.source] += 1
-        if e.target in rev:
-            rev[e.target].append(e.source)
+        src_qids = by_address.get(e.source, [])
+        tgt_qids = by_address.get(e.target, [])
+        for src in src_qids:
+            for tgt in tgt_qids:
+                if src == tgt:
+                    continue
+                in_degree[src] = in_degree.get(src, 0) + 1
+                rev.setdefault(tgt, []).append(src)
 
     # Kahn's algorithm.
-    ready = [addr for addr, deg in in_degree.items() if deg == 0]
-    ready.sort()
+    ready = sorted(qid for qid, deg in in_degree.items() if deg == 0)
     out: List[str] = []
     while ready:
-        addr = ready.pop(0)
-        out.append(addr)
-        for dependent in sorted(rev.get(addr, [])):
-            in_degree[dependent] -= 1
-            if in_degree[dependent] == 0:
-                ready.append(dependent)
-                ready.sort()
+        qid = ready.pop(0)
+        out.append(qid)
+        for dependent in sorted(rev.get(qid, [])):
+            if in_degree.get(dependent, 0) > 0:
+                in_degree[dependent] -= 1
+                if in_degree[dependent] == 0:
+                    ready.append(dependent)
+                    ready.sort()
 
     # Cycle leftovers — append in stable order so output is deterministic.
-    leftover = sorted(addr for addr, deg in in_degree.items() if deg > 0)
+    leftover = sorted(qid for qid, deg in in_degree.items() if deg > 0)
     out.extend(leftover)
     return out
 
 
-def _iter_refs(node: Any, _path: str = ""):
-    """Recursively walk an HCL argument tree, yielding (attr_path, ref_addr).
+# -----------------------------------------------------------------
+# helpers
+# -----------------------------------------------------------------
 
-    Handles nested dicts, lists, and string scalars. python-hcl2 emits
-    expressions sometimes as raw strings (with `${...}` markers) and
-    sometimes as already-evaluated literals; the regex catches both.
-    """
+def _iter_refs(node: Any, _path: str = ""):
+    """Walk an HCL argument tree, yielding (attr_path, ref_addr)."""
     if isinstance(node, str):
         for m in _REF_RE.finditer(node):
             tf_type = m.group("tf_type")
@@ -139,4 +176,15 @@ def _iter_refs(node: Any, _path: str = ""):
         for i, v in enumerate(node):
             yield from _iter_refs(v, f"{_path}[{i}]")
         return
-    # ints, floats, bools, None — no refs possible.
+
+
+def _resolve_relative(base_module_path: str, rel_path: str) -> str:
+    """Resolve a Terragrunt-style `../foo` relative to a module_path.
+
+    Both paths are repo-relative POSIX strings (forward slashes).
+    Returns the normalized target module_path.
+    """
+    # os.path.normpath collapses `..` and `.`; we then convert
+    # back to forward slashes for cross-platform stability.
+    combined = os.path.normpath(os.path.join(base_module_path, rel_path))
+    return combined.replace(os.sep, "/")
