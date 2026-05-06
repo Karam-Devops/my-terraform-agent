@@ -91,6 +91,18 @@ def is_terragrunt_available() -> bool:
     return shutil.which("terragrunt") is not None
 
 
+def _count_hcl_files(target_dir: str) -> int:
+    """Count .hcl + terragrunt.hcl files under target_dir (proxy for
+    'files checked' count in Tier 1/2 reports — terragrunt doesn't
+    easily expose how many files it actually processed)."""
+    count = 0
+    for _root, _dirs, files in os.walk(target_dir):
+        for fname in files:
+            if fname.endswith(".hcl"):
+                count += 1
+    return count
+
+
 def validate_target(target_dir: str) -> ValidationReport:
     """Run all available tiers against the emitted target/ tree.
 
@@ -217,6 +229,7 @@ def _tier1_hcl_format(target_dir: str, tg_available: bool) -> TierResult:
         available=True,
         passed=passed,
         duration_s=round(_time.monotonic() - started, 2),
+        files_checked=_count_hcl_files(target_dir),
         failures=failures,
     )
 
@@ -276,6 +289,7 @@ def _tier2_hcl_validate(target_dir: str, tg_available: bool) -> TierResult:
         available=True,
         passed=passed,
         duration_s=round(_time.monotonic() - started, 2),
+        files_checked=_count_hcl_files(target_dir),
         failures=failures,
     )
 
