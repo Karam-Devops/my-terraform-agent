@@ -77,6 +77,10 @@ packaging==26.1
 pandas==3.0.2
 pillow==12.2.0
 pluggy==1.6.0
+# python-hcl2: parse customer Terraform / Terragrunt HCL in the migrator
+# engine. Pure-Python lark-based parser. Pinned away from 5.x which has
+# lark-dependency churn; 4.x is stable on Python 3.11+.
+python-hcl2==4.3.5
 proto-plus==1.27.2
 protobuf==6.33.6
 py-cpuinfo==9.0.0
