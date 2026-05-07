@@ -233,7 +233,12 @@ def _tier2_terraform_validate(target_dir: str, tf_available: bool) -> TierResult
 
     for root in roots:
         rel_root = os.path.relpath(root, target_dir).replace(os.sep, "/")
-        files_checked += sum(1 for f in os.listdir(root) if f.endswith(".tf"))
+        # Count one ROOT MODULE per env (not .tf files at root level), since
+        # `terraform validate` transitively pulls in every module body the
+        # root references — counting only the 5-6 .tf files at root level
+        # was misleading vs Tier 0/1 which walk the whole tree. UI labels
+        # this metric "Root modules" instead of "Files checked" for Tier 2.
+        files_checked += 1
 
         # Clean up .terraform/ from a previous validation run; otherwise
         # init can hit cached provider binary mismatches and we end up

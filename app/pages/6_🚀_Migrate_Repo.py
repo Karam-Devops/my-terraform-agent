@@ -658,14 +658,32 @@ with tab_validate:
             label = f"Tier {tier_num} — {name}    {badge}"
             with st.expander(label, expanded=(status == "failed")):
                 col1, col2, col3 = st.columns(3)
+                # Per-tier metric label. Tier 2 of terraform-mode counts
+                # ROOT MODULES validated (one per env), not raw file count
+                # — `terraform validate` transitively pulls in module
+                # bodies, so a root-count is the meaningful unit. Tier 0/1
+                # do walk every file, so "Files checked" stays accurate.
+                files_label = (
+                    "Root modules"
+                    if tier_num == 2 and "terraform init" in name
+                    else "Files checked"
+                )
                 with col1:
-                    st.metric("Files checked", files_checked)
+                    st.metric(files_label, files_checked)
                 with col2:
                     st.metric("Failures", failure_count)
                 with col3:
                     st.metric("Status", status)
                 if skip_reason:
                     st.info(f"Skipped: {skip_reason}", icon="ℹ️")
+                if tier_num == 2 and "terraform init" in name:
+                    st.caption(
+                        "ℹ️ Each root module = one `environments/<env>/` directory. "
+                        "`terraform validate` pulls in every `modules/<service>/` "
+                        "body referenced from that root, so the full module tree "
+                        "is compiled against the AWS provider schema even though "
+                        "we only count the roots."
+                    )
                 # Note: failure details not in summary dict (only count).
                 # For detail surfacing in v2, store full failures list.
 
