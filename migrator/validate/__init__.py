@@ -1,23 +1,40 @@
 """Migrator validation layer.
 
-Tiered validation of emitted Terragrunt output. Tiers 0–3 are
-zero-cost (no cloud creds required) and run automatically after
-emission. Tiers 4–6 (deferred to v2) need AWS sandbox credentials.
+Two validators, picked at runtime by source_iac:
 
-  Tier 0: HCL parses                — native (python-hcl2 in ingest)
-  Tier 1: terragrunt hclfmt --check — format conformance
-  Tier 2: terragrunt hclvalidate    — Terragrunt-specific HCL semantics
-  Tier 3: terragrunt validate-inputs — input/variable contract per stack
+  * terragrunt_validator — runs `terragrunt hcl format/validate`
+    against an emitted Terragrunt target tree. Used when source_iac
+    is "terragrunt".
 
-Tiers 4–6 stub for v2:
-  Tier 4: terragrunt run-all validate — provider schema check
-  Tier 5: terragrunt run-all plan    — full plan against real AWS
-  Tier 6: apply-and-verify on sandbox — end-to-end
+  * terraform_validator — runs `terraform fmt/init/validate` against
+    an emitted pure-Terraform target tree. Used when source_iac is
+    "terraform".
+
+Both share the TierResult / ValidationReport shape so the UI surfaces
+them through one rendering path.
+
+Tiers 0-2 are zero-cost (no cloud creds). Tiers 4-6 (real apply)
+deferred to v2.
 """
 
 from .terragrunt_validator import (
+    TierResult,
+    ValidationReport,
     is_terragrunt_available,
     validate_target,
 )
+from .terraform_validator import (
+    is_terraform_available,
+    validate_target as validate_terraform_target,
+)
 
-__all__ = ["is_terragrunt_available", "validate_target"]
+# Default `validate_target` continues to point at the terragrunt validator
+# (preserves prior callers of `migrator.validate.validate_target`).
+__all__ = [
+    "TierResult",
+    "ValidationReport",
+    "is_terragrunt_available",
+    "is_terraform_available",
+    "validate_target",
+    "validate_terraform_target",
+]

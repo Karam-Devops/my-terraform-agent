@@ -29,8 +29,12 @@ from .ingest.repo_walker import walk_repo
 from .output.executive_summary import emit_executive_summary
 from .output.helpers import emit_helper_scripts
 from .output.migration_guide import emit_migration_guide
+from .output.terraform_emitter import emit_terraform_skeleton
 from .output.terragrunt_emitter import emit_terragrunt_skeleton
-from .validate import validate_target as _validate_target
+from .validate import (
+    validate_target as _validate_terragrunt_target,
+    validate_terraform_target as _validate_terraform_target,
+)
 from .plan.coverage import score_resources
 from .plan.dep_graph import build_dep_graph
 from .results import MigrationResult
@@ -161,14 +165,28 @@ def run_migration(
     )
     log.info("migrator_helpers_emitted", count=len(helper_paths))
 
-    skeleton_paths = emit_terragrunt_skeleton(
-        output_dir=output_dir,
-        repo_path=repo_path,
-        target_cloud=target,
-        resources=resources,
-        confidence=confidence,
+    # Pick the emitter that matches the source IaC shape.
+    if walk.source_iac == "terraform":
+        skeleton_paths = emit_terraform_skeleton(
+            output_dir=output_dir,
+            repo_path=repo_path,
+            target_cloud=target,
+            resources=resources,
+            confidence=confidence,
+        )
+    else:
+        skeleton_paths = emit_terragrunt_skeleton(
+            output_dir=output_dir,
+            repo_path=repo_path,
+            target_cloud=target,
+            resources=resources,
+            confidence=confidence,
+        )
+    log.info(
+        "migrator_skeleton_emitted",
+        count=len(skeleton_paths),
+        emitter_mode=walk.source_iac,
     )
-    log.info("migrator_skeleton_emitted", count=len(skeleton_paths))
 
     # Executive summary — one-page customer take-home
     from .translate import TRANSLATORS as _TRANSLATORS
@@ -188,12 +206,19 @@ def run_migration(
     )
     log.info("migrator_exec_summary_emitted", path=exec_summary_path)
 
-    # ---- validate (Tiers 0–3, no cloud creds needed) ----
+    # ---- validate (Tiers 0-2, no cloud creds needed) ----
+    # Pick the validator that matches the source IaC shape: terragrunt
+    # uses `terragrunt hcl format/validate`; pure Terraform uses
+    # `terraform fmt + init -backend=false + validate`.
     target_dir = os.path.join(output_dir, "target")
-    validation_report = _validate_target(target_dir)
+    if walk.source_iac == "terraform":
+        validation_report = _validate_terraform_target(target_dir)
+    else:
+        validation_report = _validate_terragrunt_target(target_dir)
     validation_dict = validation_report.summary
     log.info(
         "migrator_validation_complete",
+        validator_mode=walk.source_iac,
         overall_passed=validation_dict.get("overall_passed"),
         tiers=validation_dict.get("tiers"),
     )

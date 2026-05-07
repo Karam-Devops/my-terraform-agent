@@ -106,17 +106,47 @@ if not is_hcl_parser_available():
 
 st.subheader("1. Source repository")
 
+# Source IaC mode picker — placed OUTSIDE the form so changing it
+# reruns the page and updates the path default + caption immediately.
+# The engine itself auto-detects mode from repo contents (presence of
+# terragrunt.hcl files); this radio lets the operator pre-confirm
+# which fixture they're pointing at and surfaces the right default.
+_IAC_MODE_OPTIONS = ("Terragrunt", "Terraform")
+_IAC_DEFAULT_PATHS = {
+    "Terragrunt": r"C:\Users\41708\gcp-iac-fixtures\simple-gcp\environments\dev",
+    "Terraform":  r"C:\Users\41708\gcp-iac-fixtures\gcp-terraform\environments\dev",
+}
+iac_mode = st.radio(
+    "Source IaC mode",
+    options=_IAC_MODE_OPTIONS,
+    index=0,
+    horizontal=True,
+    help=(
+        "Pick the wrapping format the source repo uses. **Terragrunt** = "
+        "leaf `terragrunt.hcl` files calling external modules (validates "
+        "with `terragrunt hcl format/validate`). **Terraform** = vanilla "
+        "`.tf` files with `module {}` calls (validates with "
+        "`terraform fmt + init -backend=false + validate`). The engine "
+        "still auto-detects mode at run-time from repo contents — this "
+        "control just sets the default path."
+    ),
+    key="migrator_iac_mode",
+)
+
+# Decide which default path to show based on mode + last-used override.
+_last_path_for_mode_key = f"migrator_repo_path__{iac_mode}"
+_default_path = st.session_state.get(
+    _last_path_for_mode_key,
+    _IAC_DEFAULT_PATHS[iac_mode],
+)
+
 with st.form(key="migrator_form"):
     repo_path_input = st.text_input(
-        "Local path to GCP repo",
-        value=st.session_state.get(
-            "migrator_repo_path",
-            r"C:\Users\41708\gcp-iac-fixtures\simple-gcp\environments\dev",
-        ),
+        f"Local path to GCP {iac_mode} repo",
+        value=_default_path,
         help=(
-            "Absolute path to a checked-out customer repo (or any subdirectory). "
-            "Demo default points at the `dev` environment subset (~77 stacks). "
-            "Pass the full repo root for an end-to-end run. "
+            "Absolute path to a checked-out customer repo (or any "
+            "subdirectory). Default matches the selected mode's fixture. "
             "Future: paste a Git URL and the Platform clones it."
         ),
     )
@@ -145,7 +175,10 @@ if submitted:
         st.stop()
 
     repo_path = repo_path_input.strip()
-    st.session_state["migrator_repo_path"] = repo_path
+    # Persist per-mode so toggling the radio doesn't lose the
+    # operator's last-used path for the OTHER mode.
+    st.session_state[_last_path_for_mode_key] = repo_path
+    st.session_state["migrator_repo_path"] = repo_path  # legacy key
 
     if not os.path.isdir(repo_path):
         st.error(f"Repo path does not exist or is not a directory: `{repo_path}`", icon="❌")
@@ -415,22 +448,34 @@ with tab_aws:
     else:
         target_dir = os.path.join(result.output_dir or "", "target")
 
-        st.markdown(
-            f"**Generated AWS Terragrunt skeleton at:** `{target_dir}`"
-        )
-        st.caption(
-            f"{len(result.skeleton_paths)} files emitted, mirroring the source "
-            "`live/<env>/<region>/<stack>/` structure. Each `terragrunt.hcl` "
-            "includes the source GCP context (module path, inputs as comments) "
-            "plus a placeholder `terraform { source = ... }` block pointing at "
-            "where your AWS module library should live."
-        )
+        # Adapt the description to whichever emitter ran.
+        is_terraform_mode = (result.source_iac == "terraform")
+        skel_label = "AWS Terraform skeleton" if is_terraform_mode else "AWS Terragrunt skeleton"
+        st.markdown(f"**Generated {skel_label} at:** `{target_dir}`")
+        if is_terraform_mode:
+            st.caption(
+                f"{len(result.skeleton_paths)} files emitted under "
+                "`target/`. Each `environments/<env>/main.tf` is a Terraform "
+                "root module with one `module {}` block per source GCP "
+                "resource, pointing at re-usable AWS module bodies under "
+                "`target/modules/<service>/`. Validation uses `terraform "
+                "fmt + init -backend=false + validate`."
+            )
+        else:
+            st.caption(
+                f"{len(result.skeleton_paths)} files emitted, mirroring the source "
+                "`live/<env>/<region>/<stack>/` structure. Each `terragrunt.hcl` "
+                "includes the source GCP context (module path, inputs as comments) "
+                "plus a placeholder `terraform { source = ... }` block pointing at "
+                "where your AWS module library should live."
+            )
         st.markdown("---")
 
         # Show the AWS root config first — that's the most important file
-        # for the operator to inspect.
+        # for the operator to inspect. (Terragrunt mode emits a root
+        # terragrunt.hcl; Terraform mode has no single root — skip.)
         root_path = os.path.join(target_dir, "terragrunt.hcl")
-        if os.path.isfile(root_path):
+        if not is_terraform_mode and os.path.isfile(root_path):
             with st.expander("🏠 Synthesized AWS root `terragrunt.hcl`", expanded=False):
                 st.code(Path(root_path).read_text(encoding="utf-8"), language="hcl")
 
@@ -628,12 +673,23 @@ with tab_validate:
         st.markdown(
             "**What's not yet automated** (deferred to v2 per `phase7_migrator_strategy` memory):"
         )
-        st.markdown(
-            "- **Tier 4** — `terragrunt run-all validate` (real AWS provider schema check). "
-            "Needs cloud credentials.\n"
-            "- **Tier 5** — `terragrunt run-all plan -input=false`. Needs cloud credentials + state backend.\n"
-            "- **Tier 6** — apply-and-destroy on a sandbox AWS account. Needs sandbox + budget guard.\n"
-        )
+        # Per-mode tier-4-and-up commands.
+        if result.source_iac == "terraform":
+            st.markdown(
+                "- **Tier 4** — `terraform plan` against real AWS provider schema. "
+                "Needs cloud credentials + state backend.\n"
+                "- **Tier 5** — `terraform apply` on a sandbox AWS account. "
+                "Needs sandbox + budget guard.\n"
+                "- **Tier 6** — post-apply assertions (resource exists, "
+                "endpoint reachable). Needs sandbox.\n"
+            )
+        else:
+            st.markdown(
+                "- **Tier 4** — `terragrunt run-all validate` (real AWS provider schema check). "
+                "Needs cloud credentials.\n"
+                "- **Tier 5** — `terragrunt run-all plan -input=false`. Needs cloud credentials + state backend.\n"
+                "- **Tier 6** — apply-and-destroy on a sandbox AWS account. Needs sandbox + budget guard.\n"
+            )
 
 
 # ---------------- Output Files ----------------
