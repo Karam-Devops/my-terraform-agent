@@ -42,7 +42,9 @@ from . import (
     ecr,
     eip,
     elasticache,
+    eventbridge_scheduler,
     gcs_to_s3,
+    log_sink,
     nat_gateway,
     rds,
     route53,
@@ -51,6 +53,7 @@ from . import (
     sns_sqs,
     subnet,
     vpc,
+    waf,
 )
 from .base import AWSModuleSpec, Translation
 
@@ -75,6 +78,10 @@ TRANSLATORS = {
     "google_compute_network":                    vpc,
     "google_compute_subnetwork":                 subnet,
     "google_compute_firewall":                   security_group,
+    # Tier 2 expansion (added 2026-05-07)
+    "google_compute_security_policy":            waf,
+    "google_logging_project_sink":               log_sink,
+    "google_cloud_scheduler_job":                eventbridge_scheduler,
 }
 
 
@@ -114,6 +121,8 @@ def all_aws_module_specs() -> List[AWSModuleSpec]:
         gcs_to_s3, eip, elasticache, nat_gateway, rds, ec2, sns_sqs,
         # Tier 1 expansion + subnet (architectural-gap fix)
         secrets, ecr, acm, route53, vpc, security_group, subnet,
+        # Tier 2 expansion
+        waf, log_sink, eventbridge_scheduler,
     )
     for mod in all_modules:
         spec = mod.aws_module_spec()
