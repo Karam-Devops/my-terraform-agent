@@ -26,6 +26,7 @@ from . import config
 from .ingest.hcl_parser import is_hcl_parser_available
 from .ingest.inventory import build_inventory
 from .ingest.repo_walker import walk_repo
+from .output.executive_summary import emit_executive_summary
 from .output.helpers import emit_helper_scripts
 from .output.migration_guide import emit_migration_guide
 from .output.terragrunt_emitter import emit_terragrunt_skeleton
@@ -168,6 +169,24 @@ def run_migration(
         confidence=confidence,
     )
     log.info("migrator_skeleton_emitted", count=len(skeleton_paths))
+
+    # Executive summary — one-page customer take-home
+    from .translate import TRANSLATORS as _TRANSLATORS
+    _covered = set(_TRANSLATORS.keys())
+    _translated_count = sum(1 for r in resources if r.tf_type in _covered)
+    exec_summary_path = emit_executive_summary(
+        output_dir=output_dir,
+        repo_path=repo_path,
+        target_cloud=target,
+        source_iac=walk.source_iac,
+        resources=resources,
+        confidence=confidence,
+        duration_s=time.monotonic() - started,
+        files_scanned=walk.total_files,
+        translators_registered=len(set(_TRANSLATORS.values())),  # de-duped
+        translated_count=_translated_count,
+    )
+    log.info("migrator_exec_summary_emitted", path=exec_summary_path)
 
     # ---- validate (Tiers 0–3, no cloud creds needed) ----
     target_dir = os.path.join(output_dir, "target")

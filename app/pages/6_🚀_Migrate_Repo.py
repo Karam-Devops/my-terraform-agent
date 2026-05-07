@@ -356,10 +356,42 @@ with tab_deps:
 
 # ---------------- Migration Guide ----------------
 with tab_guide:
+    # Executive summary first (operator-facing one-pager), then full guide.
+    exec_summary_path = (
+        os.path.join(result.output_dir, "EXECUTIVE_SUMMARY.md")
+        if result.output_dir else None
+    )
+    if exec_summary_path and os.path.isfile(exec_summary_path):
+        st.markdown("### 📊 Executive Summary")
+        st.caption(
+            "One-page customer-facing summary — share with CTO/CISO. "
+            "The full deep-dive is below."
+        )
+        exec_md = Path(exec_summary_path).read_text(encoding="utf-8")
+        col_dl, _spacer = st.columns([2, 6])
+        with col_dl:
+            st.download_button(
+                label="⬇ EXECUTIVE_SUMMARY.md",
+                data=exec_md,
+                file_name="EXECUTIVE_SUMMARY.md",
+                mime="text/markdown",
+                use_container_width=True,
+                key="dl_exec_summary",
+            )
+        with st.container(height=400, border=True):
+            st.markdown(exec_md)
+        st.markdown("---")
+
     if not result.migration_guide_path or not os.path.isfile(result.migration_guide_path):
         st.warning("MIGRATION_GUIDE.md was not generated.")
     else:
         guide_md = Path(result.migration_guide_path).read_text(encoding="utf-8")
+
+        st.markdown("### 📖 Full Migration Guide")
+        st.caption(
+            "Full deploy-order sequence, per-resource confidence findings, "
+            "rollback procedure. Shared with engineering."
+        )
 
         st.download_button(
             label="⬇ Download MIGRATION_GUIDE.md",
@@ -367,6 +399,7 @@ with tab_guide:
             file_name="MIGRATION_GUIDE.md",
             mime="text/markdown",
             use_container_width=False,
+            key="dl_full_guide",
         )
 
         # Scrollable container — markdown for 941-stack repos is long;
@@ -398,12 +431,14 @@ with tab_aws:
         # for the operator to inspect.
         root_path = os.path.join(target_dir, "terragrunt.hcl")
         if os.path.isfile(root_path):
-            st.markdown("### 🏠 Synthesized AWS root `terragrunt.hcl`")
-            st.code(Path(root_path).read_text(encoding="utf-8"), language="hcl")
+            with st.expander("🏠 Synthesized AWS root `terragrunt.hcl`", expanded=False):
+                st.code(Path(root_path).read_text(encoding="utf-8"), language="hcl")
 
-        # Then show the directory tree.
+        # Then show the directory tree with filters.
         if os.path.isdir(target_dir):
             st.markdown("### 📁 Generated stack files")
+
+            # Walk the tree and collect files first.
             tree_files = []
             for root, _dirs, fnames in os.walk(target_dir):
                 for fname in sorted(fnames):
@@ -412,31 +447,124 @@ with tab_aws:
                     tree_files.append((rel, full))
             tree_files.sort()
 
-            # Group by top-level directory under target/.
-            from collections import OrderedDict
-            grouped: "OrderedDict[str, list]" = OrderedDict()
+            # Derive filter facets:
+            #   - Top-level dirs (typically "modules", "_common",
+            #     "environments", "common", or specific project dirs)
+            #   - Detected service types from translator service_name
+            #     dirs under modules/, plus inferred from path keywords
+            top_dirs = sorted({rel.split("/")[0] for rel, _ in tree_files
+                              if "/" in rel})
+            # File extensions present
+            extensions = sorted({"." + rel.rsplit(".", 1)[1] if "." in rel.rsplit("/", 1)[-1] else "(no ext)"
+                                 for rel, _ in tree_files})
+
+            # Render filter row.
+            f_col1, f_col2, f_col3 = st.columns([2, 2, 3])
+            with f_col1:
+                top_filter = st.multiselect(
+                    "Top-level dir",
+                    options=top_dirs,
+                    default=[],
+                    help="Filter by top-level directory under `target/`. "
+                         "Empty = all directories.",
+                    key="aws_skel_top_filter",
+                )
+            with f_col2:
+                ext_filter = st.multiselect(
+                    "File type",
+                    options=extensions,
+                    default=[],
+                    help="Filter by extension. Empty = all extensions.",
+                    key="aws_skel_ext_filter",
+                )
+            with f_col3:
+                search_term = st.text_input(
+                    "Search path (substring match)",
+                    value="",
+                    help="Show only files whose path contains this substring (case-insensitive).",
+                    key="aws_skel_search",
+                )
+
+            # Apply filters
+            filtered = []
+            search_lower = search_term.strip().lower()
             for rel, full in tree_files:
                 top = rel.split("/")[0] if "/" in rel else "(root)"
-                grouped.setdefault(top, []).append((rel, full))
+                if top_filter and top not in top_filter:
+                    continue
+                ext = "." + rel.rsplit(".", 1)[1] if "." in rel.rsplit("/", 1)[-1] else "(no ext)"
+                if ext_filter and ext not in ext_filter:
+                    continue
+                if search_lower and search_lower not in rel.lower():
+                    continue
+                filtered.append((rel, full))
 
-            for top, members in grouped.items():
-                with st.expander(f"📂 `{top}/`  ({len(members)} files)"):
-                    # If this group has just a few files, show all inline.
-                    # Otherwise show first-N + a count.
-                    cap = 30
-                    for rel, full in members[:cap]:
-                        st.markdown(f"**`{rel}`**")
-                        try:
-                            content = Path(full).read_text(encoding="utf-8")
-                            st.code(content, language="hcl" if rel.endswith(".hcl")
-                                    else "markdown")
-                        except (OSError, UnicodeDecodeError):
-                            st.caption("(could not read)")
-                    if len(members) > cap:
-                        st.info(
-                            f"... and {len(members) - cap} more files in `{top}/`. "
-                            f"Download the full ZIP under the **Output Files** tab to inspect them all."
-                        )
+            st.caption(
+                f"Showing **{len(filtered):,}** of {len(tree_files):,} files. "
+                f"Adjust filters above to narrow."
+                + (f" Use the **💾 Output Files** tab to download the full ZIP." if len(filtered) > 100 else "")
+            )
+
+            if not filtered:
+                st.info("No files match the current filters.", icon="🔎")
+            else:
+                # Group filtered by top-level dir (or 2 levels deep if
+                # only 1 top-level dir is selected — keeps the expander
+                # count manageable when filtering down to a single env).
+                from collections import OrderedDict
+                grouped: "OrderedDict[str, list]" = OrderedDict()
+
+                # If user has filtered to a single top dir, group by
+                # second-level (e.g. environments/dev/* shows by project).
+                use_two_level = len(top_filter) == 1
+                for rel, full in filtered:
+                    parts = rel.split("/")
+                    if use_two_level and len(parts) >= 2:
+                        group_key = "/".join(parts[:2])
+                    else:
+                        group_key = parts[0] if "/" in rel else "(root)"
+                    grouped.setdefault(group_key, []).append((rel, full))
+
+                # Pagination — cap how many EXPANDERS we render at once.
+                # Each expander contains a group of files. With 1,050
+                # source files, pagination keeps DOM-element count sane.
+                MAX_GROUPS_PER_PAGE = 20
+                total_groups = len(grouped)
+                if total_groups > MAX_GROUPS_PER_PAGE:
+                    page = st.number_input(
+                        f"Page (1 to {(total_groups + MAX_GROUPS_PER_PAGE - 1) // MAX_GROUPS_PER_PAGE})",
+                        min_value=1,
+                        max_value=(total_groups + MAX_GROUPS_PER_PAGE - 1) // MAX_GROUPS_PER_PAGE,
+                        value=1,
+                        step=1,
+                        key="aws_skel_page",
+                    )
+                    start = (page - 1) * MAX_GROUPS_PER_PAGE
+                    end = start + MAX_GROUPS_PER_PAGE
+                    visible_groups = list(grouped.items())[start:end]
+                    st.caption(f"Showing groups {start + 1}-{min(end, total_groups)} of {total_groups}.")
+                else:
+                    visible_groups = list(grouped.items())
+
+                # Per-group cap on file content rendering (large groups
+                # show summary + first-N).
+                FILE_CAP_PER_GROUP = 25
+                for top, members in visible_groups:
+                    with st.expander(f"📂 `{top}/`  ({len(members)} files)"):
+                        for rel, full in members[:FILE_CAP_PER_GROUP]:
+                            st.markdown(f"**`{rel}`**")
+                            try:
+                                content = Path(full).read_text(encoding="utf-8")
+                                st.code(content, language="hcl" if rel.endswith(".hcl")
+                                        else "markdown" if rel.endswith(".md")
+                                        else "hcl")
+                            except (OSError, UnicodeDecodeError):
+                                st.caption("(could not read)")
+                        if len(members) > FILE_CAP_PER_GROUP:
+                            st.info(
+                                f"... and {len(members) - FILE_CAP_PER_GROUP} more files in `{top}/`. "
+                                f"Refine filters above to narrow further, or use the **💾 Output Files** tab to download the full ZIP."
+                            )
 
 
 # ---------------- Validation (Tiers 0–3) ----------------
