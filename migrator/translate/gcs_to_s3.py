@@ -257,15 +257,19 @@ resource "aws_s3_bucket_lifecycle_configuration" "this" {
 '''
 
 
+# Note: declared as map(any) NOT map(object({...})) so the outer map
+# can unify across entries with HETEROGENEOUS lifecycle_rules schemas
+# (one bucket with `lifecycle_rules = {}`, another with populated
+# rule objects). Strict map(object(...)) trips terraform's
+# type-inference on that heterogeneity. Implicit schema docs:
+#   name                = string
+#   storage_class       = string   # STANDARD, STANDARD_IA, GLACIER_IR, DEEP_ARCHIVE
+#   block_public_access = bool
+#   versioning          = bool
+#   lifecycle_rules     = map(any) # rule_id -> { enabled, id, expiration_days?, ... }
 _VARIABLES_TF = '''variable "buckets" {
-  type = map(object({
-    name                = string
-    storage_class       = string  # STANDARD, STANDARD_IA, GLACIER_IR, DEEP_ARCHIVE
-    block_public_access = bool
-    versioning          = bool
-    lifecycle_rules     = map(any)  # rule_id -> { enabled, id, expiration_days?, transition_days?, transition_storage_class? }
-  }))
-  description = "Map of bucket key -> spec. Each entry creates one aws_s3_bucket + supporting resources."
+  type        = map(any)
+  description = "Map of bucket key -> spec (heterogeneous lifecycle_rules allowed). Schema documented in translator source."
   default     = {}
 }
 

@@ -769,9 +769,16 @@ with tab_validate:
         st.markdown("---")
         st.markdown("### Tier-by-tier results")
         st.caption(
-            "Tiers 0–3 require no cloud credentials and run automatically. "
-            "Tiers 4–6 (`terragrunt run-all validate` / `plan` / `apply`) are deferred — "
-            "they need AWS sandbox credentials. See the strategy memory."
+            "Tiers 0–2 verify **structure + provider schema** — they don't "
+            "claim semantic equivalence. Every `${\"TODO-...\"}` placeholder "
+            "in the emitted output is a deliberate visible drop where source "
+            "Terragrunt constructs (`dependency.X.outputs.Y`, source-module "
+            "`var.X` / `each.X`, customer-specific locals) don't translate "
+            "1:1 to Terraform-target scope. Source values are preserved as "
+            "inline `# src.X = ...` comments above each module call; "
+            "resolving TODOs is the operator's review pass. "
+            "Tiers 4–6 (`run-all plan` / `apply` / post-apply assertions) "
+            "are deferred — they need cloud credentials + sandbox budget."
         )
 
         tiers = val.get("tiers") or []

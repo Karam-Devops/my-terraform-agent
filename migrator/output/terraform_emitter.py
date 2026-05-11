@@ -142,6 +142,9 @@ _VAR_BARE_RE = re.compile(r"(?<![\w.${])var\.([A-Za-z0-9_]+)")
 
 _LOCAL_INTERP_RE = re.compile(r"\$\{(local\.[A-Za-z0-9_.\-]+)\}")
 _LOCAL_BARE_RE = re.compile(r"(?<![\w.${])(local\.[A-Za-z0-9_.\-]+)")
+# python-hcl2 dict-key mangling: ${local.X} → ${local_X}, ${local.X.Y} → ${local_X_Y}.
+# Captured group is everything after `local_`.
+_LOCAL_MANGLED_INTERP_RE = re.compile(r"\$\{local_([A-Za-z][A-Za-z0-9_]*)\}")
 
 _EACH_INTERP_RE = re.compile(r"\$\{each\.(value|key)((?:\.[A-Za-z0-9_.\-]+)?)\}")
 _EACH_BARE_RE = re.compile(r"(?<![\w.${])each\.(value|key)((?:\.[A-Za-z0-9_.\-]+)?)")
@@ -202,6 +205,16 @@ def _sanitize_translation(text: str) -> str:
 
     out = _LOCAL_INTERP_RE.sub(_local_interp_sub, out)
     out = _LOCAL_BARE_RE.sub(_local_bare_sub, out)
+
+    # Step 2b': python-hcl2's mangled form: ${local_X} (no dot).
+    # We can't recover the original attribute-path structure from a
+    # mangled identifier (`local_primary_region_suffix` could have been
+    # `local.primary_region_suffix` OR `local.primary.region.suffix`),
+    # so always TODO-replace.
+    def _local_mangled_sub(m):
+        slug = m.group(1).replace("_", "-")
+        return f'${{"TODO-local-{slug}"}}'
+    out = _LOCAL_MANGLED_INTERP_RE.sub(_local_mangled_sub, out)
 
     # Step 2c: each.X — never resolves at env root.
     def _each_interp_sub(m):
