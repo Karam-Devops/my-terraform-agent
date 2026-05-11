@@ -143,8 +143,11 @@ _VAR_BARE_RE = re.compile(r"(?<![\w.${])var\.([A-Za-z0-9_]+)")
 _LOCAL_INTERP_RE = re.compile(r"\$\{(local\.[A-Za-z0-9_.\-]+)\}")
 _LOCAL_BARE_RE = re.compile(r"(?<![\w.${])(local\.[A-Za-z0-9_.\-]+)")
 # python-hcl2 dict-key mangling: ${local.X} → ${local_X}, ${local.X.Y} → ${local_X_Y}.
-# Captured group is everything after `local_`.
-_LOCAL_MANGLED_INTERP_RE = re.compile(r"\$\{local_([A-Za-z][A-Za-z0-9_]*)\}")
+# Captured group is everything after `local_`. Allow the captured name
+# to start with `_` because the customer's source has locals like
+# `_project` and `_env_configs` (leading-underscore convention) that
+# mangle to `${local__project_locals_env}` (double underscore at start).
+_LOCAL_MANGLED_INTERP_RE = re.compile(r"\$\{local_([A-Za-z_][A-Za-z0-9_]*)\}")
 
 _EACH_INTERP_RE = re.compile(r"\$\{each\.(value|key)((?:\.[A-Za-z0-9_.\-]+)?)\}")
 _EACH_BARE_RE = re.compile(r"(?<![\w.${])each\.(value|key)((?:\.[A-Za-z0-9_.\-]+)?)")
