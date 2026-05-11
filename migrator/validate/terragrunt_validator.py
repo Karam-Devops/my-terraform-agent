@@ -105,11 +105,16 @@ def _count_hcl_files(target_dir: str) -> int:
     return count
 
 
-def validate_target(target_dir: str) -> ValidationReport:
+def validate_target(target_dir: str, *, skip_tier2: bool = False) -> ValidationReport:
     """Run all available tiers against the emitted target/ tree.
 
     Best-effort: each tier handles its own failures internally and
     records them on the TierResult. Never raises.
+
+    Args:
+        skip_tier2: if True, skip `terragrunt hcl validate` (the slow
+            tier that resolves includes + locals). Tier 0/1 still run.
+            Useful for fast preview / demo mode.
     """
     import time as _time
 
@@ -132,7 +137,17 @@ def validate_target(target_dir: str) -> ValidationReport:
 
     tg_available = is_terragrunt_available()
     report.tiers.append(_tier1_hcl_format(target_dir, tg_available))
-    report.tiers.append(_tier2_hcl_validate(target_dir, tg_available))
+
+    if skip_tier2:
+        report.tiers.append(TierResult(
+            tier=2,
+            name="terragrunt hcl validate",
+            available=False,
+            passed=False,
+            skip_reason="opted out by operator (fast preview mode — uncheck 'Skip Tier 2' to enable)",
+        ))
+    else:
+        report.tiers.append(_tier2_hcl_validate(target_dir, tg_available))
 
     report.total_duration_s = round(_time.monotonic() - started, 2)
     return report

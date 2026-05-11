@@ -67,8 +67,15 @@ def _find_root_modules(target_dir: str) -> List[str]:
     return []
 
 
-def validate_target(target_dir: str) -> ValidationReport:
-    """Run all available tiers against a pure-Terraform target/ tree."""
+def validate_target(target_dir: str, *, skip_tier2: bool = False) -> ValidationReport:
+    """Run all available tiers against a pure-Terraform target/ tree.
+
+    Args:
+        skip_tier2: if True, skip the slow `terraform init + validate`
+            step. Tier 0/1 still run. Useful for fast preview / demo
+            mode where the operator wants Discover + Plan + Generate
+            output but doesn't need provider-schema verification.
+    """
     import time as _time
 
     started = _time.monotonic()
@@ -89,7 +96,17 @@ def validate_target(target_dir: str) -> ValidationReport:
 
     tf_available = is_terraform_available()
     report.tiers.append(_tier1_terraform_fmt(target_dir, tf_available))
-    report.tiers.append(_tier2_terraform_validate(target_dir, tf_available))
+
+    if skip_tier2:
+        report.tiers.append(TierResult(
+            tier=2,
+            name="terraform init + validate",
+            available=False,    # render as ⚪ SKIPPED, not ✅ PASSED
+            passed=False,
+            skip_reason="opted out by operator (fast preview mode — uncheck 'Skip Tier 2' to enable)",
+        ))
+    else:
+        report.tiers.append(_tier2_terraform_validate(target_dir, tf_available))
 
     report.total_duration_s = round(_time.monotonic() - started, 2)
     return report

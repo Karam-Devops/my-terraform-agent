@@ -310,6 +310,61 @@ def _detect_source_environments(repo_path: str) -> List[str]:
     return envs
 
 
+# Cap on how many resources we'll put into a single target root.
+# When a source group's resource count exceeds this, the validator
+# slows to a crawl (`terraform init` is O(n) on module copies).
+# Splitting large groups keeps each root validating in seconds, and
+# the parallel validator pays off because each chunk is independent.
+_MAX_RESOURCES_PER_ROOT = 100
+
+
+def _group_resources_for_terragrunt_source(
+    resources: List[DiscoveredResource],
+) -> Dict[str, List[DiscoveredResource]]:
+    """Group resources into target-root buckets based on their source module_path.
+
+    Strategy: take the first 2 path segments of each resource's source
+    `module_path` and use that as the group key. For the customer's
+    simple-gcp fixture this naturally creates groups like:
+        common-common-mgmt
+        common-common-network
+        environments-dev
+        environments-staging
+        environments-prod
+        ...
+
+    Then split any group with > _MAX_RESOURCES_PER_ROOT resources into
+    consecutive chunks (`<group>-part1`, `<group>-part2`, ...) so each
+    target root stays validation-tractable.
+
+    Returns a dict mapping group_name → resources, with stable ordering.
+    """
+    raw: Dict[str, List[DiscoveredResource]] = {}
+    for r in resources:
+        parts = (r.module_path or "default").split("/")
+        # Use first 2 segments for grouping; pad with "_root" if shorter.
+        if len(parts) >= 2:
+            group = f"{parts[0]}-{parts[1]}"
+        else:
+            group = parts[0] if parts[0] else "default"
+        # Sanitize for use as a filesystem directory + HCL identifier
+        group = _IDENTIFIER_RE.sub("_", group).strip("_") or "default"
+        raw.setdefault(group, []).append(r)
+
+    # Now split oversized groups into chunks.
+    out: Dict[str, List[DiscoveredResource]] = {}
+    for group, group_resources in sorted(raw.items()):
+        if len(group_resources) <= _MAX_RESOURCES_PER_ROOT:
+            out[group] = group_resources
+            continue
+        # Split into chunks of _MAX_RESOURCES_PER_ROOT.
+        for i in range(0, len(group_resources), _MAX_RESOURCES_PER_ROOT):
+            chunk = group_resources[i:i + _MAX_RESOURCES_PER_ROOT]
+            chunk_idx = (i // _MAX_RESOURCES_PER_ROOT) + 1
+            out[f"{group}_part{chunk_idx}"] = chunk
+    return out
+
+
 def emit_terraform_skeleton(
     *,
     output_dir: str,
@@ -366,38 +421,57 @@ def emit_terraform_skeleton(
             written.append(readme)
         emitted_module_specs.add(spec.service_name)
 
-    # ---- 2. Detect source environments ----
-    envs = _detect_source_environments(repo_path)
-    if not envs:
-        # Fallback: emit a single "default" env at target root level.
-        envs = ["default"]
-        env_layout_root = target_root
-        per_env_subdir = False
+    # ---- 2. Decide how to subdivide the output into roots ----
+    #
+    # Two strategies:
+    #
+    #   A. Source is vanilla Terraform with `<repo>/environments/<env>/main.tf`
+    #      shape → emit one target root per detected env, EACH receiving
+    #      the full resource list (env-tier sizing differentiates them).
+    #
+    #   B. Source is Terragrunt (or Terraform without env layout) → group
+    #      resources by their first 2 source-path segments and emit one
+    #      target root PER GROUP, each receiving ONLY that group's
+    #      resources. This is the "subdivide for validation tractability"
+    #      change — previously the fallback was a single root with all
+    #      941 resources, which made `terraform init` take minutes.
+    if source_iac == "terraform":
+        envs = _detect_source_environments(repo_path)
     else:
-        env_layout_root = os.path.join(target_root, "environments")
-        os.makedirs(env_layout_root, exist_ok=True)
-        per_env_subdir = True
+        envs = []
 
-    # ---- 3. Per-env emission ----
-    for env_name in envs:
-        env_dir = (
-            os.path.join(env_layout_root, env_name)
-            if per_env_subdir else env_layout_root
-        )
+    if envs:
+        # Strategy A: per-env layout (Terraform source with environments/<env>/).
+        root_groups: Dict[str, List[DiscoveredResource]] = {
+            env: resources for env in envs
+        }
+    else:
+        # Strategy B: group by source path prefix. Always produces at
+        # least one group; for tiny single-leaf inputs that's one root.
+        root_groups = _group_resources_for_terragrunt_source(resources)
+        if not root_groups:
+            root_groups = {"default": resources}
+
+    env_layout_root = os.path.join(target_root, "environments")
+    os.makedirs(env_layout_root, exist_ok=True)
+
+    # ---- 3. Per-root emission ----
+    for root_name, root_resources in root_groups.items():
+        env_dir = os.path.join(env_layout_root, root_name)
         os.makedirs(env_dir, exist_ok=True)
 
-        # main.tf — one module {} block per source resource (depth = 2 from target/modules/)
-        depth_to_modules = 2 if per_env_subdir else 0
-        prefix = "/".join([".."] * depth_to_modules) + "/modules" \
-            if depth_to_modules else "./modules"
+        # main.tf — one module {} block per source resource in this group.
+        # Path from env_dir up to target/modules/ is always 2 levels
+        # (env_dir = target/environments/<root_name>/).
+        modules_relpath = "../../modules"
 
         main_tf = _render_env_main_tf(
-            env_name=env_name,
+            env_name=root_name,
             aws_region=aws_region,
-            resources=resources,
+            resources=root_resources,
             confidence_by_addr=confidence_by_addr,
             confidence_by_type=confidence_by_type,
-            modules_relpath=prefix,
+            modules_relpath=modules_relpath,
             available_module_services=emitted_module_specs,
             source_iac=source_iac,
         )
@@ -409,12 +483,16 @@ def emit_terraform_skeleton(
             ("variables.tf", _render_env_variables_tf(aws_region)),
             ("outputs.tf",   _render_env_outputs_tf()),
             ("providers.tf", _render_env_providers_tf()),
-            ("backend.tf",   _render_env_backend_tf(env_name)),
+            ("backend.tf",   _render_env_backend_tf(root_name)),
             ("versions.tf",  _render_env_versions_tf()),
         ):
             full = os.path.join(env_dir, fname)
             _write_text(full, content)
             written.append(full)
+
+    # For the README rendering below, the list of "env names" is the
+    # set of root group names we emitted.
+    envs = list(root_groups.keys())
 
     # ---- 4. README ----
     readme_path = os.path.join(target_root, "README.md")

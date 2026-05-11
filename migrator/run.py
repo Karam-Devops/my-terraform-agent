@@ -51,6 +51,7 @@ def run_migration(
     project_id: Optional[str] = None,
     tenant_id: Optional[str] = None,
     target_format: Optional[str] = None,
+    skip_tier2: bool = False,
 ) -> MigrationResult:
     """End-to-end migrator run.
 
@@ -235,9 +236,9 @@ def run_migration(
     # `terragrunt hcl format/validate`.
     target_dir = os.path.join(output_dir, "target")
     if effective_target_format == "terraform":
-        validation_report = _validate_terraform_target(target_dir)
+        validation_report = _validate_terraform_target(target_dir, skip_tier2=skip_tier2)
     else:
-        validation_report = _validate_terragrunt_target(target_dir)
+        validation_report = _validate_terragrunt_target(target_dir, skip_tier2=skip_tier2)
     validation_dict = validation_report.summary
     log.info(
         "migrator_validation_complete",

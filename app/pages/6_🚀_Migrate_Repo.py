@@ -261,6 +261,21 @@ with st.form(key="migrator_form"):
         disabled=not combo_runnable,
     )
 
+    skip_tier2_choice = st.checkbox(
+        "⚡ Fast preview — skip Tier 2 (provider-schema validation)",
+        value=False,
+        help=(
+            "When checked: Tier 0 (HCL parses) and Tier 1 (format check) "
+            "still run, but Tier 2 (`terraform init + validate` or "
+            "`terragrunt hcl validate`) is skipped. Cuts wall clock from "
+            "minutes to seconds on large repos (1,000+ files). Use for "
+            "fast iteration while testing translation output; uncheck "
+            "for production validation runs."
+        ),
+        disabled=not combo_runnable,
+        key="migrator_skip_tier2",
+    )
+
     submitted = st.form_submit_button(
         "🚀 Run Migration",
         type="primary",
@@ -323,6 +338,7 @@ if submitted:
             target_format=target_format_choice,
             output_dir=output_dir,
             project_id=project_id,
+            skip_tier2=skip_tier2_choice,
         )
 
         progress.progress(100, text=f"Done in {round(time.monotonic() - started, 2)}s")
