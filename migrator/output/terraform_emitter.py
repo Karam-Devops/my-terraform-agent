@@ -223,12 +223,24 @@ def _safe_identifier(name: str) -> str:
 
 def _normalize_terraform_resource_args(resource: DiscoveredResource) -> Dict:
     """Adapt a vanilla-Terraform resource's args into a translator-compatible
-    dict shape. No-op for unknown tf_types (caller falls back to scaffold)."""
+    dict shape. No-op for unknown tf_types (caller falls back to scaffold).
+
+    Skipped when args are ALREADY in terragrunt-shape — e.g. when the source
+    is GCP Terragrunt and the resource came from `inputs = { gcs_config = [
+    {...}, {...}]}`, the inner list is already what translators expect.
+    Detection: if the args dict already contains the rule's target `key`,
+    we assume it's pre-normalized and pass through unchanged."""
     rule = _TF_NORMALIZE.get(resource.tf_type)
     args = dict(resource.arguments or {})
     if not rule:
         return args
     key, shape = rule
+    # Already in shape? Don't double-wrap. This is the GCP Terragrunt
+    # source → AWS Terraform target path: synthetic resources from
+    # terragrunt.hcl inputs already have keys like `buckets`, `gcs_config`,
+    # `vm_configs`, etc. that translators consume directly.
+    if key in args:
+        return args
     if shape == "list":
         item = dict(args)
         item.setdefault("name", resource.name)
@@ -240,9 +252,17 @@ def _normalize_terraform_resource_args(resource: DiscoveredResource) -> Dict:
     return args
 
 
-def _translate_terraform_resource(resource: DiscoveredResource):
-    """Translate a vanilla-Terraform resource via the shared translator
-    layer, after adapting its args to the expected shape."""
+def _translate_terraform_resource(resource: DiscoveredResource, source_iac: str = "terraform"):
+    """Translate a resource via the shared translator layer.
+
+    For vanilla Terraform sources, args are normalized (wrapped in the
+    expected terragrunt-shape). For Terragrunt sources, args are passed
+    through verbatim — they're already terragrunt-shaped from being
+    parsed out of `inputs = { ... }` blocks.
+    """
+    if source_iac == "terragrunt":
+        # Args already in terragrunt-shape — translators consume them directly.
+        return translate_resource(resource)
     normalized = _normalize_terraform_resource_args(resource)
     adapted = DiscoveredResource(
         tf_type=resource.tf_type,
@@ -298,8 +318,16 @@ def emit_terraform_skeleton(
     resources: List[DiscoveredResource],
     confidence: List[ConfidenceFinding],
     aws_region: Optional[str] = None,
+    source_iac: str = "terraform",
 ) -> List[str]:
     """Write the AWS pure-Terraform skeleton under <output_dir>/target/.
+
+    Args:
+        source_iac: "terraform" or "terragrunt". When "terragrunt",
+            translator args are passed through verbatim (already in shape).
+            Also affects env-detection fallback: Terragrunt repos rarely
+            have `<repo>/environments/<env>/main.tf`, so we synthesize a
+            single "default" env.
 
     Returns the list of absolute paths written.
     """
@@ -371,6 +399,7 @@ def emit_terraform_skeleton(
             confidence_by_type=confidence_by_type,
             modules_relpath=prefix,
             available_module_services=emitted_module_specs,
+            source_iac=source_iac,
         )
         main_path = os.path.join(env_dir, "main.tf")
         _write_text(main_path, main_tf)
@@ -417,6 +446,7 @@ def _render_env_main_tf(
     confidence_by_type: Dict[str, ConfidenceFinding],
     modules_relpath: str,
     available_module_services: Set[str],
+    source_iac: str = "terraform",
 ) -> str:
     """One module {} block per source resource. Order: stable by module_path then name."""
     lines: List[str] = []
@@ -443,11 +473,23 @@ def _render_env_main_tf(
 
     for r in resources:
         conf = confidence_by_addr.get(r.address) or confidence_by_type.get(r.tf_type)
-        translation = _translate_terraform_resource(r)
+        translation = _translate_terraform_resource(r, source_iac=source_iac)
 
+        # Detect translator-exception stubs: the translate_resource()
+        # wrapper returns a Translation with notes starting with
+        # "translate-error:" when the per-type translator threw. The
+        # aws_inputs_hcl in that case is empty/marker-only, so emitting
+        # it as a live module call breaks `terraform validate` on
+        # required-input checks. Downgrade to scaffold-only.
+        translation_errored = (
+            translation is not None
+            and translation.notes
+            and any(n.startswith("translate-error:") for n in translation.notes)
+        )
         has_translation = (
             translation is not None
             and translation.service_name in available_module_services
+            and not translation_errored
         )
 
         # De-duplicate across (module_path, name) collisions.

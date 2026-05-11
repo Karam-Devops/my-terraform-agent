@@ -198,10 +198,99 @@ def _tier1_terraform_fmt(target_dir: str, tf_available: bool) -> TierResult:
 # -----------------------------------------------------------------
 # Tier 2: terraform init -backend=false  +  terraform validate
 #
-# Run once per detected root module (per env). `init -backend=false`
-# downloads providers + module sources without touching cloud creds.
-# `validate` checks provider schema + cross-resource references.
+# Run once per detected root module (per env), IN PARALLEL across envs.
+# `init -backend=false` downloads providers + module sources without
+# touching cloud creds. `validate` checks provider schema +
+# cross-resource references. Both calls per env are independent
+# (separate cwd, separate subprocess, no shared state), so we run
+# them concurrently across envs via a ThreadPoolExecutor. For a 3-env
+# repo this is ~3x faster end-to-end than sequential.
 # -----------------------------------------------------------------
+
+# Cap on parallel terraform processes. Each one talks to the provider
+# registry on first init, so too many in flight can saturate network /
+# trip rate limits. 4 is a sweet spot for typical 3-5 env repos.
+_TIER2_MAX_PARALLEL = 4
+
+# Detect TF_PLUGIN_CACHE_DIR — if set, we DON'T wipe .terraform/
+# after each run (the cache is the customer's investment in speed;
+# wiping defeats it). With the cache the actual provider binaries
+# live outside the working dir, so .terraform/ is just symlinks
+# and the disk-footprint argument for wiping doesn't apply.
+def _plugin_cache_active() -> bool:
+    return bool(os.environ.get("TF_PLUGIN_CACHE_DIR", "").strip())
+
+
+def _validate_one_root(root: str, target_dir: str) -> dict:
+    """Run init + validate against a single root module directory.
+
+    Returns a dict with keys:
+        rel_root: str       — path relative to target_dir for failure messages
+        passed:   bool      — True iff both init and validate returned 0
+        failures: List[str] — one-line failure summaries (capped at 50)
+    """
+    rel_root = os.path.relpath(root, target_dir).replace(os.sep, "/")
+    failures: List[str] = []
+    passed = True
+
+    # Pre-flight cleanup: wipe any stale .terraform/ from a previous run.
+    # init can otherwise pick up cached provider binary mismatches.
+    _terraform_cache = os.path.join(root, ".terraform")
+    if os.path.isdir(_terraform_cache):
+        shutil.rmtree(_terraform_cache, ignore_errors=True)
+
+    # init -backend=false  (no remote state contact)
+    try:
+        init_proc = subprocess.run(
+            ["terraform", "init", "-backend=false", "-input=false", "-no-color"],
+            cwd=root,
+            capture_output=True, text=True, timeout=180,
+        )
+    except subprocess.TimeoutExpired:
+        return {"rel_root": rel_root, "passed": False,
+                "failures": [f"{rel_root}: init timed out after 180s"]}
+    except OSError as e:
+        return {"rel_root": rel_root, "passed": False,
+                "failures": [f"{rel_root}: init failed to launch: {e}"]}
+
+    if init_proc.returncode != 0:
+        passed = False
+        for line in (init_proc.stdout + "\n" + init_proc.stderr).splitlines():
+            line = line.strip()
+            if line and len(failures) < 50:
+                if "Error" in line or "error" in line.lower() or "│" in line:
+                    failures.append(f"{rel_root}: init: {line[:250]}")
+        return {"rel_root": rel_root, "passed": passed, "failures": failures}
+
+    # terraform validate
+    try:
+        val_proc = subprocess.run(
+            ["terraform", "validate", "-no-color"],
+            cwd=root,
+            capture_output=True, text=True, timeout=60,
+        )
+    except subprocess.TimeoutExpired:
+        return {"rel_root": rel_root, "passed": False,
+                "failures": [f"{rel_root}: validate timed out after 60s"]}
+
+    if val_proc.returncode != 0:
+        passed = False
+        for line in (val_proc.stdout + "\n" + val_proc.stderr).splitlines():
+            line = line.strip()
+            if line and len(failures) < 50:
+                if "Error" in line or "│" in line:
+                    failures.append(f"{rel_root}: validate: {line[:250]}")
+
+    # Post-run cleanup of .terraform/ — keeps the output dir shippable
+    # (no 100+MB of provider binaries to ZIP). Skipped when
+    # TF_PLUGIN_CACHE_DIR is set, because in that case .terraform/
+    # only contains symlinks to the cache (not the actual binaries),
+    # and preserving them lets the next run skip provider download.
+    if os.path.isdir(_terraform_cache) and not _plugin_cache_active():
+        shutil.rmtree(_terraform_cache, ignore_errors=True)
+
+    return {"rel_root": rel_root, "passed": passed, "failures": failures}
+
 
 def _tier2_terraform_validate(target_dir: str, tf_available: bool) -> TierResult:
     if not tf_available:
@@ -228,75 +317,33 @@ def _tier2_terraform_validate(target_dir: str, tf_available: bool) -> TierResult
         )
 
     failures: List[str] = []
-    files_checked = 0
     overall_passed = True
+    # files_checked = number of ROOT MODULES validated (one per env);
+    # `terraform validate` pulls in every referenced module body
+    # transitively, so a root-count is the meaningful unit. UI labels
+    # this "Root modules" instead of "Files checked" for Tier 2.
+    files_checked = len(roots)
 
-    for root in roots:
-        rel_root = os.path.relpath(root, target_dir).replace(os.sep, "/")
-        # Count one ROOT MODULE per env (not .tf files at root level), since
-        # `terraform validate` transitively pulls in every module body the
-        # root references — counting only the 5-6 .tf files at root level
-        # was misleading vs Tier 0/1 which walk the whole tree. UI labels
-        # this metric "Root modules" instead of "Files checked" for Tier 2.
-        files_checked += 1
-
-        # Clean up .terraform/ from a previous validation run; otherwise
-        # init can hit cached provider binary mismatches and we end up
-        # with stale artifacts in the output dir.
-        _terraform_cache = os.path.join(root, ".terraform")
-        if os.path.isdir(_terraform_cache):
-            shutil.rmtree(_terraform_cache, ignore_errors=True)
-
-        # init -backend=false  (no remote state contact)
-        try:
-            init_proc = subprocess.run(
-                ["terraform", "init", "-backend=false", "-input=false", "-no-color"],
-                cwd=root,
-                capture_output=True, text=True, timeout=180,
-            )
-        except subprocess.TimeoutExpired:
-            failures.append(f"{rel_root}: init timed out after 180s")
-            overall_passed = False
-            continue
-        except OSError as e:
-            failures.append(f"{rel_root}: init failed to launch: {e}")
-            overall_passed = False
-            continue
-
-        if init_proc.returncode != 0:
-            overall_passed = False
-            for line in (init_proc.stdout + "\n" + init_proc.stderr).splitlines():
-                line = line.strip()
-                if line and len(failures) < 50:
-                    if "Error" in line or "error" in line.lower() or "│" in line:
-                        failures.append(f"{rel_root}: init: {line[:250]}")
-            continue
-
-        # terraform validate
-        try:
-            val_proc = subprocess.run(
-                ["terraform", "validate", "-no-color"],
-                cwd=root,
-                capture_output=True, text=True, timeout=60,
-            )
-        except subprocess.TimeoutExpired:
-            failures.append(f"{rel_root}: validate timed out after 60s")
-            overall_passed = False
-            continue
-
-        if val_proc.returncode != 0:
-            overall_passed = False
-            for line in (val_proc.stdout + "\n" + val_proc.stderr).splitlines():
-                line = line.strip()
-                if line and len(failures) < 50:
-                    if "Error" in line or "│" in line:
-                        failures.append(f"{rel_root}: validate: {line[:250]}")
-
-        # Clean up the .terraform/ provider cache — keeps the output
-        # directory shippable (no 100+MB of provider binaries to ZIP).
-        # The .terraform.lock.hcl stays (pins provider versions).
-        if os.path.isdir(_terraform_cache):
-            shutil.rmtree(_terraform_cache, ignore_errors=True)
+    # Run all roots in parallel. ThreadPoolExecutor is appropriate
+    # because each worker spends its time in subprocess.run() (blocked
+    # on terraform CLI), which releases the GIL.
+    max_workers = min(len(roots), _TIER2_MAX_PARALLEL)
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+    with ThreadPoolExecutor(max_workers=max_workers) as pool:
+        futures = [pool.submit(_validate_one_root, r, target_dir) for r in roots]
+        for fut in as_completed(futures):
+            try:
+                result = fut.result()
+            except Exception as e:  # noqa: BLE001 — surface but don't crash
+                overall_passed = False
+                failures.append(f"validation worker crashed: {type(e).__name__}: {e}")
+                continue
+            if not result["passed"]:
+                overall_passed = False
+            # Cap aggregated failures at 50 for UI sanity.
+            for f in result["failures"]:
+                if len(failures) < 50:
+                    failures.append(f)
 
     return TierResult(
         tier=2,

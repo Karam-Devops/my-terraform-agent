@@ -50,6 +50,7 @@ def run_migration(
     output_dir: Optional[str] = None,
     project_id: Optional[str] = None,
     tenant_id: Optional[str] = None,
+    target_format: Optional[str] = None,
 ) -> MigrationResult:
     """End-to-end migrator run.
 
@@ -64,6 +65,11 @@ def run_migration(
             if missing.
         project_id, tenant_id: SaaS context plumbing for structured
             logging. Both default to "unknown".
+        target_format: "terragrunt" or "terraform". Controls which
+            emitter + validator runs. When None (default), inherits
+            the source format detected by the walker. Setting this
+            explicitly enables cross-format combinations like
+            GCP Terragrunt source → AWS Terraform target.
 
     Returns:
         MigrationResult with all phases populated. Errors are
@@ -77,6 +83,7 @@ def run_migration(
     log = _log.bind(
         repo_path=repo_path,
         target_cloud=target_cloud,
+        target_format=target_format or "auto",
         project_id=project_id or "unknown",
         tenant_id=tenant_id or "unknown",
     )
@@ -165,14 +172,28 @@ def run_migration(
     )
     log.info("migrator_helpers_emitted", count=len(helper_paths))
 
-    # Pick the emitter that matches the source IaC shape.
-    if walk.source_iac == "terraform":
+    # Pick the emitter:
+    #   - If target_format is explicitly set, use it (cross-format combos
+    #     like GCP TG → AWS TF route here).
+    #   - Otherwise inherit source format from the walker (auto-detect).
+    effective_target_format = (
+        target_format.strip().lower() if target_format else walk.source_iac
+    )
+    if effective_target_format not in ("terraform", "terragrunt"):
+        raise PreflightError(
+            f"target_format '{target_format}' must be 'terraform' or 'terragrunt'",
+            stage="validate_target_format",
+            reason="target_format_invalid",
+        )
+
+    if effective_target_format == "terraform":
         skeleton_paths = emit_terraform_skeleton(
             output_dir=output_dir,
             repo_path=repo_path,
             target_cloud=target,
             resources=resources,
             confidence=confidence,
+            source_iac=walk.source_iac,
         )
     else:
         skeleton_paths = emit_terragrunt_skeleton(
@@ -185,7 +206,8 @@ def run_migration(
     log.info(
         "migrator_skeleton_emitted",
         count=len(skeleton_paths),
-        emitter_mode=walk.source_iac,
+        source_iac=walk.source_iac,
+        target_format=effective_target_format,
     )
 
     # Executive summary — one-page customer take-home
@@ -207,18 +229,19 @@ def run_migration(
     log.info("migrator_exec_summary_emitted", path=exec_summary_path)
 
     # ---- validate (Tiers 0-2, no cloud creds needed) ----
-    # Pick the validator that matches the source IaC shape: terragrunt
-    # uses `terragrunt hcl format/validate`; pure Terraform uses
-    # `terraform fmt + init -backend=false + validate`.
+    # Pick the validator that matches the TARGET format (not source) —
+    # the emitted tree's shape is what gets validated. terraform target
+    # → `terraform fmt/init/validate`. terragrunt target →
+    # `terragrunt hcl format/validate`.
     target_dir = os.path.join(output_dir, "target")
-    if walk.source_iac == "terraform":
+    if effective_target_format == "terraform":
         validation_report = _validate_terraform_target(target_dir)
     else:
         validation_report = _validate_terragrunt_target(target_dir)
     validation_dict = validation_report.summary
     log.info(
         "migrator_validation_complete",
-        validator_mode=walk.source_iac,
+        validator_mode=effective_target_format,
         overall_passed=validation_dict.get("overall_passed"),
         tiers=validation_dict.get("tiers"),
     )
@@ -229,6 +252,8 @@ def run_migration(
         repo_path=os.path.abspath(repo_path),
         target_cloud=target,
         source_iac=walk.source_iac,
+        target_format=effective_target_format,
+        source_cloud="gcp",   # only GCP supported today; Azure lands in P2
         resources=resources,
         files_scanned=walk.total_files,
         dep_edges=dep_edges,

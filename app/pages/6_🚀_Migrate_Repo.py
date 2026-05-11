@@ -104,65 +104,173 @@ if not is_hcl_parser_available():
 # STAGE A — INPUT
 # ============================================================
 
-st.subheader("1. Source repository")
+st.subheader("1. Choose your migration direction")
 
-# Source IaC mode picker — placed OUTSIDE the form so changing it
-# reruns the page and updates the path default + caption immediately.
-# The engine itself auto-detects mode from repo contents (presence of
-# terragrunt.hcl files); this radio lets the operator pre-confirm
-# which fixture they're pointing at and surfaces the right default.
-_IAC_MODE_OPTIONS = ("Terragrunt", "Terraform")
-_IAC_DEFAULT_PATHS = {
-    "Terragrunt": r"C:\Users\41708\gcp-iac-fixtures\simple-gcp\environments\dev",
-    "Terraform":  r"C:\Users\41708\gcp-iac-fixtures\gcp-terraform\environments\dev",
+# ------------------------------------------------------------------
+# 4-axis combination picker — Source (Cloud × Format) → Target (Cloud × Format)
+# ------------------------------------------------------------------
+# Each axis is a dropdown placed OUTSIDE the form so changing any axis
+# reruns the page and updates the form's defaults + the combo-status
+# banner immediately. The combo-status drives whether Run Migration is
+# enabled (shipped/new combos) or disabled (parked/deferred combos).
+#
+# Combo status definitions:
+#   "shipped" — works today, validated end-to-end
+#   "new"     — wired but may have content gaps; under active polish
+#   "parked"  — intentionally not supported (architectural reasons)
+#   "deferred"— planned for future release
+# ------------------------------------------------------------------
+
+# Combo matrix. Keyed by (src_cloud, src_format, tgt_cloud, tgt_format).
+_COMBO_STATUS = {
+    # Shipped GCP→AWS combinations
+    ("gcp", "terragrunt", "aws", "terragrunt"): {"status": "shipped", "default": True},
+    ("gcp", "terraform",  "aws", "terraform"):  {"status": "shipped"},
+    # New (P1) — under active polish
+    ("gcp", "terragrunt", "aws", "terraform"):  {"status": "new"},
+    # Parked — architectural decision not to support
+    ("gcp", "terraform",  "aws", "terragrunt"): {
+        "status": "parked",
+        "tooltip": ("Not currently supported. Customers running pure Terraform "
+                    "typically stay on Terraform when changing clouds — adopting "
+                    "Terragrunt is a separate architectural decision. If you have "
+                    "a use case for this combination, please flag it."),
+    },
 }
-iac_mode = st.radio(
-    "Source IaC mode",
-    options=_IAC_MODE_OPTIONS,
-    index=0,
-    horizontal=True,
-    help=(
-        "Pick the wrapping format the source repo uses. **Terragrunt** = "
-        "leaf `terragrunt.hcl` files calling external modules (validates "
-        "with `terragrunt hcl format/validate`). **Terraform** = vanilla "
-        "`.tf` files with `module {}` calls (validates with "
-        "`terraform fmt + init -backend=false + validate`). The engine "
-        "still auto-detects mode at run-time from repo contents — this "
-        "control just sets the default path."
-    ),
-    key="migrator_iac_mode",
-)
 
-# Decide which default path to show based on mode + last-used override.
-_last_path_for_mode_key = f"migrator_repo_path__{iac_mode}"
+# Catch-all deferred entries (Azure source + AWS target = P2; AWS source = P3).
+def _combo_status(src_cloud: str, src_format: str, tgt_cloud: str, tgt_format: str) -> dict:
+    key = (src_cloud, src_format, tgt_cloud, tgt_format)
+    if key in _COMBO_STATUS:
+        return _COMBO_STATUS[key]
+    if src_cloud == "azure" and tgt_cloud == "aws":
+        return {"status": "deferred",
+                "tooltip": "Azure → AWS support is scheduled (P2). Engine work in progress."}
+    if src_cloud == "aws":
+        return {"status": "deferred",
+                "tooltip": "Reverse-direction migration (AWS as source) is planned for a future release."}
+    if src_cloud == tgt_cloud:
+        return {"status": "deferred",
+                "tooltip": "Same-cloud format-flip (Terragrunt↔Terraform within one cloud) is out of Migrator scope."}
+    return {"status": "deferred", "tooltip": "Combination not yet supported."}
+
+
+_CLOUD_OPTIONS = ("gcp", "azure", "aws")
+_FORMAT_OPTIONS = ("terragrunt", "terraform")
+_CLOUD_LABEL = {"gcp": "GCP", "azure": "Azure", "aws": "AWS"}
+_FORMAT_LABEL = {"terragrunt": "Terragrunt", "terraform": "Terraform"}
+
+_DEFAULT_PATHS = {
+    ("gcp", "terragrunt"): r"C:\Users\41708\gcp-iac-fixtures\simple-gcp\environments\dev",
+    ("gcp", "terraform"):  r"C:\Users\41708\gcp-iac-fixtures\gcp-terraform",
+    ("azure", "terragrunt"): r"C:\Users\41708\azure-iac-fixtures",
+    ("azure", "terraform"):  r"C:\Users\41708\azure-iac-fixtures",
+}
+
+# Render the picker — two side-by-side panels with an arrow between.
+panel_src, panel_arrow, panel_tgt = st.columns([5, 1, 5])
+
+with panel_src:
+    st.markdown("**Source**")
+    src_cloud = st.selectbox(
+        "Cloud",
+        options=_CLOUD_OPTIONS,
+        index=0,
+        format_func=lambda c: _CLOUD_LABEL[c],
+        key="migrator_src_cloud",
+    )
+    src_format = st.selectbox(
+        "Format",
+        options=_FORMAT_OPTIONS,
+        index=0,
+        format_func=lambda f: _FORMAT_LABEL[f],
+        key="migrator_src_format",
+    )
+
+with panel_arrow:
+    st.markdown("&nbsp;")  # vertical alignment spacer
+    st.markdown("<div style='text-align:center; font-size:2em; padding-top:1em;'>→</div>",
+                unsafe_allow_html=True)
+
+with panel_tgt:
+    st.markdown("**Target**")
+    tgt_cloud = st.selectbox(
+        "Cloud",
+        options=_CLOUD_OPTIONS,
+        index=2,   # default AWS
+        format_func=lambda c: _CLOUD_LABEL[c],
+        key="migrator_tgt_cloud",
+    )
+    tgt_format = st.selectbox(
+        "Format",
+        options=_FORMAT_OPTIONS,
+        index=0,
+        format_func=lambda f: _FORMAT_LABEL[f],
+        key="migrator_tgt_format",
+    )
+
+# Compute combo status — drives Run button enablement + banner.
+combo = _combo_status(src_cloud, src_format, tgt_cloud, tgt_format)
+_status = combo["status"]
+
+# Status banner explaining what this combo is/isn't.
+if _status == "shipped":
+    st.success(
+        f"✅ **{_CLOUD_LABEL[src_cloud]} {_FORMAT_LABEL[src_format]} → "
+        f"{_CLOUD_LABEL[tgt_cloud]} {_FORMAT_LABEL[tgt_format]}** — "
+        f"production-ready combination. Validated end-to-end."
+    )
+elif _status == "new":
+    st.info(
+        f"🚧 **{_CLOUD_LABEL[src_cloud]} {_FORMAT_LABEL[src_format]} → "
+        f"{_CLOUD_LABEL[tgt_cloud]} {_FORMAT_LABEL[tgt_format]}** — "
+        f"new combination, under active polish. Engine wires through "
+        f"correctly; some translator outputs may need manual review."
+    )
+elif _status == "parked":
+    st.warning(
+        f"⏸ **Parked combination.** {combo.get('tooltip', '')}",
+        icon="⏸",
+    )
+elif _status == "deferred":
+    st.warning(
+        f"📅 **Coming later.** {combo.get('tooltip', '')}",
+        icon="📅",
+    )
+
+# Combo is "runnable" iff shipped or new. Parked + deferred disable Run.
+combo_runnable = _status in ("shipped", "new")
+
+# Default path — keyed per source cloud+format so each combo remembers
+# the last path used. Falls back to the fixture default.
+_last_path_key = f"migrator_repo_path__{src_cloud}__{src_format}"
 _default_path = st.session_state.get(
-    _last_path_for_mode_key,
-    _IAC_DEFAULT_PATHS[iac_mode],
+    _last_path_key,
+    _DEFAULT_PATHS.get((src_cloud, src_format), ""),
 )
 
 with st.form(key="migrator_form"):
     repo_path_input = st.text_input(
-        f"Local path to GCP {iac_mode} repo",
+        f"Local path to {_CLOUD_LABEL[src_cloud]} {_FORMAT_LABEL[src_format]} repo",
         value=_default_path,
         help=(
             "Absolute path to a checked-out customer repo (or any "
-            "subdirectory). Default matches the selected mode's fixture. "
+            "subdirectory). Default matches the selected combo's fixture. "
             "Future: paste a Git URL and the Platform clones it."
         ),
-    )
-
-    target_cloud_choice = st.radio(
-        "Target cloud",
-        options=migrator_config.MIGRATOR_TARGETS_ALLOWED,
-        horizontal=True,
-        format_func=lambda t: t.upper(),
+        disabled=not combo_runnable,
     )
 
     submitted = st.form_submit_button(
         "🚀 Run Migration",
         type="primary",
         use_container_width=False,
+        disabled=not combo_runnable,
     )
+
+# Surface the combo's target_format and target_cloud for the run_migration call
+target_cloud_choice = tgt_cloud
+target_format_choice = tgt_format
 
 
 # ============================================================
@@ -175,9 +283,9 @@ if submitted:
         st.stop()
 
     repo_path = repo_path_input.strip()
-    # Persist per-mode so toggling the radio doesn't lose the
-    # operator's last-used path for the OTHER mode.
-    st.session_state[_last_path_for_mode_key] = repo_path
+    # Persist per-combo so toggling any axis doesn't lose the operator's
+    # last-used path for the OTHER combos.
+    st.session_state[_last_path_key] = repo_path
     st.session_state["migrator_repo_path"] = repo_path  # legacy key
 
     if not os.path.isdir(repo_path):
@@ -212,6 +320,7 @@ if submitted:
         result: MigrationResult = run_migration(
             repo_path,
             target_cloud=target_cloud_choice,
+            target_format=target_format_choice,
             output_dir=output_dir,
             project_id=project_id,
         )
@@ -258,7 +367,12 @@ with hero_a:
 with hero_b:
     st.metric("Files scanned", result.files_scanned)
 with hero_c:
-    st.metric("Source IaC", result.source_iac)
+    # Show the full combo string. e.g. "gcp/terragrunt → aws/terraform"
+    _combo_label = (
+        f"{getattr(result, 'source_cloud', 'gcp')}/{result.source_iac}"
+        f" → {result.target_cloud}/{getattr(result, 'target_format', result.source_iac)}"
+    )
+    st.metric("Migration", _combo_label)
 with hero_d:
     st.metric("Target cloud", result.target_cloud.upper())
 with hero_e:
@@ -448,8 +562,12 @@ with tab_aws:
     else:
         target_dir = os.path.join(result.output_dir or "", "target")
 
-        # Adapt the description to whichever emitter ran.
-        is_terraform_mode = (result.source_iac == "terraform")
+        # Adapt the description to whichever emitter ran. Use target_format
+        # (the format the engine actually emitted) not source_iac, since
+        # cross-format combos like GCP TG → AWS TF make these diverge.
+        is_terraform_mode = (
+            getattr(result, "target_format", result.source_iac) == "terraform"
+        )
         skel_label = "AWS Terraform skeleton" if is_terraform_mode else "AWS Terragrunt skeleton"
         st.markdown(f"**Generated {skel_label} at:** `{target_dir}`")
         if is_terraform_mode:
@@ -647,6 +765,8 @@ with tab_validate:
             status = t.get("status", "unknown")
             files_checked = t.get("files_checked", 0)
             failure_count = t.get("failure_count", 0)
+            failures = t.get("failures", []) or []
+            duration_s = t.get("duration_s", 0)
             skip_reason = t.get("skip_reason", "")
 
             badge = {
@@ -657,7 +777,7 @@ with tab_validate:
 
             label = f"Tier {tier_num} — {name}    {badge}"
             with st.expander(label, expanded=(status == "failed")):
-                col1, col2, col3 = st.columns(3)
+                col1, col2, col3, col4 = st.columns(4)
                 # Per-tier metric label. Tier 2 of terraform-mode counts
                 # ROOT MODULES validated (one per env), not raw file count
                 # — `terraform validate` transitively pulls in module
@@ -674,6 +794,8 @@ with tab_validate:
                     st.metric("Failures", failure_count)
                 with col3:
                     st.metric("Status", status)
+                with col4:
+                    st.metric("Duration", f"{duration_s:.1f}s")
                 if skip_reason:
                     st.info(f"Skipped: {skip_reason}", icon="ℹ️")
                 if tier_num == 2 and "terraform init" in name:
@@ -684,15 +806,45 @@ with tab_validate:
                         "is compiled against the AWS provider schema even though "
                         "we only count the roots."
                     )
-                # Note: failure details not in summary dict (only count).
-                # For detail surfacing in v2, store full failures list.
+
+                # Render up to 50 failure lines verbatim. This is where the
+                # operator actually sees what went wrong — previously the UI
+                # only showed the count, forcing them to drop to a terminal
+                # and re-run terraform manually.
+                if failures:
+                    st.markdown("**Failure details:**")
+                    # Group failures by the env they came from (Tier 2 emits
+                    # `<env>: <stage>: <error>` lines from the validator).
+                    grouped: "dict[str, list]" = {}
+                    for f in failures:
+                        # Try to split on ": " to extract the env prefix;
+                        # falls back to "(general)" if no prefix found.
+                        if ": " in f and not f.startswith(("Error", "needs")):
+                            env_key, rest = f.split(": ", 1)
+                        else:
+                            env_key = "(general)"
+                            rest = f
+                        grouped.setdefault(env_key, []).append(rest)
+
+                    for env_key, env_fails in grouped.items():
+                        if env_key != "(general)":
+                            st.markdown(f"_From `{env_key}`:_")
+                        # Render as a code block so file/line info is monospaced
+                        st.code("\n".join(env_fails[:50]), language="text")
+
+                    if failure_count > len(failures):
+                        st.caption(
+                            f"… and {failure_count - len(failures)} more failures "
+                            "not shown (capped at 50 for UI sanity). "
+                            "Re-run from terminal for full output."
+                        )
 
         st.markdown("---")
         st.markdown(
             "**What's not yet automated** (deferred to v2 per `phase7_migrator_strategy` memory):"
         )
-        # Per-mode tier-4-and-up commands.
-        if result.source_iac == "terraform":
+        # Per-target-format tier-4-and-up commands.
+        if getattr(result, "target_format", result.source_iac) == "terraform":
             st.markdown(
                 "- **Tier 4** — `terraform plan` against real AWS provider schema. "
                 "Needs cloud credentials + state backend.\n"

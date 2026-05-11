@@ -92,7 +92,9 @@ class MigrationResult:
     project_id: Optional[str]
     repo_path: str
     target_cloud: str
-    source_iac: str                              # "terraform" | "terragrunt"
+    source_iac: str                              # "terraform" | "terragrunt" (source format)
+    target_format: str = "terragrunt"            # "terraform" | "terragrunt" (target format)
+    source_cloud: str = "gcp"                    # "gcp" | "azure" | "aws" (future)
 
     # Discover phase
     resources: List[DiscoveredResource] = field(default_factory=list)
@@ -143,8 +145,10 @@ class MigrationResult:
         return {
             "project_id": self.project_id or "unknown",
             "repo_path": self.repo_path,
+            "source_cloud": self.source_cloud,
             "target_cloud": self.target_cloud,
             "source_iac": self.source_iac,
+            "target_format": self.target_format,
             "files_scanned": self.files_scanned,
             "resource_count": self.resource_count,
             "dep_edge_count": len(self.dep_edges),

@@ -79,7 +79,9 @@ class ValidationReport:
                     "status": t.status,
                     "files_checked": t.files_checked,
                     "failure_count": len(t.failures),
+                    "failures": list(t.failures),   # full text for UI rendering
                     "skip_reason": t.skip_reason,
+                    "duration_s": t.duration_s,
                 }
                 for t in self.tiers
             ],
