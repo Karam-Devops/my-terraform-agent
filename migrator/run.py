@@ -52,6 +52,7 @@ def run_migration(
     tenant_id: Optional[str] = None,
     target_format: Optional[str] = None,
     skip_tier2: bool = False,
+    compliance_profile: str = "none",
 ) -> MigrationResult:
     """End-to-end migrator run.
 
@@ -195,6 +196,7 @@ def run_migration(
             resources=resources,
             confidence=confidence,
             source_iac=walk.source_iac,
+            compliance_profile=compliance_profile,
         )
     else:
         skeleton_paths = emit_terragrunt_skeleton(
@@ -203,6 +205,7 @@ def run_migration(
             target_cloud=target,
             resources=resources,
             confidence=confidence,
+            compliance_profile=compliance_profile,
         )
     log.info(
         "migrator_skeleton_emitted",

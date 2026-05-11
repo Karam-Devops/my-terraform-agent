@@ -85,18 +85,35 @@ TRANSLATORS = {
 }
 
 
-def translate_resource(resource: DiscoveredResource) -> Optional[Translation]:
+def translate_resource(
+    resource: DiscoveredResource,
+    *,
+    compliance_profile: str = "none",
+) -> Optional[Translation]:
     """Run the per-type translator for a discovered resource.
 
+    Args:
+        resource: source GCP resource.
+        compliance_profile: one of "none", "hipaa", "soc2", "pci".
+            Translators that have opted in apply hardened defaults per
+            this profile. Translators that haven't been wired yet just
+            ignore it and produce neutral defaults — both code paths
+            work side-by-side during incremental rollout.
+
     Returns None when the resource's tf_type is not yet covered by
-    a translator. Caller falls back to the scaffold-only path
-    (terragrunt_emitter's pre-Design behaviour).
+    a translator. Caller falls back to the scaffold-only path.
     """
     mod = TRANSLATORS.get(resource.tf_type)
     if mod is None:
         return None
     try:
-        return mod.translate(resource)
+        # Try the new signature first; fall back to legacy signature
+        # for translators not yet migrated. TypeError is the canonical
+        # Python signal "this function doesn't accept that kwarg".
+        try:
+            return mod.translate(resource, compliance_profile=compliance_profile)
+        except TypeError:
+            return mod.translate(resource)
     except Exception as e:  # noqa: BLE001 — best-effort per-resource
         # Per-file failure isolation: one bad resource shouldn't kill
         # the whole batch. Return None and let caller fall back.

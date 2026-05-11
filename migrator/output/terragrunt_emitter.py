@@ -164,6 +164,7 @@ def emit_terragrunt_skeleton(
     resources: List[DiscoveredResource],
     confidence: List[ConfidenceFinding],
     aws_region: Optional[str] = None,
+    compliance_profile: str = "none",
 ) -> List[str]:
     """Write the AWS Terragrunt skeleton under <output_dir>/target/.
 
@@ -255,7 +256,7 @@ def emit_terragrunt_skeleton(
 
         # Run the per-type translator. Returns None if no translator
         # registered for this type — caller falls back to scaffold-only.
-        translation = translate_resource(rep)
+        translation = translate_resource(rep, compliance_profile=compliance_profile)
 
         rendered = _render_stack_terragrunt(
             module_path=module_path,

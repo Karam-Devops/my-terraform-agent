@@ -249,6 +249,12 @@ _default_path = st.session_state.get(
     _DEFAULT_PATHS.get((src_cloud, src_format), ""),
 )
 
+from migrator.translate.compliance_profiles import (
+    PROFILE_NAMES as _PROFILE_NAMES,
+    PROFILE_DESCRIPTIONS as _PROFILE_DESCRIPTIONS,
+    list_services_hardened_by as _list_hardened_services,
+)
+
 with st.form(key="migrator_form"):
     repo_path_input = st.text_input(
         f"Local path to {_CLOUD_LABEL[src_cloud]} {_FORMAT_LABEL[src_format]} repo",
@@ -260,6 +266,32 @@ with st.form(key="migrator_form"):
         ),
         disabled=not combo_runnable,
     )
+
+    # Compliance profile picker — picks default hardening level for every
+    # translator's output. Maps to controls in HIPAA / SOC2 / PCI regimes;
+    # "none" means Migrator's neutral defaults (operator hardens manually).
+    _profile_help = "\n".join(
+        f"**{p.upper()}** — {_PROFILE_DESCRIPTIONS[p]}" for p in _PROFILE_NAMES
+    )
+    compliance_profile_choice = st.selectbox(
+        "🛡 Compliance profile (defaults applied to every translator)",
+        options=_PROFILE_NAMES,
+        index=0,    # default to "none"
+        format_func=lambda p: p.upper() if p != "none" else "None (neutral defaults)",
+        help=_profile_help,
+        disabled=not combo_runnable,
+        key="migrator_compliance_profile",
+    )
+    # Live preview of what the chosen profile hardens.
+    if compliance_profile_choice != "none":
+        hardened = _list_hardened_services(compliance_profile_choice)
+        if hardened:
+            st.caption(
+                f"ℹ️ **{compliance_profile_choice.upper()}** hardens these "
+                f"services: `{', '.join(hardened)}`. "
+                "Translators not yet wired for this profile emit neutral "
+                "defaults (no harm; visible in their per-resource notes)."
+            )
 
     skip_tier2_choice = st.checkbox(
         "⚡ Fast preview — skip Tier 2 (provider-schema validation)",
@@ -339,6 +371,7 @@ if submitted:
             output_dir=output_dir,
             project_id=project_id,
             skip_tier2=skip_tier2_choice,
+            compliance_profile=compliance_profile_choice,
         )
 
         progress.progress(100, text=f"Done in {round(time.monotonic() - started, 2)}s")

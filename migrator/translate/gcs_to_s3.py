@@ -48,7 +48,23 @@ _STORAGE_CLASS_MAP = {
 }
 
 
-def translate(resource: DiscoveredResource) -> Translation:
+def translate(
+    resource: DiscoveredResource,
+    *,
+    compliance_profile: str = "none",
+) -> Translation:
+    """Translate GCS buckets → S3 buckets.
+
+    Compliance profile defaults (when not specified per-bucket in source):
+      - block_public_access: forced True under HIPAA/SOC2/PCI
+      - versioning: forced True under HIPAA/SOC2/PCI
+      - kms_encryption: forced True under HIPAA/PCI
+      - force_destroy: forced False under any non-none profile
+      - access_logging: forced True under HIPAA/SOC2/PCI
+    """
+    from migrator.translate.compliance_profiles import get_defaults
+    _profile_defaults = get_defaults(compliance_profile, "s3")
+
     args = resource.arguments or {}
     notes: List[str] = []
 
@@ -64,7 +80,8 @@ def translate(resource: DiscoveredResource) -> Translation:
         gcp_class = str(src.get("storage_class", "STANDARD")).upper()
         s3_class = _STORAGE_CLASS_MAP.get(gcp_class, "STANDARD")
 
-        ubla = bool(src.get("uniform_bucket_level_access", False))
+        # block_public_access: source UBLA wins if set; otherwise apply profile default.
+        ubla = bool(src.get("uniform_bucket_level_access", _profile_defaults.get("block_public_access", False)))
 
         # Lifecycle rules — best-effort translation. Customer's GCS
         # rules use {action, condition} shape; AWS S3 lifecycle uses
@@ -100,17 +117,24 @@ def translate(resource: DiscoveredResource) -> Translation:
             s3_lifecycle_rules[rule_id] = entry
 
         # Soft-delete retention → S3 versioning + MFA delete is closest
-        # analog. We just enable versioning when soft delete > 0.
+        # analog. Enable versioning when soft delete > 0 OR profile demands it.
         soft_delete = src.get("soft_delete_retention")
-        versioning = bool(soft_delete and soft_delete > 0)
+        versioning = bool(soft_delete and soft_delete > 0) or _profile_defaults.get("versioning", False)
 
-        s3_buckets.append({
+        bucket_entry = {
             "name":                name,
             "storage_class":       s3_class,
             "block_public_access": ubla,
             "versioning":          versioning,
             "lifecycle_rules":     s3_lifecycle_rules,
-        })
+        }
+        # Profile-driven attributes — only emit when the profile demands them
+        # (avoids cluttering output for "none" profile).
+        if _profile_defaults.get("kms_encryption"):
+            bucket_entry["kms_encryption"] = True
+        if _profile_defaults.get("access_logging"):
+            bucket_entry["access_logging"] = True
+        s3_buckets.append(bucket_entry)
 
         # Notes for operator-facing notes
         if "notification_config" in src:
@@ -126,6 +150,16 @@ def translate(resource: DiscoveredResource) -> Translation:
 
     if not s3_buckets:
         notes.append("No gcs_config entries found in source; emitted empty buckets map.")
+
+    # Profile-driven notes for the operator.
+    if compliance_profile and compliance_profile != "none" and s3_buckets:
+        hardened_attrs = [k for k in ("block_public_access", "versioning", "kms_encryption", "access_logging")
+                          if _profile_defaults.get(k)]
+        if hardened_attrs:
+            notes.append(
+                f"compliance profile '{compliance_profile.upper()}' applied — "
+                f"defaults forced on: {', '.join(hardened_attrs)}"
+            )
 
     aws_inputs_hcl = (
         "  # Translated from GCP gcs_config list.\n"
@@ -155,6 +189,11 @@ def _render_buckets(buckets: list) -> str:
         lines.append(f'      storage_class       = "{b["storage_class"]}"')
         lines.append(f'      block_public_access = {str(b["block_public_access"]).lower()}')
         lines.append(f'      versioning          = {str(b["versioning"]).lower()}')
+        # Compliance profile additions (only present when profile forced them)
+        if b.get("kms_encryption"):
+            lines.append(f'      kms_encryption      = true   # compliance profile')
+        if b.get("access_logging"):
+            lines.append(f'      access_logging      = true   # compliance profile')
         if b["lifecycle_rules"]:
             lines.append("      lifecycle_rules = {")
             for rid, rule in b["lifecycle_rules"].items():

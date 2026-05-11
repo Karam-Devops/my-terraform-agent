@@ -295,7 +295,11 @@ def _normalize_terraform_resource_args(resource: DiscoveredResource) -> Dict:
     return args
 
 
-def _translate_terraform_resource(resource: DiscoveredResource, source_iac: str = "terraform"):
+def _translate_terraform_resource(
+    resource: DiscoveredResource,
+    source_iac: str = "terraform",
+    compliance_profile: str = "none",
+):
     """Translate a resource via the shared translator layer.
 
     For vanilla Terraform sources, args are normalized (wrapped in the
@@ -305,7 +309,7 @@ def _translate_terraform_resource(resource: DiscoveredResource, source_iac: str 
     """
     if source_iac == "terragrunt":
         # Args already in terragrunt-shape — translators consume them directly.
-        return translate_resource(resource)
+        return translate_resource(resource, compliance_profile=compliance_profile)
     normalized = _normalize_terraform_resource_args(resource)
     adapted = DiscoveredResource(
         tf_type=resource.tf_type,
@@ -314,7 +318,7 @@ def _translate_terraform_resource(resource: DiscoveredResource, source_iac: str 
         file_path=resource.file_path,
         arguments=normalized,
     )
-    return translate_resource(adapted)
+    return translate_resource(adapted, compliance_profile=compliance_profile)
 
 
 def _format_with_terraform(target_dir: str) -> bool:
@@ -417,6 +421,7 @@ def emit_terraform_skeleton(
     confidence: List[ConfidenceFinding],
     aws_region: Optional[str] = None,
     source_iac: str = "terraform",
+    compliance_profile: str = "none",
 ) -> List[str]:
     """Write the AWS pure-Terraform skeleton under <output_dir>/target/.
 
@@ -517,6 +522,7 @@ def emit_terraform_skeleton(
             modules_relpath=modules_relpath,
             available_module_services=emitted_module_specs,
             source_iac=source_iac,
+            compliance_profile=compliance_profile,
         )
         main_path = os.path.join(env_dir, "main.tf")
         _write_text(main_path, main_tf)
@@ -568,13 +574,29 @@ def _render_env_main_tf(
     modules_relpath: str,
     available_module_services: Set[str],
     source_iac: str = "terraform",
+    compliance_profile: str = "none",
 ) -> str:
     """One module {} block per source resource. Order: stable by module_path then name."""
+    from migrator.translate.compliance_profiles import list_services_hardened_by
+    _hardened_services = list_services_hardened_by(compliance_profile)
+
     lines: List[str] = []
     lines.append(f"# AWS Terraform root for env={env_name}")
     lines.append("# Synthesized by Cloud Lifecycle Intelligence — Migrator engine.")
     lines.append("# Each module {} block below corresponds to one source GCP resource.")
     lines.append("# Review per-resource source comments; replace TODO inputs before plan.")
+    # Compliance profile banner — surfaces what defaults the operator picked.
+    if compliance_profile and compliance_profile != "none":
+        lines.append(f"#")
+        lines.append(f"# Compliance profile: {compliance_profile.upper()}")
+        lines.append(
+            f"# Hardened defaults applied to: {', '.join(_hardened_services) or '(none yet — translators not wired for this profile)'}"
+        )
+        lines.append(
+            f"# (e.g. block_public_access, KMS encryption, deletion_protection)"
+        )
+    else:
+        lines.append(f"# Compliance profile: none (operator hardens each resource manually)")
     lines.append("")
     lines.append("locals {")
     lines.append(f'  environment = "{env_name}"')
@@ -594,7 +616,9 @@ def _render_env_main_tf(
 
     for r in resources:
         conf = confidence_by_addr.get(r.address) or confidence_by_type.get(r.tf_type)
-        translation = _translate_terraform_resource(r, source_iac=source_iac)
+        translation = _translate_terraform_resource(
+            r, source_iac=source_iac, compliance_profile=compliance_profile,
+        )
 
         # Detect translator-exception stubs: the translate_resource()
         # wrapper returns a Translation with notes starting with
