@@ -88,8 +88,21 @@ def translate(resource: DiscoveredResource) -> Translation:
         vpc_cidr = "10.0.0.0/16"
         if subnets:
             first_subnet_cidr = subnets[0]["cidr"]
-            # Best-effort CIDR widening: keep the first 16 bits as VPC CIDR
+            # Best-effort CIDR widening: keep the first 16 bits as VPC CIDR.
+            # Only attempt if the source value LOOKS like a literal CIDR —
+            # HCL interpolations like ${local.subnet_cfgs.X.ip_cidr_range}
+            # would otherwise produce malformed output (split on '.' eats
+            # the ${ open-brace, leaving an unclosed interpolation).
+            _looks_literal_cidr = (
+                "$" not in first_subnet_cidr
+                and "{" not in first_subnet_cidr
+                and "/" in first_subnet_cidr
+            )
             try:
+                if not _looks_literal_cidr:
+                    # Source CIDR is an interpolation we can't widen safely.
+                    # Fall back to the default vpc_cidr; operator decides.
+                    raise ValueError("non-literal CIDR; falling back to default")
                 base = first_subnet_cidr.split("/")[0]
                 octs = base.split(".")
                 if len(octs) == 4:

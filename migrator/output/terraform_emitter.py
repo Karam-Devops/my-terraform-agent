@@ -91,7 +91,9 @@ _IDENTIFIER_RE = re.compile(r"[^A-Za-z0-9_]+")
 # Known source-side refs → AWS env-root equivalents. Applied as plain
 # substring replacement, longest-key-first. python-hcl2 mangles
 # `${var.X}` → `${var_X}` inside dict keys, so we match both forms.
+# Same applies to `${local.X}` → `${local_X}` mangling.
 _SOURCE_REF_SUBSTITUTIONS = [
+    # var.X
     ("${var.environment}", "${local.environment}"),
     ("${var_environment}", "${local.environment}"),
     ("${var.region}",      "${local.region}"),
@@ -101,6 +103,13 @@ _SOURCE_REF_SUBSTITUTIONS = [
     ("var.environment",    "local.environment"),
     ("var.region",         "local.region"),
     ("var.labels",         "local.common_tags"),
+    # local.env (the customer's terragrunt source pattern). python-hcl2
+    # mangles `${local.env}` → `${local_env}` in dict-key positions.
+    ("${local.env}",       "${local.environment}"),
+    ("${local_env}",       "${local.environment}"),
+    # Other common GCP→AWS local rename patterns from customer's source:
+    ("${local._project.locals.project_id}", "${local.environment}"),
+    ("${local._env_configs.locals.env}",    "${local.environment}"),
 ]
 
 
@@ -138,6 +147,16 @@ _EACH_INTERP_RE = re.compile(r"\$\{each\.(value|key)((?:\.[A-Za-z0-9_.\-]+)?)\}"
 _EACH_BARE_RE = re.compile(r"(?<![\w.${])each\.(value|key)((?:\.[A-Za-z0-9_.\-]+)?)")
 # python-hcl2 dict-key mangling: ${each.key} → ${each_key}, ${each.value.x} → ${each_value_x}
 _EACH_MANGLED_INTERP_RE = re.compile(r"\$\{each_(key|value)((?:_[A-Za-z0-9_]+)?)\}")
+
+# ${dependency.X.outputs.Y[...]...} — Terragrunt-only references to
+# other-stack outputs. No analog in vanilla Terraform; in target mode
+# we'd need module output references, which we don't have wired.
+# Replace with TODO placeholders.
+# python-hcl2 mangles these in dict-key positions into forms like
+# ${dependency_vpc_id_outputs_vpc["..."]_name}. Match both shapes.
+_DEPENDENCY_INTERP_RE = re.compile(r"\$\{dependency\.[^}]+\}")
+_DEPENDENCY_MANGLED_INTERP_RE = re.compile(r"\$\{dependency_[^}]+\}")
+_DEPENDENCY_BARE_RE = re.compile(r"(?<![\w.${])dependency\.[A-Za-z0-9_.\[\]\"\-]+")
 
 
 def _sanitize_translation(text: str) -> str:
@@ -207,6 +226,14 @@ def _sanitize_translation(text: str) -> str:
         slug = f"each-{kind}" + (f"-{suffix.replace('_', '-')}" if suffix else "")
         return f'${{"TODO-{slug}"}}'
     out = _EACH_MANGLED_INTERP_RE.sub(_each_mangled_sub, out)
+
+    # Step 2d: dependency.X — Terragrunt-only references to other stacks'
+    # outputs. No analog in vanilla Terraform target mode; replace with
+    # TODO placeholders so terraform validate doesn't error. Operator
+    # will wire to module outputs during the manual review pass.
+    out = _DEPENDENCY_INTERP_RE.sub(lambda m: '${"TODO-dependency-ref"}', out)
+    out = _DEPENDENCY_MANGLED_INTERP_RE.sub(lambda m: '${"TODO-dependency-ref"}', out)
+    out = _DEPENDENCY_BARE_RE.sub(lambda m: '"TODO-dependency-ref"', out)
 
     return out
 
@@ -601,12 +628,20 @@ def _render_env_main_tf(
         lines.append("# -----------------------------------------------------------------")
 
         # Source GCP arguments — abridged inline reference comments.
+        # CRITICAL: strip newlines from string values. Source repos
+        # commonly have multi-line strings (SQL queries, YAML blobs,
+        # certificate bodies) that would otherwise break the `#`
+        # comment over multiple lines, leaving line 2+ to be parsed
+        # as HCL — which usually isn't valid HCL → Tier 0 parse fails.
         if isinstance(r.arguments, dict):
             for k in sorted(r.arguments.keys()):
                 if k.startswith("_"):
                     continue
                 v = r.arguments[k]
                 v_str = _stringify(v)
+                # Collapse newlines (and any surrounding whitespace) so
+                # the rendered comment stays on ONE line.
+                v_str = " ".join(v_str.split())
                 if len(v_str) > 100:
                     v_str = v_str[:97] + "..."
                 lines.append(f"#   src.{k} = {v_str}")
