@@ -69,7 +69,24 @@ def _map_tier(tier: str) -> str:
     return "db.t3.medium"
 
 
-def translate(resource: DiscoveredResource) -> Translation:
+def translate(
+    resource: DiscoveredResource,
+    *,
+    compliance_profile: str = "none",
+) -> Translation:
+    """Translate Cloud SQL → RDS.
+
+    Compliance profile defaults (when not specified per-instance in source):
+      - deletion_protection: forced True under HIPAA/SOC2/PCI
+      - storage_encrypted: forced True under HIPAA/SOC2/PCI (already True by default in module body)
+      - backup_retention_days: forced 35d (HIPAA), 14d (SOC2), 30d (PCI)
+      - performance_insights_enabled: forced True under HIPAA/SOC2/PCI
+      - iam_database_authentication: forced True under HIPAA/PCI
+      - monitoring_interval: forced 60s (1-minute resolution) under HIPAA
+    """
+    from migrator.translate.compliance_profiles import get_defaults
+    _profile_defaults = get_defaults(compliance_profile, "rds")
+
     args = resource.arguments or {}
     notes: List[str] = []
 
@@ -110,16 +127,31 @@ def translate(resource: DiscoveredResource) -> Translation:
         availability = str(src.get("availability_type", "ZONAL")).upper()
         multi_az = (availability == "REGIONAL")
 
+        # Compliance profile overrides: source value wins if explicit;
+        # profile default applies if source didn't set the field.
+        src_deletion_protection = src.get("deletion_protection")
+        deletion_protection = (
+            bool(src_deletion_protection)
+            if src_deletion_protection is not None
+            else _profile_defaults.get("deletion_protection", False)
+        )
+
         rds_specs.append({
-            "name":             name,
-            "engine":           engine,
-            "engine_version":   engine_version,
-            "instance_class":   instance_class,
-            "allocated_storage": int(src.get("disk_size", 20) or 20),
-            "multi_az":         multi_az,
-            "deletion_protection": bool(src.get("deletion_protection", False)),
-            "_source_tier":     tier,
-            "_source_version":  gcp_version,
+            "name":                          name,
+            "engine":                        engine,
+            "engine_version":                engine_version,
+            "instance_class":                instance_class,
+            "allocated_storage":             int(src.get("disk_size", 20) or 20),
+            "multi_az":                      multi_az,
+            "deletion_protection":           deletion_protection,
+            # Profile-driven hardening attrs:
+            "storage_encrypted":             _profile_defaults.get("storage_encrypted", True),  # safe default on
+            "backup_retention_days":         _profile_defaults.get("backup_retention_days"),
+            "performance_insights_enabled":  _profile_defaults.get("performance_insights_enabled"),
+            "iam_database_authentication":   _profile_defaults.get("iam_database_authentication"),
+            "monitoring_interval":           _profile_defaults.get("monitoring_interval"),
+            "_source_tier":                  tier,
+            "_source_version":               gcp_version,
         })
 
     if rds_specs:
@@ -128,6 +160,20 @@ def translate(resource: DiscoveredResource) -> Translation:
         notes.append("PSA private IP → RDS in same VPC subnet group (no peering needed in AWS).")
     notes.append("Master password generation: use AWS Secrets Manager, not inline. "
                  "module emits a random_password resource by default.")
+
+    # Profile-driven notes for the operator.
+    if compliance_profile and compliance_profile != "none" and rds_specs:
+        hardened_attrs = []
+        if _profile_defaults.get("deletion_protection"): hardened_attrs.append("deletion_protection")
+        if _profile_defaults.get("backup_retention_days"): hardened_attrs.append(f"backup_retention={_profile_defaults['backup_retention_days']}d")
+        if _profile_defaults.get("performance_insights_enabled"): hardened_attrs.append("performance_insights")
+        if _profile_defaults.get("iam_database_authentication"): hardened_attrs.append("iam_db_auth")
+        if _profile_defaults.get("monitoring_interval"): hardened_attrs.append(f"enhanced_monitoring={_profile_defaults['monitoring_interval']}s")
+        if hardened_attrs:
+            notes.append(
+                f"compliance profile '{compliance_profile.upper()}' applied — "
+                f"defaults forced on: {', '.join(hardened_attrs)}"
+            )
 
     aws_inputs_hcl = (
         "  # Translated from GCP Cloud SQL.\n"
@@ -159,6 +205,15 @@ def _render_databases(specs: list) -> str:
         lines.append(f'      allocated_storage = {s["allocated_storage"]}')
         lines.append(f'      multi_az          = {str(s["multi_az"]).lower()}')
         lines.append(f'      deletion_protection = {str(s["deletion_protection"]).lower()}')
+        # Profile-driven hardening attrs — only emit when set.
+        if s.get("backup_retention_days"):
+            lines.append(f'      backup_retention_days        = {s["backup_retention_days"]}   # compliance profile')
+        if s.get("performance_insights_enabled"):
+            lines.append(f'      performance_insights_enabled = true                            # compliance profile')
+        if s.get("iam_database_authentication"):
+            lines.append(f'      iam_database_authentication  = true                            # compliance profile')
+        if s.get("monitoring_interval"):
+            lines.append(f'      monitoring_interval          = {s["monitoring_interval"]}                              # compliance profile')
         lines.append("    }")
     lines.append("  }")
     return "\n".join(lines)
@@ -234,7 +289,7 @@ resource "aws_db_instance" "this" {
   instance_class    = each.value.instance_class
   allocated_storage = each.value.allocated_storage
   storage_type      = "gp3"
-  storage_encrypted = true
+  storage_encrypted = true   # always-on; HIPAA/SOC2/PCI all require this
 
   username = "appadmin"
   password = random_password.master[each.key].result
@@ -248,25 +303,37 @@ resource "aws_db_instance" "this" {
     var.create_security_group ? aws_security_group.db[0].id : null,
   ])
 
-  backup_retention_period = each.value.deletion_protection ? 14 : 1
-  performance_insights_enabled = true
+  # Compliance-profile-driven attrs. Each falls back to a safe default
+  # so this module works WITHOUT the compliance profile too.
+  backup_retention_period      = lookup(each.value, "backup_retention_days",        each.value.deletion_protection ? 14 : 1)
+  performance_insights_enabled = lookup(each.value, "performance_insights_enabled", true)
+  iam_database_authentication_enabled = lookup(each.value, "iam_database_authentication", false)
+  monitoring_interval          = lookup(each.value, "monitoring_interval",          0)
 
   tags = merge(var.tags, { Name = each.value.name })
 }
 '''
 
 
-_VARIABLES_TF = '''variable "databases" {
-  type = map(object({
-    name                = string
-    engine              = string  # postgres | mysql
-    engine_version      = string
-    instance_class      = string  # e.g. db.t3.medium, db.r6g.xlarge
-    allocated_storage   = number
-    multi_az            = bool
-    deletion_protection = bool
-  }))
-  description = "Map of DB key -> spec. Each entry creates one aws_db_instance + secrets."
+_VARIABLES_TF = '''# `databases` is map(any) so callers can supply heterogeneous keys
+# across DB instances — required base attrs + optional compliance-profile
+# attrs. Implicit schema:
+#   required:
+#     name                          = string
+#     engine                        = string   # postgres | mysql
+#     engine_version                = string
+#     instance_class                = string   # e.g. db.t3.medium, db.r6g.xlarge
+#     allocated_storage             = number
+#     multi_az                      = bool
+#     deletion_protection           = bool
+#   optional (compliance-profile-emitted):
+#     backup_retention_days         = number   # HIPAA: 35, SOC2: 14, PCI: 30
+#     performance_insights_enabled  = bool
+#     iam_database_authentication   = bool
+#     monitoring_interval           = number   # seconds; 60 = enhanced monitoring
+variable "databases" {
+  type        = map(any)
+  description = "Map of DB key -> spec. Schema documented in translator source."
   default     = {}
 }
 

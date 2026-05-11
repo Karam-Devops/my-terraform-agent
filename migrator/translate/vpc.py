@@ -31,7 +31,19 @@ from .base import DEFAULT_VERSIONS_TF, AWSModuleSpec, Translation
 SERVICE_NAME = "vpc"
 
 
-def translate(resource: DiscoveredResource) -> Translation:
+def translate(
+    resource: DiscoveredResource,
+    *,
+    compliance_profile: str = "none",
+) -> Translation:
+    """Translate GCP VPC → AWS VPC + subnets.
+
+    Compliance profile defaults:
+      - enable_flow_logs: forced True under HIPAA/SOC2/PCI (network audit)
+    """
+    from migrator.translate.compliance_profiles import get_defaults
+    _profile_defaults = get_defaults(compliance_profile, "vpc")
+
     args = resource.arguments or {}
     notes: List[str] = []
 
@@ -126,12 +138,23 @@ def translate(resource: DiscoveredResource) -> Translation:
                      "should map to 2-3 AWS subnets across AZs — operator decides per env.")
         notes.append("Secondary IP ranges (GCP) → multiple subnets or VPC additional CIDR blocks (AWS).")
 
+    # Compliance-profile-driven attrs (only emit when set).
+    extra_inputs = ""
+    enable_flow_logs = _profile_defaults.get("enable_flow_logs")
+    if enable_flow_logs:
+        extra_inputs += "\n  enable_flow_logs     = true   # compliance profile\n"
+        notes.append(
+            f"compliance profile '{compliance_profile.upper()}' applied — "
+            "VPC flow logs enabled (network audit logging)"
+        )
+
     aws_inputs_hcl = (
         "  # Translated from GCP google_compute_network + subnetworks.\n"
         f"  vpcs = {_render_vpcs(vpcs)}\n"
         "\n"
         "  enable_dns_hostnames = true\n"
         "  enable_dns_support   = true\n"
+        f"{extra_inputs}"
     )
 
     return Translation(
@@ -232,6 +255,65 @@ resource "aws_internet_gateway" "this" {
     { Name = "${each.value.name}-igw" },
   )
 }
+
+# -----------------------------------------------------------------
+# Compliance-profile-driven: VPC Flow Logs
+# Only deployed when var.enable_flow_logs = true (set by HIPAA/SOC2/PCI
+# profiles). Log group is per-VPC, 90-day retention.
+# -----------------------------------------------------------------
+resource "aws_cloudwatch_log_group" "vpc_flow_logs" {
+  for_each = var.enable_flow_logs ? var.vpcs : {}
+
+  name              = "/aws/vpc/${each.value.name}/flow-logs"
+  retention_in_days = 90
+  tags              = var.tags
+}
+
+resource "aws_iam_role" "vpc_flow_logs" {
+  count = var.enable_flow_logs ? 1 : 0
+
+  name = "${var.name_prefix}-vpc-flow-logs-role"
+  assume_role_policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [{
+      Effect    = "Allow"
+      Principal = { Service = "vpc-flow-logs.amazonaws.com" }
+      Action    = "sts:AssumeRole"
+    }]
+  })
+  tags = var.tags
+}
+
+resource "aws_iam_role_policy" "vpc_flow_logs" {
+  count = var.enable_flow_logs ? 1 : 0
+
+  role = aws_iam_role.vpc_flow_logs[0].name
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [{
+      Effect = "Allow"
+      Action = [
+        "logs:CreateLogGroup",
+        "logs:CreateLogStream",
+        "logs:PutLogEvents",
+        "logs:DescribeLogGroups",
+        "logs:DescribeLogStreams",
+      ]
+      Resource = "*"
+    }]
+  })
+}
+
+resource "aws_flow_log" "vpc" {
+  for_each = var.enable_flow_logs ? var.vpcs : {}
+
+  vpc_id          = aws_vpc.this[each.key].id
+  log_destination = aws_cloudwatch_log_group.vpc_flow_logs[each.key].arn
+  iam_role_arn    = aws_iam_role.vpc_flow_logs[0].arn
+  traffic_type    = "ALL"
+
+  tags = merge(var.tags, { Name = "${each.value.name}-flow-log" })
+}
 '''
 
 
@@ -262,6 +344,17 @@ variable "enable_dns_hostnames" {
 variable "enable_dns_support" {
   type    = bool
   default = true
+}
+
+variable "enable_flow_logs" {
+  type        = bool
+  default     = false
+  description = "Enable VPC flow logs (HIPAA/SOC2/PCI compliance: network audit logging). Creates CloudWatch log groups + IAM role per VPC."
+}
+
+variable "name_prefix" {
+  type    = string
+  default = "migrator"
 }
 
 variable "tags" {
