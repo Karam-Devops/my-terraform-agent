@@ -82,6 +82,12 @@ _TF_NORMALIZE: Dict[str, tuple] = {
     "google_compute_security_policy":         ("policies", "list"),
     "google_logging_project_sink":            ("sinks", "dict"),
     "google_cloud_scheduler_job":             ("jobs", "list"),
+    # FCR v3 Week 2 (2026-05-11)
+    # EKS translator accepts either gke_cluster_name (single cluster) OR
+    # gke_config (multi-cluster). For vanilla-TF resources, we wrap as
+    # single-cluster (gke_cluster_name from resource.name).
+    "google_container_cluster":               ("gke_cluster_name", "dict_single"),
+    "google_container_node_pool":             ("nodepool_config", "list"),
 }
 
 

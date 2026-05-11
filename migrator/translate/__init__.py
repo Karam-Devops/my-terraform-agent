@@ -41,6 +41,7 @@ from . import (
     ec2,
     ecr,
     eip,
+    eks,
     elasticache,
     eventbridge_scheduler,
     gcs_to_s3,
@@ -82,6 +83,9 @@ TRANSLATORS = {
     "google_compute_security_policy":            waf,
     "google_logging_project_sink":               log_sink,
     "google_cloud_scheduler_job":                eventbridge_scheduler,
+    # Week 2 FCR v3 expansion (added 2026-05-11)
+    "google_container_cluster":                  eks,
+    "google_container_node_pool":                eks,
 }
 
 
@@ -140,6 +144,8 @@ def all_aws_module_specs() -> List[AWSModuleSpec]:
         secrets, ecr, acm, route53, vpc, security_group, subnet,
         # Tier 2 expansion
         waf, log_sink, eventbridge_scheduler,
+        # FCR v3 Week 2 expansion
+        eks,
     )
     for mod in all_modules:
         spec = mod.aws_module_spec()
