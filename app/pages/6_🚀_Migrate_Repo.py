@@ -307,7 +307,7 @@ with _profile_col_b:
             "Maps customer-specific local refs in source HCL to AWS-target "
             "equivalents. **Default** covers generic patterns "
             "(var.environment, var.region, local.env). Customer-named "
-            "profiles (e.g. 'citiustech') layer on top with their specific "
+            "profiles (e.g. 'dh') layer on top with their specific "
             "naming conventions like `_project.locals.X`. Adding a new "
             "customer = drop a YAML file under "
             "`migrator/translate/customer_profiles/`."

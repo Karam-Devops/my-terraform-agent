@@ -86,7 +86,7 @@ When `run_migration(customer_profile="X")`:
 run_migration(repo_path, target_cloud="aws")
 
 # Customer-specific profile + defaults
-run_migration(repo_path, target_cloud="aws", customer_profile="citiustech")
+run_migration(repo_path, target_cloud="aws", customer_profile="dh")
 ```
 
 Selection is also surfaced as a UI dropdown on the Migrate Repo page
@@ -98,6 +98,6 @@ names (any `*.yaml` file other than `_default.yaml`).
 | Profile      | Customer / Pattern                                           |
 |--------------|--------------------------------------------------------------|
 | `_default`   | Generic — var.environment, var.region, var.labels, local.env |
-| `citiustech` | CitiusTech / DeepHealth — `_project.hcl` / `_env_configs.hcl` four-file include pattern with leading-underscore include locals |
+| `dh`         | DeepHealth — `_project.hcl` / `_env_configs.hcl` four-file include pattern with leading-underscore include locals |
 
 Future: `acme_health`, `regional_bank`, etc. — one per onboarded customer.

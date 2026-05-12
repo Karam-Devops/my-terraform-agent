@@ -1,12 +1,12 @@
-# CitiusTech / DeepHealth customer profile.
+# DeepHealth (DH) customer profile.
 #
-# Their Terragrunt repos use a project.hcl / env.hcl / global.hcl /
+# DH's Terragrunt repos use a project.hcl / env.hcl / global.hcl /
 # deployment.hcl convention with leading-underscore locals
 # (`_project`, `_env_configs`, `_deployment_configs`, `_global_configs`)
 # for "read-once includes" — markers that the local refers to a
 # parent-config read via read_terragrunt_config(find_in_parent_folders(...)).
 #
-# This profile maps THEIR specific patterns to clean AWS-target locals.
+# This profile maps DH's specific patterns to clean AWS-target locals.
 # Anything not listed here falls back to _default.yaml.
 
 local_substitutions:
@@ -27,16 +27,16 @@ local_substitutions:
   "local._project.locals.primary_region": "local.region"
   "local._env_configs.locals.env":        "local.environment"
 
-  # Other CitiusTech conventions.
+  # Other DH conventions.
   # Note: target values that go INSIDE an interpolation context (the
   # original source ref was wrapped in `"${...}"` and we're substituting
   # the inner part) must NOT carry their own quotes — otherwise we end
   # up with `""dh"-suffix"` which is invalid HCL. Use bare literals.
   "${local.primary_region_suffix}":   "${local.region}"
   "${local.secondary_region_suffix}": "us-east-1"
-  "${local.prefix}":                  "dh"   # their org-wide prefix
+  "${local.prefix}":                  "dh"   # DH's org-wide resource prefix
 
 metadata:
-  name:        "citiustech"
-  description: "CitiusTech / DeepHealth conventions: _project.hcl + _env_configs.hcl with leading-underscore include locals."
+  name:        "dh"
+  description: "DeepHealth conventions: _project.hcl + _env_configs.hcl with leading-underscore include locals."
   applies_to:  "Repos with project.hcl/env.hcl/deployment.hcl/global.hcl four-file include pattern and `_project`/`_env_configs`/`_deployment_configs`/`_global_configs` locals."
