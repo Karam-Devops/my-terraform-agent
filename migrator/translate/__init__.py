@@ -54,8 +54,10 @@ from . import (
     route53,
     secrets,
     security_group,
+    shared_vpc,
     sns_sqs,
     subnet,
+    transit_gateway,
     vpc,
     waf,
 )
@@ -98,6 +100,15 @@ TRANSLATORS = {
     # Kiro-review fix #8: BigQuery → Athena scaffold (added 2026-05-12)
     "google_bigquery_dataset":                   bigquery,
     "google_bigquery_table":                     bigquery,
+    # Kiro v9 depth-of-mapping closure (added 2026-05-12): full
+    # resource emission for NCC + Shared VPC instead of scaffold-only.
+    # Both source-type families converge on the SAME aws-target module
+    # (ec2-transit-gateway) — translator dispatch picks the right
+    # translate() based on tf_type; aws_module_spec() de-dupes.
+    "google_network_connectivity_hub":           transit_gateway,
+    "google_network_connectivity_spoke":         transit_gateway,
+    "google_compute_shared_vpc_host_project":    shared_vpc,
+    "google_compute_shared_vpc_service_project_attachment": shared_vpc,
 }
 
 
@@ -186,6 +197,9 @@ def all_aws_module_specs() -> List[AWSModuleSpec]:
         eks, aurora_postgres, alb,
         # Kiro-review fix #8
         bigquery,
+        # Kiro v9 depth-of-mapping closure (NCC + Shared VPC both
+        # emit aws_ec2_transit_gateway via transit_gateway module).
+        transit_gateway,
     )
     for mod in all_modules:
         spec = mod.aws_module_spec()

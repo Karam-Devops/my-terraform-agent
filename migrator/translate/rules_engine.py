@@ -629,32 +629,63 @@ def _clean_garbage_strings(d: Any) -> Any:
 
 
 def _replace_complex_interpolations(s: str) -> str:
-    """For each ``${...}`` chunk in ``s``, if it's a COMPLEX expression
-    (function call / index access / contains quoted string), replace
-    with a named TODO based on the embedded local/var/each/dependency
-    reference. Simple references pass through unchanged for the
-    downstream sanitizer + customer-profile path to handle.
+    """Walk ``s`` and replace each balanced ``${...}`` chunk that's a
+    COMPLEX expression (function call / index access / quoted strings)
+    with a named TODO marker. Simple references pass through unchanged
+    so the downstream sanitizer + customer-profile path can handle them.
+
+    Uses brace-counting (not regex) to find balanced `${...}` boundaries
+    — handles nested interpolation like
+    ``${dependency.X["${local.Y}"].name}-suffix`` where the inner `}`
+    would otherwise prematurely close the regex match and leave a
+    trailing ``"].name}-suffix"`` that breaks HCL.
     """
     import re as _re
+    if "${" not in s:
+        return s
 
-    def repl(m):
-        expr = m.group(1)
-        # Simple reference (no function/index/quote) → pass through.
-        is_complex = "(" in expr or '"' in expr or "[" in expr
+    out_chars: List[str] = []
+    i = 0
+    n = len(s)
+    while i < n:
+        start = s.find("${", i)
+        if start < 0:
+            out_chars.append(s[i:])
+            break
+        out_chars.append(s[i:start])
+
+        # Find the matching `}` (brace-counting handles nested `${...}`).
+        depth = 1
+        j = start + 2
+        while j < n and depth > 0:
+            if s[j] == "{" and j > 0 and s[j - 1] == "$":
+                depth += 1
+            elif s[j] == "}":
+                depth -= 1
+            j += 1
+        if depth != 0:
+            # Unbalanced — strip the rest.
+            out_chars.append("TODO-unresolved")
+            break
+
+        inner = s[start + 2:j - 1]
+        is_complex = "(" in inner or '"' in inner or "[" in inner
         if not is_complex:
-            return m.group(0)
-        # Extract the first known reference embedded in the expression
-        # and synthesize a named TODO. This is more informative than
-        # the previous wholesale `TODO-source-interpolation-needs-review`
-        # marker which hid the source context from the operator.
-        for kind in ("local", "var", "each", "dependency"):
-            mref = _re.search(rf"\b{kind}\.([A-Za-z0-9_.\-]+)", expr)
-            if mref:
-                slug = _re.sub(r"[^A-Za-z0-9_]+", "-", mref.group(1)).strip("-")
-                return f"TODO-{kind}-{slug}"
-        return "TODO-unresolved"
+            # Preserve simple `${local.X}` for the downstream sanitizer.
+            out_chars.append(s[start:j])
+        else:
+            for kind in ("local", "var", "each", "dependency"):
+                mref = _re.search(rf"\b{kind}\.([A-Za-z0-9_.\-]+)", inner)
+                if mref:
+                    slug = _re.sub(r"[^A-Za-z0-9_]+", "-",
+                                   mref.group(1)).strip("-")
+                    out_chars.append(f"TODO-{kind}-{slug}")
+                    break
+            else:
+                out_chars.append("TODO-unresolved")
+        i = j
 
-    return _re.sub(r"\$\{([^}]*)\}", repl, s)
+    return "".join(out_chars)
 
 
 def _looks_like_source_context_interp(s: str) -> bool:

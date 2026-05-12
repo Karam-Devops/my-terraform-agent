@@ -213,6 +213,11 @@ _INFER_RULES = (
     ("network-connectivity",           "google_network_connectivity_hub"),
     ("ncc-hub",                        "google_network_connectivity_hub"),
     ("ncc-spoke",                      "google_network_connectivity_spoke"),
+    # Bare `/ncc` path segment — DH's source uses just `ncc` as the
+    # leaf dir name (`common-network/network/ncc/`). Anchored to avoid
+    # matching non-NCC paths.
+    ("/ncc/",                          "google_network_connectivity_hub"),
+    ("/ncc",                           "google_network_connectivity_hub"),
 
     # Shared VPC (GCP's host-project + service-project pattern) — no
     # direct AWS equivalent. Maps to Transit Gateway hub-spoke (or RAM
