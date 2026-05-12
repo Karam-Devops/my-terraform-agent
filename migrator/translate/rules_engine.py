@@ -506,6 +506,14 @@ def _extract_for_each(fe_spec: Dict, source_args: Dict):
     map_out: Dict[str, Dict] = {}
     list_out: List[Dict] = []
     for item_key, item_args in items:
+        # Clean garbage-interpolation values BEFORE per-input extraction.
+        # Customer source HCL like `name = "${local.x.y}-suffix"` survives
+        # python-hcl2 + our sanitizer as half-mangled strings such as
+        # `${"TODO-local-x-y"}-suffix`. Rendering those as HCL produces
+        # syntactically-invalid output (broken multi-line strings, etc.)
+        # Replace any such garbage value with a clean TODO marker so the
+        # operator sees a fixable placeholder instead of broken HCL.
+        item_args = _clean_garbage_strings(item_args)
         item_out: Dict[str, Any] = {}
         for ii_name, ii_spec in item_inputs.items():
             # Special directive: default_from_key (use the source map key
@@ -530,18 +538,73 @@ def _extract_for_each(fe_spec: Dict, source_args: Dict):
         if output_shape == "list":
             list_out.append(item_out)
         else:
-            # Sanitize the item_key for HCL identifier safety (hyphens →
-            # underscores, etc.). Same approach the existing Python
-            # translators use.
-            safe_key = (
-                str(item_key)
-                .replace("-", "_")
-                .replace(".", "_")
-                .replace("/", "_")
-            )
-            map_out[safe_key] = item_out
+            # Sanitize the item_key for HCL identifier safety. The old
+            # approach (replace - / . / / with _) wasn't enough — keys
+            # extracted from source-args strings can also contain HCL
+            # interpolation gunk like `${...}` or embedded quotes.
+            # Strict approach: keep only [A-Za-z0-9_], collapse runs of
+            # underscores, prepend `_` if first char would be a digit.
+            import re as _re
+            cleaned = _re.sub(r"[^A-Za-z0-9_]", "_", str(item_key))
+            cleaned = _re.sub(r"_+", "_", cleaned).strip("_")
+            if not cleaned:
+                cleaned = f"item_{len(map_out)}"
+            elif cleaned[0].isdigit():
+                cleaned = "_" + cleaned
+            map_out[cleaned] = item_out
 
     return list_out if output_shape == "list" else map_out
+
+
+def _clean_garbage_strings(d: Any) -> Any:
+    """Walk a dict/list and replace strings whose values contain
+    source-context interpolation (`${local.X}`, `${var.Y}`, etc.) that
+    won't resolve in the AWS-target Terraform scope.
+
+    Without this cleanup, broken expressions like
+    ``"${trim(local.public_dns.domain, \\".\\")}.pvt"`` flow through to
+    ``_render_hcl_value`` as plain strings, get re-quoted but the inner
+    quotes break parsing, and terraform fmt rejects the file. Worse,
+    even when fmt happens to accept it, `terraform validate` fails
+    because `local.public_dns` isn't declared in the env-root scope.
+
+    Detection: any string that contains ``${`` AND references a known
+    source-context root identifier (`local.`, `var.`, `each.`,
+    `dependency.`) is replaced with a clean TODO marker. We lose the
+    suffix info (e.g., the `-pvt` in `${local.x}-pvt`) but keep the
+    surrounding HCL valid, which is the bigger win.
+    """
+    if isinstance(d, dict):
+        return {k: _clean_garbage_strings(v) for k, v in d.items()}
+    if isinstance(d, list):
+        return [_clean_garbage_strings(v) for v in d]
+    if isinstance(d, str):
+        if "${" in d and _looks_like_source_context_interp(d):
+            return "TODO-source-interpolation-needs-review"
+    return d
+
+
+def _looks_like_source_context_interp(s: str) -> bool:
+    """Heuristic: does the string contain an interpolation referencing a
+    root identifier that won't resolve in the AWS-target Terraform
+    scope? These are the markers our sanitizer would otherwise rewrite
+    into TODO-local-X / TODO-var-X / etc. — but by then the surrounding
+    ``${...}`` wrapping has already turned the value into broken HCL.
+    """
+    needles = (
+        "local.",
+        "var.",
+        "each.",
+        "dependency.",
+        # post-sanitizer signatures (in case this function is called
+        # after the sanitizer ran)
+        "TODO-local-",
+        "TODO_local_",
+        "TODO-var-",
+        "TODO-each-",
+        "TODO-dependency-",
+    )
+    return any(n in s for n in needles)
 
 
 def _render_hcl_value(v: Any, indent: int = 0) -> str:

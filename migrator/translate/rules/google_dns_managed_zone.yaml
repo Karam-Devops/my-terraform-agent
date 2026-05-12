@@ -28,17 +28,23 @@ description:   "GCP Cloud DNS managed zones → AWS Route 53 hosted zones."
 inputs:
   zones:
     for_each:
-      # Try each source key in order until non-empty match (covers the
-      # three input-shape variations seen in customer repos for the
-      # MAP pattern).
-      source: [managed_zones, zones, dns_zones]
+      # Source key fallbacks in priority order. Four customer patterns
+      # observed:
+      #   * managed_zones / zones / dns_zones — vanilla map shape
+      #     { "<zone_key>" = { dns_name, visibility, ... } }
+      #   * cloud_dns_config — DH observability stack uses a list
+      #     where each item has {name, domain, type, description, recordsets}
+      #     The engine's shape: map handles list-of-dicts via the item's
+      #     `name` field as the synthesized map key.
+      source: [managed_zones, zones, dns_zones, cloud_dns_config]
       shape: map
 
-      # SCALAR fallback (DH pattern). When none of the map sources yield
-      # a populated collection, synthesize a single-entry map using the
-      # top-level scalar fields. `managed_zone` becomes the map key;
-      # item_inputs are then evaluated against the top-level source args
-      # (so `from: domain` reads the scalar `domain` field).
+      # SCALAR fallback (DH cloud-dns pattern). When none of the
+      # collection sources yield a populated value, synthesize a
+      # single-entry map using the top-level scalar fields.
+      # `managed_zone` becomes the map key; item_inputs are evaluated
+      # against the top-level source args (so `from: domain` reads
+      # the scalar `domain` field).
       synthesize_when_empty:
         key_from: managed_zone
 
@@ -48,10 +54,11 @@ inputs:
           from: [dns_name, domain]
           transform: strip_suffix:.
 
-        # Visibility: public / private — lowercased so the module's
-        # for_each filter matches.
+        # Visibility — fallback to `type` for the cloud_dns_config
+        # shape where the field is named `type` (values: "private" |
+        # "public"). Lowercased so the module's for_each filter matches.
         visibility:
-          from: visibility
+          from: [visibility, type]
           transform: lowercase
           default: public
 

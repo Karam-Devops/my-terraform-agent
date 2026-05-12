@@ -58,6 +58,17 @@ class WiringRule:
     # tfvars or workspace inputs. Same idea as cross-stack outputs in
     # CloudFormation.
     cross_env_var: Optional[str] = None
+    # Name of the INPUT attribute on the provider module whose top-level
+    # keys correspond to this output. When set + convert="scalar_first",
+    # the rewriter emits `module.X.<output>["<key>"]` instead of
+    # `values(module.X.<output>)[0]`. The key is picked by name overlap
+    # with the consumer block.
+    # Example: VPC translator emits `vpcs = { "vpc_nfr_shared" = ..., }`
+    # AND `vpc_ids = { for k, v in aws_vpc.this : k => v.id }`, so the
+    # output keys ARE the input map keys. Setting provider_input_map=
+    # "vpcs" lets wiring resolve which specific VPC each consumer wants.
+    # When unset, falls back to values(...)[0] / values(...) wrapping.
+    provider_input_map: Optional[str] = None
 
 
 # The wiring table. Each entry is a (input_attribute) → (provider, output) edge.
@@ -65,14 +76,18 @@ class WiringRule:
 # convert to scalar (first entry) or list based on what the consumer expects.
 _WIRING_RULES: List[WiringRule] = [
     # ---- Networking (vpc → everywhere) ----
-    # vpc_id consumers expect scalar → pick first entry from the vpc_ids map.
-    # Operator can refine post-emission if env has multiple VPCs.
+    # vpc_id consumers expect scalar. provider_input_map="vpcs" tells
+    # the wiring layer to pick a specific key from the chosen VPC
+    # module's `vpcs` input (which becomes the `vpc_ids` output map),
+    # via consumer-name overlap. Emits module.X.vpc_ids["picked_key"]
+    # instead of the fragile values(...)[0].
     WiringRule(
         input_name="vpc_id",
         provider_service="vpc",
         provider_output="vpc_ids",
         todo_placeholder="vpc-TODO",
         convert="scalar_first",
+        provider_input_map="vpcs",
     ),
     WiringRule(
         input_name="vpc_id",
@@ -80,6 +95,7 @@ _WIRING_RULES: List[WiringRule] = [
         provider_output="vpc_ids",
         todo_placeholder="TODO-vpc-id",
         convert="scalar_first",
+        provider_input_map="vpcs",
     ),
     # subnet_ids consumers expect list(string) — vpc module's `subnet_ids`
     # is a map(string), so we wrap in values() to convert to list.
@@ -98,8 +114,8 @@ _WIRING_RULES: List[WiringRule] = [
         convert="list_values",
     ),
     # ---- ALB → ACM cert ----
-    # ssl_certificate_arn consumer expects a scalar → pick first cert.
-    # Multi-cert envs need operator refinement (pick the right key).
+    # Scalar consumer; pick the right cert by name overlap when the
+    # acm module has multiple certs in its `certificates` map.
     # cross_env_var fallback: when the env has an ALB but no ACM
     # module (e.g., DH's terarecon env where the cert lives in a
     # shared-infra env), substitute `var.ssl_certificate_arn` instead
@@ -111,31 +127,141 @@ _WIRING_RULES: List[WiringRule] = [
         todo_placeholder="TODO-acm-cert-arn",
         convert="scalar_first",
         cross_env_var="ssl_certificate_arn",
+        provider_input_map="certificates",
     ),
     # ---- EventBridge Scheduler → SNS topic ----
     # The scheduler translator writes `target_arn = "TODO-target-arn"`
     # per schedule entry; that's the exact placeholder we substitute.
-    # Each schedule in DH's repo gets a real SNS topic ARN once the
-    # sns-sqs-fanout module is also being emitted in the same env.
+    # When the env has multiple SNS modules, provider_input_map="topics"
+    # tells wiring to pick the topic whose name overlaps the consumer
+    # block (e.g., scheduler `dh_vm_automate_topic` → SNS module that
+    # has key `dh_vm_automate_topic` in its `topics` map).
     WiringRule(
         input_name="target_arn",
         provider_service="sns-sqs-fanout",
         provider_output="topic_arns",
         todo_placeholder="TODO-target-arn",
         convert="scalar_first",
+        provider_input_map="topics",
     ),
     # ---- EKS → KMS key for secrets (when not already in module) ----
     # (intentionally not auto-wired — EKS module creates its own KMS)
 ]
 
 
-def _convert_reference(module_ref: str, convert: str) -> str:
-    """Apply the conversion wrapper to a module.X.Y reference."""
+def _convert_reference(module_ref: str, convert: str, *,
+                       indexed_key: Optional[str] = None) -> str:
+    """Apply the conversion wrapper to a module.X.Y reference.
+
+    When ``indexed_key`` is given AND convert="scalar_first", emit a
+    named-key lookup `module.X.Y["key"]` (more legible + correct than
+    the fragile values()[0]). Without a key, fall back to values()[0].
+    """
     if convert == "scalar_first":
+        if indexed_key:
+            return f'{module_ref}["{indexed_key}"]'
         return f"values({module_ref})[0]"
     if convert == "list_values":
         return f"values({module_ref})"
     return module_ref
+
+
+def extract_top_level_map_keys(hcl: str, attr_name: str) -> List[str]:
+    """Find the top-level map keys inside `<attr_name> = { ... }`.
+
+    Walks the string character-by-character tracking brace depth so
+    nested maps don't get mis-identified as top-level keys. Returns
+    keys in source order. Handles both quoted ("vpc_dev_shared") and
+    bare identifier (vpc_dev_shared) key forms — translators emit both
+    depending on what's a valid HCL identifier.
+
+    Pure stdlib — no HCL parser dep, so it works on partial inputs
+    blocks (which is what we pass from the rendered translation).
+    """
+    keys: List[str] = []
+    # Find `<attr> = {` with optional whitespace flexibility.
+    # We search line-by-line so we don't match `something_else = {` that
+    # happens to end with our attr name.
+    pat = re.compile(rf'(?m)^\s*{re.escape(attr_name)}\s*=\s*\{{')
+    m = pat.search(hcl)
+    if not m:
+        return keys
+    start = m.end() - 1  # position of the opening brace
+    depth = 0
+    i = start
+    line_start = i + 1
+    n = len(hcl)
+    while i < n:
+        ch = hcl[i]
+        if ch == '{':
+            depth += 1
+            if depth == 1:
+                line_start = i + 1
+        elif ch == '}':
+            depth -= 1
+            if depth == 0:
+                # End of the attr's map block
+                break
+        elif ch == '\n' and depth == 1:
+            line = hcl[line_start:i]
+            line_start = i + 1
+            _maybe_capture_key(line, keys)
+        i += 1
+    # Capture a trailing key if there was no terminal newline
+    if depth >= 1:
+        line = hcl[line_start:i]
+        _maybe_capture_key(line, keys)
+    return keys
+
+
+def _maybe_capture_key(line: str, keys: List[str]) -> None:
+    """If ``line`` is a top-level `"key" = {...}` or `key = {...}`
+    entry, append the key. Skips blanks + comments + non-assignments."""
+    stripped = line.strip()
+    if not stripped or stripped.startswith('#'):
+        return
+    # Quoted key
+    if stripped.startswith('"'):
+        close = stripped.find('"', 1)
+        if close > 0:
+            after = stripped[close + 1:].lstrip()
+            if after.startswith('='):
+                keys.append(stripped[1:close])
+        return
+    # Bare identifier key — `name = { ... }`
+    eq = stripped.find('=')
+    if eq <= 0:
+        return
+    name = stripped[:eq].strip()
+    # Require name to be a valid HCL identifier (letters, digits, underscores)
+    if name and (name[0].isalpha() or name[0] == '_') and all(
+        c.isalnum() or c == '_' for c in name
+    ):
+        keys.append(name)
+
+
+def _pick_key_by_overlap(
+    candidates: List[str],
+    *,
+    consumer_block_name: Optional[str],
+) -> Optional[str]:
+    """Among a provider's output keys, pick the one whose name shares
+    the most tokens with the consumer's block name. Ties broken by
+    shorter key (less specialized). Returns None when ``candidates``
+    is empty.
+
+    Example: consumer `scheduler_dh_vm_automate` + candidates
+    [`dh_vm_automate_topic`, `dh_health_check`, `dh_billing`]
+    → picks `dh_vm_automate_topic` (shares `dh_vm_automate`).
+    """
+    if not candidates:
+        return None
+    if len(candidates) == 1 or not consumer_block_name:
+        return candidates[0]
+    return max(
+        candidates,
+        key=lambda k: (_shared_token_count(k, consumer_block_name), -len(k)),
+    )
 
 
 def _build_provider_lookup(
@@ -230,6 +356,7 @@ def rewrite_inputs(
     *,
     modules_in_env: List[Tuple[str, str]],
     consumer_block_name: Optional[str] = None,
+    provider_output_keys: Optional[Dict[str, Dict[str, List[str]]]] = None,
 ) -> str:
     """Apply cross-module wiring rewrites to a single module call's inputs.
 
@@ -275,7 +402,25 @@ def rewrite_inputs(
 
         if provider_block is not None:
             base_ref = f"module.{provider_block}.{rule.provider_output}"
-            replacement_ref = _convert_reference(base_ref, rule.convert)
+            # Named-key lookup when the rule declares which input map
+            # carries the output keys AND the emitter handed us the
+            # extracted keys for that map. Picks the key whose name
+            # shares the most tokens with the consumer block — handles
+            # the multi-VPC / multi-SNS-topic cases Kiro flagged.
+            indexed_key: Optional[str] = None
+            if (
+                rule.convert == "scalar_first"
+                and rule.provider_input_map
+                and provider_output_keys
+            ):
+                provider_maps = provider_output_keys.get(provider_block) or {}
+                candidate_keys = provider_maps.get(rule.provider_input_map) or []
+                indexed_key = _pick_key_by_overlap(
+                    candidate_keys, consumer_block_name=consumer_block_name,
+                )
+            replacement_ref = _convert_reference(
+                base_ref, rule.convert, indexed_key=indexed_key,
+            )
         elif rule.cross_env_var:
             # No in-env provider, but the rule has a cross-env fallback.
             # Emit a `var.X` reference and let the operator wire the

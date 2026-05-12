@@ -683,11 +683,20 @@ def _render_env_main_tf(
     #         to rewrite cross-module references (vpc_id, subnet_ids,
     #         ssl_certificate_arn, target_arn). Replaces TODOs with
     #         module.X.Y references where the provider module is in this env.
-    from .cross_module_wiring import rewrite_inputs as _wire_rewrite
+    from .cross_module_wiring import (
+        rewrite_inputs as _wire_rewrite,
+        extract_top_level_map_keys as _wire_extract_keys,
+        _WIRING_RULES as _wire_rules,
+    )
 
     used_names: Set[str] = set()
     per_resource: List[Dict[str, Any]] = []
     modules_in_env: List[tuple] = []   # [(block_name, service_name), ...]
+    # Per-block extracted output-map keys, used by the named-lookup
+    # wiring path. Shape: { block_name: { input_map_name: [keys...] } }
+    # Example: { "compute_network_vpc": { "vpcs": ["vpc_nfr_shared",
+    # "vpc_demo_shared", ...] } }. Populated in PASS 1, consumed in PASS 2.
+    provider_output_keys: Dict[str, Dict[str, List[str]]] = {}
 
     # ---- PASS 1: translate + assign block names ----
     for r in resources:
@@ -718,6 +727,24 @@ def _render_env_main_tf(
         # Record the (block_name, service_name) pair for the wiring pass.
         if has_translation:
             modules_in_env.append((block_name, translation.service_name))
+            # Extract output keys for any input maps the wiring layer
+            # cares about (e.g., vpc → "vpcs", sns-sqs-fanout →
+            # "topics", acm-certificate → "certificates"). These let
+            # wiring emit module.X.Y["key"] instead of values()[0].
+            input_maps_for_service = {
+                rule.provider_input_map
+                for rule in _wire_rules
+                if rule.provider_service == translation.service_name
+                and rule.provider_input_map
+            }
+            if input_maps_for_service:
+                provider_output_keys[block_name] = {}
+                for attr in input_maps_for_service:
+                    keys = _wire_extract_keys(
+                        translation.aws_inputs_hcl, attr,
+                    )
+                    if keys:
+                        provider_output_keys[block_name][attr] = keys
 
         per_resource.append({
             "resource":         r,
@@ -797,10 +824,14 @@ def _render_env_main_tf(
             # closest-named provider when there are multiple of the
             # same service in the env (DH's common-network has 8 VPC
             # modules — Kiro's review fix #5).
+            # provider_output_keys lets wiring emit named-key lookups
+            # `module.X.Y["specific_key"]` instead of values()[0] when
+            # the chosen provider has multiple output keys (Kiro v3 #2+#3).
             inputs_body = _wire_rewrite(
                 inputs_body,
                 modules_in_env=modules_in_env,
                 consumer_block_name=block_name,
+                provider_output_keys=provider_output_keys,
             )
             if inputs_body:
                 lines.append(inputs_body)
