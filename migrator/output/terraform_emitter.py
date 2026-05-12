@@ -88,6 +88,10 @@ _TF_NORMALIZE: Dict[str, tuple] = {
     # single-cluster (gke_cluster_name from resource.name).
     "google_container_cluster":               ("gke_cluster_name", "dict_single"),
     "google_container_node_pool":             ("nodepool_config", "list"),
+    # FCR v3 Week 2 ALB (2026-05-12)
+    "google_compute_global_forwarding_rule":  ("forwarding_rules", "list"),
+    "google_compute_forwarding_rule":         ("forwarding_rules", "list"),
+    "google_compute_backend_service":         ("lb_config", "dict_single"),
 }
 
 

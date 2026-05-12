@@ -38,6 +38,7 @@ from migrator.results import DiscoveredResource
 
 from . import (
     acm,
+    alb,
     aurora_postgres,
     ec2,
     ecr,
@@ -87,6 +88,12 @@ TRANSLATORS = {
     # Week 2 FCR v3 expansion (added 2026-05-11)
     "google_container_cluster":                  eks,
     "google_container_node_pool":                eks,
+    # Week 2 FCR v3 ALB (added 2026-05-12)
+    "google_compute_global_forwarding_rule":     alb,
+    "google_compute_forwarding_rule":            alb,
+    "google_compute_target_https_proxy":         alb,
+    "google_compute_url_map":                    alb,
+    "google_compute_backend_service":            alb,
 }
 
 
@@ -146,7 +153,7 @@ def all_aws_module_specs() -> List[AWSModuleSpec]:
         # Tier 2 expansion
         waf, log_sink, eventbridge_scheduler,
         # FCR v3 Week 2 expansion
-        eks, aurora_postgres,
+        eks, aurora_postgres, alb,
     )
     for mod in all_modules:
         spec = mod.aws_module_spec()
