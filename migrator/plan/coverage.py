@@ -572,6 +572,10 @@ _MANUAL_REVIEW_TYPES = {
     "google_project_data_source":
         "Cross-project data source for reading project_number / project_id from another project. AWS equivalent: `data \"aws_caller_identity\"` or `data \"aws_organizations_organization\"`. Often unnecessary in AWS — resources don't reference parent account by number.",
 
+    # SQL import jobs (one-off data loads against an existing DB)
+    "google_sql_import_job":
+        "One-off Cloud SQL data import (not a database resource). AWS equivalent: AWS DMS migration task OR psql/mysql client invocation post-cluster-create. Not auto-translatable — operator runs the import after the target DB exists.",
+
     # 3rd-party providers — not GCP or AWS resources at all
     "auth0_provider":
         "Auth0 SaaS — keep using the Auth0 provider in AWS as well, OR migrate to AWS Cognito (architectural decision; user pools + identity pools rewrite).",

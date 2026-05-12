@@ -43,6 +43,7 @@ import os
 import re
 import shutil
 import subprocess
+from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Set
 
 from migrator.results import ConfidenceFinding, DiscoveredResource
@@ -861,14 +862,87 @@ def _render_env_main_tf(
 # Description text for each known cross-env variable. Keeps the
 # generated variables.tf self-documenting so operators understand
 # why a `var.X` placeholder exists and how to wire it.
-_CROSS_ENV_VAR_DESCRIPTIONS: Dict[str, str] = {
-    "ssl_certificate_arn": (
-        "ACM certificate ARN for ALB listeners. Set in this env's "
-        "tfvars when the cert is provisioned in a different env "
-        "(e.g., a shared 'certificate-manager' env) — Migrator emits "
-        "this placeholder when no in-env ACM module is available to "
-        "wire automatically."
+@dataclass(frozen=True)
+class _CrossEnvVarSpec:
+    """Type + default + description for a cross-env variable.
+
+    The wiring layer emits `var.<name>` references; this struct lets
+    variables.tf declare each one with the right Terraform type so
+    `terraform validate` stays green. e.g., subnet_ids needs
+    `list(string)`, not the default `string`.
+    """
+    type:         str
+    default_hcl:  str   # raw HCL literal (used verbatim in `default = ...`)
+    description:  str
+
+
+_CROSS_ENV_VAR_SPECS: Dict[str, _CrossEnvVarSpec] = {
+    "ssl_certificate_arn": _CrossEnvVarSpec(
+        type="string",
+        default_hcl='"TODO-supply-ssl_certificate_arn"',
+        description=(
+            "ACM certificate ARN for ALB listeners. Set in this env's "
+            "tfvars when the cert is provisioned in a different env "
+            "(e.g., a shared 'certificate-manager' env) — Migrator emits "
+            "this placeholder when no in-env ACM module is available to "
+            "wire automatically."
+        ),
     ),
+    "vpc_id": _CrossEnvVarSpec(
+        type="string",
+        default_hcl='"TODO-supply-vpc_id"',
+        description=(
+            "VPC ID. Required when this env's consumers (EC2 / EKS / ALB / "
+            "RDS / etc.) live in a SHARED VPC defined in a different env "
+            "(common pattern for satellite envs like DH's terarecon). "
+            "Supply via tfvars or remote_state lookup of the shared VPC env's outputs."
+        ),
+    ),
+    "subnet_ids": _CrossEnvVarSpec(
+        type="list(string)",
+        default_hcl="[]",   # empty list keeps validate green; tfvars overrides
+        description=(
+            "List of subnet IDs in the shared VPC. Required when this env "
+            "uses a cross-env VPC (see vpc_id description). Supply as a "
+            "list of subnet IDs via tfvars or remote_state lookup."
+        ),
+    ),
+    "public_subnet_ids": _CrossEnvVarSpec(
+        type="list(string)",
+        default_hcl="[]",
+        description=(
+            "Public subnet IDs for NAT Gateway placement (one per AZ for "
+            "HA). The VPC module doesn't tag subnets as public vs private "
+            "yet, so the operator supplies these explicitly via tfvars. "
+            "Empty list disables the NAT Gateway."
+        ),
+    ),
+    "private_subnet_route_table_ids": _CrossEnvVarSpec(
+        type="list(string)",
+        default_hcl="[]",
+        description=(
+            "Private subnet route table IDs that should egress via the "
+            "NAT Gateway. Order must match public_subnet_ids. Without "
+            "this the NAT Gateway is created but private resources have "
+            "no egress route through it."
+        ),
+    ),
+    "query_results_bucket": _CrossEnvVarSpec(
+        type="string",
+        default_hcl='"TODO-supply-athena-query-results-bucket"',
+        description=(
+            "S3 bucket NAME (not ARN) that Athena writes query results to. "
+            "Wired automatically to the first emitted S3 bucket when this "
+            "env has an s3-bucket module; otherwise supplied here for "
+            "operators to set via tfvars."
+        ),
+    ),
+}
+
+# Legacy alias — kept for the _scan_cross_env_vars iteration path. Maps
+# var name → human description so existing callers keep working.
+_CROSS_ENV_VAR_DESCRIPTIONS: Dict[str, str] = {
+    name: spec.description for name, spec in _CROSS_ENV_VAR_SPECS.items()
 }
 
 
@@ -916,14 +990,26 @@ def _render_env_variables_tf(
         "}\n"
     ]
     for v in cross_env_vars or []:
-        desc = _CROSS_ENV_VAR_DESCRIPTIONS.get(v, "Cross-env reference.")
-        # Single-quoted heredoc keeps quotes inside the description intact.
+        spec = _CROSS_ENV_VAR_SPECS.get(v)
+        if spec is None:
+            # Fallback for any cross-env var not in the spec table —
+            # default to string so terraform validate doesn't bomb on
+            # type mismatch.
+            parts.append(
+                "\n"
+                f'variable "{v}" {{\n'
+                "  type        = string\n"
+                f'  description = "Cross-env reference."\n'
+                f'  default     = "TODO-supply-{v}"\n'
+                "}\n"
+            )
+            continue
         parts.append(
             "\n"
             f'variable "{v}" {{\n'
-            "  type        = string\n"
-            f'  description = "{desc}"\n'
-            f'  default     = "TODO-supply-{v}"\n'
+            f"  type        = {spec.type}\n"
+            f'  description = "{spec.description}"\n'
+            f'  default     = {spec.default_hcl}\n'
             "}\n"
         )
     return "".join(parts)

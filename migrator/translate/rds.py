@@ -111,9 +111,15 @@ def translate(
     notes: List[str] = []
 
     # The customer's input shape varies. Try the common keys.
+    # DH-customer pattern: `cloudsql_instances = [{name=..., tier=..., ...}, ...]`
+    # Vanilla GCP module: `sql_config = {name=..., ...}` (single dict)
+    # Some forks: `database_instance` / `sql_instances` / `instances`
     sql_config = (args.get("sql_config")
                   or args.get("cloudsql_config")
                   or args.get("database_instance")
+                  or args.get("cloudsql_instances")
+                  or args.get("sql_instances")
+                  or args.get("instances")
                   or {})
 
     # ---- Aurora dispatch ----

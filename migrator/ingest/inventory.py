@@ -284,7 +284,14 @@ _INFER_RULES = (
     ("cloud-sql",                      "google_sql_database_instance"),
     ("sql-database-instance",          "google_sql_database_instance"),
     ("sql-old-module",                 "google_sql_database_instance"),
-    ("sql-import-data",                "google_sql_database_instance"),
+    # sql-import-data is a one-off DATA IMPORT job that runs against an
+    # existing Cloud SQL instance — NOT a database resource itself. Map
+    # to a synthetic MANUAL_REVIEW type so the Aurora translator doesn't
+    # fire on it (was producing TODO_cluster_name placeholders). AWS
+    # equivalent: AWS DMS migration task OR aws_db_instance_role
+    # (operator runs data load via psql/mysql client).
+    ("sql-import-data",                "google_sql_import_job"),
+    ("sql-import",                     "google_sql_import_job"),
     ("postgres",                       "google_sql_database_instance"),
     ("mysql",                          "google_sql_database_instance"),
     # Bare `sql` catch-all — must come AFTER more specific patterns

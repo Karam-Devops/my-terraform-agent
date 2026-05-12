@@ -95,6 +95,11 @@ _WIRING_RULES: List[WiringRule] = [
     # module's `vpcs` input (which becomes the `vpc_ids` output map),
     # via consumer-name overlap. Emits module.X.vpc_ids["picked_key"]
     # instead of the fragile values(...)[0].
+    #
+    # cross_env_var fallback: when the env has consumers needing a VPC
+    # but no in-env VPC module (DH's terarecon env uses a shared VPC
+    # from common-network), emit `var.vpc_id` so operators can supply
+    # via tfvars instead of leaving the bare TODO.
     WiringRule(
         input_name="vpc_id",
         provider_service="vpc",
@@ -102,6 +107,7 @@ _WIRING_RULES: List[WiringRule] = [
         todo_placeholder="vpc-TODO",
         convert="scalar_first",
         provider_input_map="vpcs",
+        cross_env_var="vpc_id",
     ),
     WiringRule(
         input_name="vpc_id",
@@ -110,15 +116,18 @@ _WIRING_RULES: List[WiringRule] = [
         todo_placeholder="TODO-vpc-id",
         convert="scalar_first",
         provider_input_map="vpcs",
+        cross_env_var="vpc_id",
     ),
     # subnet_ids consumers expect list(string) — vpc module's `subnet_ids`
     # is a map(string), so we wrap in values() to convert to list.
+    # cross_env_var fallback: `var.subnet_ids` for cross-env consumers.
     WiringRule(
         input_name="subnet_ids",
         provider_service="vpc",
         provider_output="subnet_ids",
         todo_placeholder="",   # subnet_ids = [] is the placeholder shape
         convert="list_values",
+        cross_env_var="subnet_ids",
     ),
     WiringRule(
         input_name="subnet_ids",
@@ -126,6 +135,36 @@ _WIRING_RULES: List[WiringRule] = [
         provider_output="subnet_ids",
         todo_placeholder="",
         convert="list_values",
+        cross_env_var="subnet_ids",
+    ),
+    # NAT Gateway expects public_subnet_ids (one per AZ for HA) AND
+    # private_subnet_route_table_ids (for the 0.0.0.0/0 egress route).
+    # The VPC translator emits flat subnet IDs but doesn't tag them
+    # public vs private — wiring ALL subnet IDs as `public_subnet_ids`
+    # would be architecturally wrong (NAT GWs MUST be in public subnets
+    # only). Same with route tables: VPC module emits subnets but
+    # doesn't auto-create route tables yet.
+    # → Both fall through to the cross_env_var path: emit `var.X` with
+    #   sensible list defaults so operators supply them per-env via
+    #   tfvars. Kiro v6 review acknowledged.
+    # The non-cross-env-var "vpc" provider lookup is intentionally
+    # absent — even if VPC is in this env, we don't have a way to know
+    # which subnets are public.
+    WiringRule(
+        input_name="public_subnet_ids",
+        provider_service="__not_a_real_service__",   # sentinel: never matches
+        provider_output="subnet_ids",
+        todo_placeholder="",
+        convert="list_values",
+        cross_env_var="public_subnet_ids",
+    ),
+    WiringRule(
+        input_name="private_subnet_route_table_ids",
+        provider_service="__not_a_real_service__",   # sentinel: never matches
+        provider_output="private_route_table_ids",
+        todo_placeholder="",
+        convert="list_values",
+        cross_env_var="private_subnet_route_table_ids",
     ),
     # ---- ALB → ACM cert ----
     # Scalar consumer; pick the right cert by name overlap when the
@@ -142,6 +181,23 @@ _WIRING_RULES: List[WiringRule] = [
         convert="scalar_first",
         cross_env_var="ssl_certificate_arn",
         provider_input_map="certificates",
+    ),
+    # ---- Athena → S3 (query results bucket) ----
+    # Athena workgroup needs an S3 bucket to write query results to.
+    # The translator emits `query_results_bucket = "TODO-athena-query-
+    # results-bucket"` since BigQuery doesn't have an equivalent concept;
+    # wire to an in-env S3 module's first bucket name OR fall back to
+    # `var.query_results_bucket` for cross-env BYO.
+    # convert="raw" because Athena expects a bare bucket NAME (string)
+    # not an ARN — and the module output is the bucket name string map.
+    WiringRule(
+        input_name="query_results_bucket",
+        provider_service="s3-bucket",
+        provider_output="bucket_ids",
+        todo_placeholder="TODO-athena-query-results-bucket",
+        convert="scalar_first",
+        provider_input_map="buckets",
+        cross_env_var="query_results_bucket",
     ),
     # ---- EventBridge Scheduler → SNS topic ----
     # Scheduler module blocks bundle MANY schedules, each with its own

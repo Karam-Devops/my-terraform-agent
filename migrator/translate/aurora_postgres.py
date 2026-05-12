@@ -110,9 +110,17 @@ def translate(
     notes: List[str] = []
 
     # Reuse rds.py's input extraction by accepting the same shapes.
+    # Customer source key varies — collect from any of the known names
+    # (DH uses `cloudsql_instances` as a list-of-dicts; vanilla GCP
+    # modules tend to use `sql_config` as a single dict). The empty
+    # dict fallback at the end ensures we still emit a single placeholder
+    # rather than skipping the resource entirely.
     sql_config = (args.get("sql_config")
                   or args.get("cloudsql_config")
                   or args.get("database_instance")
+                  or args.get("cloudsql_instances")
+                  or args.get("sql_instances")
+                  or args.get("instances")
                   or {})
 
     if isinstance(sql_config, dict):
@@ -229,11 +237,48 @@ def translate(
 def _render_clusters(specs: list) -> str:
     if not specs:
         return "{}"
+    import re as _re
     lines = ["{"]
     for s in specs:
-        key = s["name"].replace("-", "_").replace(".", "_")
+        # Cluster map key must be a stable, identifier-safe string.
+        # Source names often have interpolation like
+        # `dh-digitalform-${local.env}-pg-sql`. Strip the entire
+        # ${...} chunk for the key (the env-suffix is environment-
+        # specific anyway and gets baked in by the wider per-env
+        # emission), keep the static parts so multiple clusters in
+        # one stack get distinct keys.
+        raw_name = s["name"]
+        key_src = _re.sub(r"\$\{[^}]*\}", "", str(raw_name))
+        key = _re.sub(r"[^A-Za-z0-9_]+", "_", key_src).strip("_")
+        if not key:
+            # Fully-interpolated source name (rare) — use the index
+            # to keep keys distinct across multiple instances.
+            key = f"cluster_{len(lines)}"
+        if key[0].isdigit():
+            key = "_" + key
+        # Cluster name (the actual aws_rds_cluster.cluster_identifier).
+        # Substitute the GCP source-context locals with the env-root
+        # variable that DOES exist in the target Terraform scope. This
+        # turns `dh-digitalform-${local.env}-pg-sql` (broken in AWS
+        # scope) into `dh-digitalform-${local.environment}-pg-sql`
+        # (the env-root locals block defines `environment`).
+        cluster_name = _re.sub(
+            r"\$\{local\._project\.locals\.env\}",
+            "${local.environment}", str(s["name"]),
+        )
+        cluster_name = _re.sub(
+            r"\$\{local\.env\}",
+            "${local.environment}", cluster_name,
+        )
+        # Any remaining `${...}` that wasn't substituted is broken in
+        # AWS scope — replace with a marker so terraform fmt stays clean
+        # and the operator sees an unresolvable piece.
+        cluster_name = _re.sub(
+            r"\$\{[^}]*\}",
+            "TODO-RESOLVE", cluster_name,
+        )
         lines.append(f'    "{key}" = {{')
-        lines.append(f'      name                = "{s["name"]}"')
+        lines.append(f'      name                = "{cluster_name}"')
         lines.append(f'      engine_version      = "{s["engine_version"]}"   # was {s["_source_version"]}')
         lines.append(f'      instance_class      = "{s["instance_class"]}"   # cluster instance class (r-family preferred)')
         lines.append(f'      reader_count        = {s["reader_count"]}                       # was GCP availability={s["_source_availability"]}')
