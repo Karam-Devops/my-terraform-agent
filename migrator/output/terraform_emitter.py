@@ -313,6 +313,17 @@ def _normalize_terraform_resource_args(resource: DiscoveredResource) -> Dict:
     if shape == "dict":
         return {key: {resource.name: dict(args)}}
     if shape == "dict_single":
+        # Special case: EKS translator's Pattern A expects
+        # `gke_cluster_name` to be a STRING (the cluster's name), with
+        # vpc_config / nodepool_config / etc. at the SAME top level.
+        # Generic dict_single wrapping puts the whole args under the
+        # key as a DICT — wrong shape for eks. Caught by the plain-TF
+        # audit (#2). Detect by key name + extract args["name"] as
+        # the string value, preserve other fields at top level.
+        if key == "gke_cluster_name":
+            cluster_name = str(args.get("name") or resource.name)
+            other_args = {k: v for k, v in args.items() if k != "name"}
+            return {key: cluster_name, **other_args}
         return {key: dict(args)}
     return args
 
