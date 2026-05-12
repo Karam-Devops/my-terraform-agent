@@ -36,6 +36,16 @@ local_substitutions:
   "${local.secondary_region_suffix}": "us-east-1"
   "${local.prefix}":                  "dh"   # DH's org-wide resource prefix
 
+  # Per-stack alias locals — many DH stacks define `local.env =
+  # local._env_configs.locals.env` then use `${local.env}` inline.
+  # Same substitution as the canonical form.
+  "${local.env}":         "${local.environment}"
+  "${local.environment}": "${local.environment}"   # passthrough (avoid TODO replacement)
+  "${local.region}":      "${local.region}"        # passthrough
+  "${local.account_id}":  "${local.account_id}"    # passthrough
+  # `local._project.locals.env` is a less-common direct nested form
+  "${local._project.locals.env}": "${local.environment}"
+
 metadata:
   name:         "dh"
   display_name: "DH"   # how the UI shows this profile (case-sensitive label)

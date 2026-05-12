@@ -198,16 +198,24 @@ def _sanitize_translation(text: str, customer_profile: str = "default") -> str:
 
     # Step 2a: var.X — never resolves at env root unless it's a var we
     # add to env variables.tf. We don't, so always replace with TODO.
-    out = _VAR_INTERP_RE.sub(lambda m: f'${{"TODO-var-{m.group(1)}"}}', out)
+    # The interpolation form `${var.X}` is replaced with the BARE
+    # TODO marker (no surrounding `${...}`) so we don't create the
+    # `${"TODO-var-X"}` antipattern Kiro flagged in v7 — that's a
+    # string-literal-interpolation, syntactically valid but produces
+    # broken map keys + meaningless reference values.
+    out = _VAR_INTERP_RE.sub(lambda m: f'TODO-var-{m.group(1)}', out)
     out = _VAR_BARE_RE.sub(lambda m: f'"TODO-var-{m.group(1)}"', out)
 
     # Step 2b: local.X — preserve known locals; TODO unknown ones.
+    # Same fix: emit bare `TODO-local-X` inside the surrounding string
+    # rather than `${"TODO-local-X"}` which (a) is ugly and (b) breaks
+    # when used as a map key (Kiro v7 fix #3+#5).
     def _local_interp_sub(m):
         ref = m.group(1)
         if _is_known_local(ref):
             return m.group(0)
         slug = ref.replace(".", "-")
-        return f'${{"TODO-{slug}"}}'
+        return f'TODO-{slug}'
 
     def _local_bare_sub(m):
         ref = m.group(1)
@@ -223,18 +231,21 @@ def _sanitize_translation(text: str, customer_profile: str = "default") -> str:
     # We can't recover the original attribute-path structure from a
     # mangled identifier (`local_primary_region_suffix` could have been
     # `local.primary_region_suffix` OR `local.primary.region.suffix`),
-    # so always TODO-replace.
+    # so always TODO-replace. Bare form (no `${}` wrapper) for same
+    # reason as above — keeps map keys clean.
     def _local_mangled_sub(m):
         slug = m.group(1).replace("_", "-")
-        return f'${{"TODO-local-{slug}"}}'
+        return f'TODO-local-{slug}'
     out = _LOCAL_MANGLED_INTERP_RE.sub(_local_mangled_sub, out)
 
     # Step 2c: each.X — never resolves at env root.
+    # Bare-form replacement (no `${}` wrapper) for same Kiro v7 reason —
+    # keeps map keys + string values clean.
     def _each_interp_sub(m):
         kind = m.group(1)
         suffix = (m.group(2) or "").lstrip(".")
         slug = f"each-{kind}" + (f"-{suffix.replace('.', '-')}" if suffix else "")
-        return f'${{"TODO-{slug}"}}'
+        return f'TODO-{slug}'
 
     def _each_bare_sub(m):
         kind = m.group(1)
@@ -250,15 +261,16 @@ def _sanitize_translation(text: str, customer_profile: str = "default") -> str:
         kind = m.group(1)
         suffix = (m.group(2) or "").lstrip("_")
         slug = f"each-{kind}" + (f"-{suffix.replace('_', '-')}" if suffix else "")
-        return f'${{"TODO-{slug}"}}'
+        return f'TODO-{slug}'
     out = _EACH_MANGLED_INTERP_RE.sub(_each_mangled_sub, out)
 
     # Step 2d: dependency.X — Terragrunt-only references to other stacks'
     # outputs. No analog in vanilla Terraform target mode; replace with
     # TODO placeholders so terraform validate doesn't error. Operator
     # will wire to module outputs during the manual review pass.
-    out = _DEPENDENCY_INTERP_RE.sub(lambda m: '${"TODO-dependency-ref"}', out)
-    out = _DEPENDENCY_MANGLED_INTERP_RE.sub(lambda m: '${"TODO-dependency-ref"}', out)
+    # Interpolation form: bare replacement keeps strings + map keys clean.
+    out = _DEPENDENCY_INTERP_RE.sub(lambda m: 'TODO-dependency-ref', out)
+    out = _DEPENDENCY_MANGLED_INTERP_RE.sub(lambda m: 'TODO-dependency-ref', out)
     out = _DEPENDENCY_BARE_RE.sub(lambda m: '"TODO-dependency-ref"', out)
 
     return out
@@ -548,12 +560,22 @@ def emit_terraform_skeleton(
         # workspace inputs.
         cross_env_vars_used = _scan_cross_env_vars(main_tf)
 
+        # Service modules emitted in this env — drives versions.tf
+        # provider-required block (Kiro v7 fix #1: aurora uses random,
+        # eks uses tls + random). Scan the rendered main.tf for
+        # `source = "../../modules/<svc>/"` references to find which
+        # service modules this env consumes. Cheap one-pass regex.
+        services_in_env = sorted(set(re.findall(
+            r'source\s*=\s*"\.\./\.\./modules/([^/"]+)/?"',
+            main_tf,
+        )))
+
         for fname, content in (
             ("variables.tf", _render_env_variables_tf(aws_region, cross_env_vars_used)),
             ("outputs.tf",   _render_env_outputs_tf()),
             ("providers.tf", _render_env_providers_tf()),
             ("backend.tf",   _render_env_backend_tf(root_name)),
-            ("versions.tf",  _render_env_versions_tf()),
+            ("versions.tf",  _render_env_versions_tf(services_in_env)),
         ):
             full = os.path.join(env_dir, fname)
             _write_text(full, content)
@@ -991,16 +1013,20 @@ def _render_env_variables_tf(
     ]
     for v in cross_env_vars or []:
         spec = _CROSS_ENV_VAR_SPECS.get(v)
+        # Critical design choice (Kiro v7 fix #4+#6+#7): cross-env
+        # variables are declared `nullable = false` with NO default.
+        # That makes them REQUIRED — terraform plan fails with a clear
+        # "variable X is required" error if the operator hasn't supplied
+        # one. The earlier "default = TODO-supply-X" pattern passed
+        # validate but produced literal-TODO values at apply time, which
+        # then failed at the AWS API call with cryptic errors.
         if spec is None:
-            # Fallback for any cross-env var not in the spec table —
-            # default to string so terraform validate doesn't bomb on
-            # type mismatch.
             parts.append(
                 "\n"
                 f'variable "{v}" {{\n'
                 "  type        = string\n"
-                f'  description = "Cross-env reference."\n'
-                f'  default     = "TODO-supply-{v}"\n'
+                f'  description = "Cross-env reference. Must be supplied via tfvars or -var."\n'
+                f"  nullable    = false\n"
                 "}\n"
             )
             continue
@@ -1009,7 +1035,7 @@ def _render_env_variables_tf(
             f'variable "{v}" {{\n'
             f"  type        = {spec.type}\n"
             f'  description = "{spec.description}"\n'
-            f'  default     = {spec.default_hcl}\n'
+            f"  nullable    = false\n"
             "}\n"
         )
     return "".join(parts)
@@ -1050,15 +1076,63 @@ def _render_env_backend_tf(env_name: str) -> str:
     )
 
 
-def _render_env_versions_tf() -> str:
-    return (
-        "terraform {\n"
-        '  required_version = ">= 1.5.0, < 2.0.0"\n'
-        "  required_providers {\n"
+# Per-service set of NON-aws providers that the module body uses.
+# When any of these services is emitted in an env, the matching
+# providers MUST be declared in the env-root versions.tf otherwise
+# `terraform init` fails with "provider not found".
+# Kiro v7 review caught this: aurora-postgres uses `resource
+# "random_password"` (hashicorp/random) and eks-cluster uses
+# `data "tls_certificate"` (hashicorp/tls).
+_EXTRA_PROVIDERS_BY_SERVICE: Dict[str, tuple] = {
+    "aurora-postgres":  ("random",),
+    "eks-cluster":      ("tls", "random"),
+    # add new entries here whenever a module body adopts a non-aws provider
+}
+
+_PROVIDER_BLOCK = {
+    "random": (
+        '    random = {\n'
+        '      source  = "hashicorp/random"\n'
+        '      version = "~> 3.6"\n'
+        '    }\n'
+    ),
+    "tls": (
+        '    tls = {\n'
+        '      source  = "hashicorp/tls"\n'
+        '      version = "~> 4.0"\n'
+        '    }\n'
+    ),
+}
+
+
+def _render_env_versions_tf(
+    services_used: Optional[List[str]] = None,
+) -> str:
+    """Render the env-root versions.tf.
+
+    Always includes `aws`. When the env emits modules requiring extra
+    providers (random/tls for aurora/eks), declare those too so
+    terraform init succeeds.
+    """
+    needed: Set[str] = set()
+    for svc in services_used or []:
+        for p in _EXTRA_PROVIDERS_BY_SERVICE.get(svc, ()):
+            needed.add(p)
+
+    providers = (
         "    aws = {\n"
         '      source  = "hashicorp/aws"\n'
         '      version = "~> 5.20"\n'
         "    }\n"
+    )
+    for p in sorted(needed):
+        providers += _PROVIDER_BLOCK[p]
+
+    return (
+        "terraform {\n"
+        '  required_version = ">= 1.5.0, < 2.0.0"\n'
+        "  required_providers {\n"
+        f"{providers}"
         "  }\n"
         "}\n"
     )

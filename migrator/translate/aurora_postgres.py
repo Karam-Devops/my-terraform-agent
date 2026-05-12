@@ -256,27 +256,19 @@ def _render_clusters(specs: list) -> str:
             key = f"cluster_{len(lines)}"
         if key[0].isdigit():
             key = "_" + key
-        # Cluster name (the actual aws_rds_cluster.cluster_identifier).
-        # Substitute the GCP source-context locals with the env-root
-        # variable that DOES exist in the target Terraform scope. This
-        # turns `dh-digitalform-${local.env}-pg-sql` (broken in AWS
-        # scope) into `dh-digitalform-${local.environment}-pg-sql`
-        # (the env-root locals block defines `environment`).
-        cluster_name = _re.sub(
-            r"\$\{local\._project\.locals\.env\}",
-            "${local.environment}", str(s["name"]),
-        )
-        cluster_name = _re.sub(
-            r"\$\{local\.env\}",
-            "${local.environment}", cluster_name,
-        )
-        # Any remaining `${...}` that wasn't substituted is broken in
-        # AWS scope — replace with a marker so terraform fmt stays clean
-        # and the operator sees an unresolvable piece.
-        cluster_name = _re.sub(
-            r"\$\{[^}]*\}",
-            "TODO-RESOLVE", cluster_name,
-        )
+        # Cluster name — pass through the source `name` as-is. The
+        # customer-profile substitutions (run in _sanitize_translation
+        # after the translator emits) already handle the common DH
+        # interpolation patterns: ${local.env}, ${local._project.locals.env},
+        # ${local.prefix}, etc. The mangled-alias generator in the
+        # profile loader extends coverage to python-hcl2's underscore-
+        # mangled forms. Anything that survives both is genuinely
+        # operator-action.
+        # Previous approach replaced unsubstituted ${...} with literal
+        # "TODO-RESOLVE" — which then became part of the cluster's
+        # actual aws_rds_cluster.cluster_identifier, breaking the
+        # endpoint URL. Kiro v7 fix #2.
+        cluster_name = str(s["name"])
         lines.append(f'    "{key}" = {{')
         lines.append(f'      name                = "{cluster_name}"')
         lines.append(f'      engine_version      = "{s["engine_version"]}"   # was {s["_source_version"]}')

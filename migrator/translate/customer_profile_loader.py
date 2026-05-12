@@ -80,6 +80,28 @@ def get_substitutions(customer_profile: str = "default") -> Tuple[Tuple[str, str
         for k, v in (customer_data.get("local_substitutions") or {}).items():
             merged_subs[k] = v  # customer overrides default
 
+    # Auto-generate python-hcl2 mangled aliases. python-hcl2 sometimes
+    # parses `${local.foo.bar}` and re-emits it as `${local_foo_bar}`
+    # (dots → underscores) when the value flows through dict-key context
+    # or other quirky paths. The customer-profile YAML uses the dotted
+    # form, but the rendered HCL we sanitize often has the mangled form.
+    # For each `${local.foo.bar}` → X mapping, also register
+    # `${local_foo_bar}` → X.
+    # Kiro v7 fix #2 + #3 root-cause: without this, mangled forms
+    # fall through to the LOCAL_MANGLED_INTERP_RE catch-all which
+    # produces broken `${"TODO-local-X"}` map keys.
+    mangled_subs: Dict[str, str] = {}
+    for src, dst in merged_subs.items():
+        # Only handle `${local.X.Y}` and `${var.X.Y}` interpolation forms
+        if src.startswith("${") and src.endswith("}"):
+            inner = src[2:-1]
+            if inner.startswith(("local.", "var.")):
+                mangled = inner.replace(".", "_")
+                mangled_subs[f"${{{mangled}}}"] = dst
+    # Apply mangled subs without overriding any explicit profile entry.
+    for k, v in mangled_subs.items():
+        merged_subs.setdefault(k, v)
+
     # Sort by source-ref length descending (longer keys check first).
     sorted_pairs = sorted(merged_subs.items(), key=lambda kv: -len(kv[0]))
     return tuple(sorted_pairs)
