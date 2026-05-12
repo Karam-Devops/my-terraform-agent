@@ -43,7 +43,7 @@ import os
 import re
 import shutil
 import subprocess
-from typing import Dict, List, Optional, Set
+from typing import Any, Dict, List, Optional, Set
 
 from migrator.results import ConfidenceFinding, DiscoveredResource
 from migrator.translate import all_aws_module_specs, translate_resource
@@ -620,21 +620,26 @@ def _render_env_main_tf(
     lines.append("}")
     lines.append("")
 
-    # Track block-name uniqueness within this file.
-    used_names: Set[str] = set()
+    # Two-pass strategy for cross-module wiring:
+    # PASS 1: translate every resource → collect (block_name, service_name)
+    #         pairs and stash the per-resource translation output.
+    # PASS 2: render each module call, using the FULL set of services-in-env
+    #         to rewrite cross-module references (vpc_id, subnet_ids,
+    #         ssl_certificate_arn, target_arn). Replaces TODOs with
+    #         module.X.Y references where the provider module is in this env.
+    from .cross_module_wiring import rewrite_inputs as _wire_rewrite
 
+    used_names: Set[str] = set()
+    per_resource: List[Dict[str, Any]] = []
+    modules_in_env: List[tuple] = []   # [(block_name, service_name), ...]
+
+    # ---- PASS 1: translate + assign block names ----
     for r in resources:
         conf = confidence_by_addr.get(r.address) or confidence_by_type.get(r.tf_type)
         translation = _translate_terraform_resource(
             r, source_iac=source_iac, compliance_profile=compliance_profile,
         )
 
-        # Detect translator-exception stubs: the translate_resource()
-        # wrapper returns a Translation with notes starting with
-        # "translate-error:" when the per-type translator threw. The
-        # aws_inputs_hcl in that case is empty/marker-only, so emitting
-        # it as a live module call breaks `terraform validate` on
-        # required-input checks. Downgrade to scaffold-only.
         translation_errored = (
             translation is not None
             and translation.notes
@@ -646,7 +651,6 @@ def _render_env_main_tf(
             and not translation_errored
         )
 
-        # De-duplicate across (module_path, name) collisions.
         base_name = _safe_identifier(f"{r.tf_type.replace('google_', '')}_{r.name}")
         block_name = base_name
         counter = 1
@@ -654,6 +658,26 @@ def _render_env_main_tf(
             counter += 1
             block_name = f"{base_name}_{counter}"
         used_names.add(block_name)
+
+        # Record the (block_name, service_name) pair for the wiring pass.
+        if has_translation:
+            modules_in_env.append((block_name, translation.service_name))
+
+        per_resource.append({
+            "resource":         r,
+            "conf":             conf,
+            "translation":      translation,
+            "block_name":       block_name,
+            "has_translation":  has_translation,
+        })
+
+    # ---- PASS 2: render with cross-module wiring applied ----
+    for entry in per_resource:
+        r          = entry["resource"]
+        conf       = entry["conf"]
+        translation = entry["translation"]
+        block_name  = entry["block_name"]
+        has_translation = entry["has_translation"]
 
         # Per-resource comment header.
         lines.append("# -----------------------------------------------------------------")
@@ -707,13 +731,18 @@ def _render_env_main_tf(
             inputs_body = _sanitize_translation(
                 translation.aws_inputs_hcl, customer_profile=customer_profile,
             ).rstrip()
+            # NEW: cross-module wiring — replace `vpc_id = "TODO-vpc-id"`,
+            # `subnet_ids = []`, `ssl_certificate_arn = "TODO-acm-cert-arn"`
+            # etc. with module.X.Y references when the provider module
+            # exists in this env. Wiring rules table is in
+            # cross_module_wiring.py.
+            inputs_body = _wire_rewrite(
+                inputs_body, modules_in_env=modules_in_env,
+            )
             if inputs_body:
                 lines.append(inputs_body)
             lines.append("}")
             lines.append("")
-            # Note: env-wide common_tags propagate via provider default_tags
-            # (see providers.tf) — no per-module tags arg needed (and adding
-            # one would conflict with translator-emitted `tags = ...`).
         elif conf and conf.aws_equivalent == "MANUAL_REVIEW":
             lines.append(f'# module "{block_name}" {{')
             lines.append(f'#   source = "{modules_relpath}/<TBD-aws-service>"')
