@@ -259,28 +259,20 @@ from migrator.translate.customer_profile_loader import (
     get_profile_metadata as _customer_profile_meta,
 )
 
-with st.form(key="migrator_form"):
-    repo_path_input = st.text_input(
-        f"Local path to {_CLOUD_LABEL[src_cloud]} {_FORMAT_LABEL[src_format]} repo",
-        value=_default_path,
-        help=(
-            "Absolute path to a checked-out customer repo (or any "
-            "subdirectory). Default matches the selected combo's fixture. "
-            "Future: paste a Git URL and the Platform clones it."
-        ),
-        disabled=not combo_runnable,
-    )
-
-    # Compliance profile picker — picks default hardening level for every
-    # translator's output. Maps to controls in HIPAA / SOC2 / PCI regimes;
-    # "none" means Migrator's neutral defaults (operator hardens manually).
+# Both profile pickers live OUTSIDE the form so picking one triggers
+# an immediate page rerun → live preview captions update on change.
+# Widgets INSIDE a form only update on Submit, which made the captions
+# appear stale.
+_profile_col_a, _profile_col_b = st.columns(2)
+with _profile_col_a:
+    # Compliance profile picker — defaults applied to every translator.
     _profile_help = "\n".join(
         f"**{p.upper()}** — {_PROFILE_DESCRIPTIONS[p]}" for p in _PROFILE_NAMES
     )
     compliance_profile_choice = st.selectbox(
-        "🛡 Compliance profile (defaults applied to every translator)",
+        "🛡 Compliance profile",
         options=_PROFILE_NAMES,
-        index=0,    # default to "none"
+        index=0,
         format_func=lambda p: p.upper() if p != "none" else "None (neutral defaults)",
         help=_profile_help,
         disabled=not combo_runnable,
@@ -292,15 +284,19 @@ with st.form(key="migrator_form"):
         if hardened:
             st.caption(
                 f"ℹ️ **{compliance_profile_choice.upper()}** hardens these "
-                f"services: `{', '.join(hardened)}`. "
-                "Translators not yet wired for this profile emit neutral "
-                "defaults (no harm; visible in their per-resource notes)."
+                f"services: `{', '.join(hardened)}`. Translators not yet "
+                "wired for this profile emit neutral defaults."
             )
+    else:
+        st.caption(
+            "ℹ️ **None** — operator hardens each resource manually "
+            "after emission. Pick a profile to bake defaults into every "
+            "translator's output."
+        )
 
-    # Customer-specific translation profile (externalizes hardcoded
-    # local-ref substitutions into YAML files under customer_profiles/).
-    # _default profile is always applied; customer-selected profile
-    # layers on top.
+with _profile_col_b:
+    # Customer-specific translation profile (YAML-driven local-ref
+    # substitutions per customer naming convention).
     _customer_profiles = _list_customer_profiles()
     customer_profile_choice = st.selectbox(
         "🏢 Customer translation profile",
@@ -313,7 +309,7 @@ with st.form(key="migrator_form"):
             "(var.environment, var.region, local.env). Customer-named "
             "profiles (e.g. 'citiustech') layer on top with their specific "
             "naming conventions like `_project.locals.X`. Adding a new "
-            "customer = add a YAML file under "
+            "customer = drop a YAML file under "
             "`migrator/translate/customer_profiles/`."
         ),
         disabled=not combo_runnable,
@@ -324,6 +320,26 @@ with st.form(key="migrator_form"):
         st.caption(
             f"ℹ️ **{_meta['name'].title()}** — {_meta['description']}"
         )
+    else:
+        st.caption(
+            "ℹ️ **Default** — generic substitutions for `${var.environment}`, "
+            "`${var.region}`, `${local.env}`. Customer-specific patterns "
+            "(like `${local._project.locals.project_id}`) fall through to "
+            "TODO placeholders. Pick a customer profile for cleaner output."
+        )
+
+
+with st.form(key="migrator_form"):
+    repo_path_input = st.text_input(
+        f"Local path to {_CLOUD_LABEL[src_cloud]} {_FORMAT_LABEL[src_format]} repo",
+        value=_default_path,
+        help=(
+            "Absolute path to a checked-out customer repo (or any "
+            "subdirectory). Default matches the selected combo's fixture. "
+            "Future: paste a Git URL and the Platform clones it."
+        ),
+        disabled=not combo_runnable,
+    )
 
     skip_tier2_choice = st.checkbox(
         "⚡ Fast preview — skip Tier 2 (provider-schema validation)",
