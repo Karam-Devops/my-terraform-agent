@@ -104,6 +104,16 @@ def translate_resource(
 ) -> Optional[Translation]:
     """Run the per-type translator for a discovered resource.
 
+    Dispatch order (first match wins):
+      1. YAML rule under migrator/translate/rules/<tf_type>.yaml
+      2. Python translator registered in TRANSLATORS dict
+      3. None (caller falls back to scaffold-only path)
+
+    The rules-first order is intentional: rule-driven translations are
+    easier to audit + maintain, so we prefer them. Python translators
+    are kept for complex types that need imperative logic (Pub/Sub
+    fanout, VPC CIDR widening, EKS topology, etc.).
+
     Args:
         resource: source GCP resource.
         compliance_profile: one of "none", "hipaa", "soc2", "pci".
@@ -115,6 +125,22 @@ def translate_resource(
     Returns None when the resource's tf_type is not yet covered by
     a translator. Caller falls back to the scaffold-only path.
     """
+    # --- Path 1: YAML rule ---
+    from .rules_engine import get_rule_for_type, translate_from_rule
+    rule = get_rule_for_type(resource.tf_type)
+    if rule is not None:
+        try:
+            return translate_from_rule(
+                resource, rule, compliance_profile=compliance_profile,
+            )
+        except Exception as e:  # noqa: BLE001
+            return Translation(
+                service_name=rule.service_name,
+                aws_inputs_hcl="# translation failed; review source inputs above\n",
+                notes=[f"rule-translate-error: {type(e).__name__}: {e}"],
+            )
+
+    # --- Path 2: Python translator ---
     mod = TRANSLATORS.get(resource.tf_type)
     if mod is None:
         return None

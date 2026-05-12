@@ -1,0 +1,52 @@
+# GCP Artifact Registry → AWS ECR.
+#
+# First rule-driven translator landed (2026-05-12). Proof point: the
+# dispatcher (migrator/translate/__init__.py::translate_resource) tries
+# rules first, falls back to Python TRANSLATORS dict. This file declares
+# the translation contract as DATA; the python_override field below
+# delegates the iteration logic (over the repositories map) to the
+# existing Python translator at migrator/translate/ecr.py.
+#
+# Future iteration: when the schema supports `for_each` natively, the
+# python_override can be removed and the declarative path will handle
+# the per-repository attribute mapping directly.
+
+source_type:   google_artifact_registry_repository
+target_type:   aws_ecr_repository
+service_name:  ecr-repository
+confidence:    HIGH
+description:   "GCP Artifact Registry → AWS ECR. Container + Helm + Maven/npm registries (Maven/npm route to CodeArtifact separately)."
+
+# Per-repo attribute schema (documented here even though the iteration
+# happens via python_override today — when for_each lands in the
+# schema, these become the live rule).
+inputs:
+  # Top-level inputs the AWS module accepts.
+  # (No top-level scalars for ECR — everything is per-repo under the
+  # `repositories` map. Documenting the per-repo schema as item_inputs.)
+  __per_repo_schema:
+    # (Schema reference only — not consumed by today's renderer.)
+    name:              "repository name (defaults to map key)"
+    format:            "DOCKER | OCI | HELM | MAVEN | NPM | PYTHON"
+    description:       "human description"
+    scan_on_push:      "force-true under HIPAA/PCI"
+    image_mutability:  "IMMUTABLE recommended for production"
+    kms_encryption:    "customer-managed CMK for HIPAA/PCI"
+
+# Profile-driven defaults (consumed by future declarative iteration).
+compliance_defaults:
+  hipaa:
+    image_scanning_enabled: true
+    image_tag_mutability:   IMMUTABLE
+    kms_encryption:         true
+  pci:
+    image_scanning_enabled: true
+    image_tag_mutability:   IMMUTABLE
+    kms_encryption:         true
+  soc2:
+    image_scanning_enabled: true
+
+# Python escape hatch — delegate iteration logic to the existing Python
+# translator. Same Python file as before; the rule routes through it
+# instead of being invoked directly by TRANSLATORS dispatch.
+python_override: migrator.translate.ecr
