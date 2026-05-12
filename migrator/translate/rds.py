@@ -31,42 +31,56 @@ _VERSION_MAP = {
 
 # Custom tier (db-custom-N-M) where N=cpu, M=memory_mb → RDS instance class.
 def _custom_tier_to_instance_class(cpu: int, memory_mb: int) -> str:
-    """Best-effort match db-custom-N-M to an AWS RDS instance class."""
+    """Best-effort match db-custom-N-M to an AWS RDS instance class.
+
+    Maps to current-generation Graviton families where possible:
+      - r7g for memory-optimized (≥7 GB/vCPU)
+      - m7g for general-purpose (3.5-7 GB/vCPU)
+      - t4g for burstable/small (<3.5 GB/vCPU and ≤2 vCPU)
+
+    Falls back to m7g for unrecognized ratios. Operator overrides
+    per-instance via the source's `tier` field or post-emission.
+    """
     # Memory ratio guides class family choice.
     mem_per_cpu = memory_mb / cpu if cpu > 0 else 0
-    # General-purpose default
     if mem_per_cpu >= 7000:
-        # Memory-optimized
-        family = "r6g"
+        family = "r7g"      # memory-optimized
     elif mem_per_cpu >= 3500:
-        family = "m6g"
+        family = "m7g"      # general-purpose
     else:
-        family = "t3"
+        family = "t4g"      # burstable (small workloads only)
     if cpu <= 1:
-        return f"db.{family}.micro" if family == "t3" else f"db.{family}.large"
+        return f"db.{family}.micro" if family == "t4g" else f"db.{family}.large"
     if cpu <= 2:
-        return f"db.{family}.medium" if family == "t3" else f"db.{family}.large"
+        return f"db.{family}.medium" if family == "t4g" else f"db.{family}.large"
     if cpu <= 4:
-        return f"db.{family}.large" if family == "t3" else f"db.{family}.xlarge"
+        return f"db.{family}.large" if family == "t4g" else f"db.{family}.xlarge"
     if cpu <= 8:
         return f"db.{family}.xlarge"
     if cpu <= 16:
         return f"db.{family}.2xlarge"
-    return f"db.{family}.4xlarge"
+    if cpu <= 32:
+        return f"db.{family}.4xlarge"
+    return f"db.{family}.8xlarge"
 
 
 def _map_tier(tier: str) -> str:
-    """Map a Cloud SQL tier string to an RDS instance class."""
+    """Map a Cloud SQL tier string to an RDS instance class.
+
+    Uses Graviton (Arm64) families t4g/m7g/r7g for cost+power efficiency.
+    For workloads requiring x86 (e.g. legacy extensions not yet on
+    Graviton), operator overrides per-instance after emission.
+    """
     tier = (tier or "").strip()
     if tier == "db-f1-micro":
-        return "db.t3.micro"
+        return "db.t4g.micro"
     if tier == "db-g1-small":
-        return "db.t3.small"
+        return "db.t4g.small"
     m = re.match(r"db-custom-(\d+)-(\d+)", tier)
     if m:
         return _custom_tier_to_instance_class(int(m.group(1)), int(m.group(2)))
-    # Unknown — default to t3.medium with a TODO comment in the output
-    return "db.t3.medium"
+    # Unknown — default to t4g.medium with a TODO comment in the output
+    return "db.t4g.medium"
 
 
 def translate(

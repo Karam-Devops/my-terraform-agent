@@ -36,36 +36,97 @@ from .base import DEFAULT_VERSIONS_TF, AWSModuleSpec, Translation
 SERVICE_NAME = "ec2-instance"
 
 
-# GCP machine type → AWS instance type. Best-effort family + size mapping.
+# GCP machine type → AWS instance type. Graviton-preferred (Arm64) where
+# parity exists — cheaper + lower power than Intel/AMD equivalents.
+# Operator can override per-instance post-emission for x86-only AMIs.
+#
+# Stays consistent with the EKS translator's _MACHINE_TYPE_MAP so EC2
+# nodes and EKS nodes get the same sizing rationale.
 _INSTANCE_TYPE_MAP = {
-    # General purpose
-    "e2-micro":     "t3.micro",
-    "e2-small":     "t3.small",
-    "e2-medium":    "t3.medium",
-    "e2-standard-2": "t3.large",
-    "e2-standard-4": "m5.xlarge",
-    "e2-standard-8": "m5.2xlarge",
-    "e2-standard-16": "m5.4xlarge",
-    "e2-standard-32": "m5.8xlarge",
-    # CPU-optimized
-    "e2-highcpu-2":   "c5.large",
-    "e2-highcpu-4":   "c5.xlarge",
-    "e2-highcpu-8":   "c5.2xlarge",
-    "e2-highcpu-16":  "c5.4xlarge",
-    "e2-highcpu-32":  "c5.9xlarge",
-    # Memory-optimized
-    "e2-highmem-2":   "r5.large",
-    "e2-highmem-4":   "r5.xlarge",
-    "e2-highmem-8":   "r5.2xlarge",
-    "e2-highmem-16":  "r5.4xlarge",
-    # n1/n2 standard
-    "n1-standard-1":  "m5.large",
-    "n1-standard-2":  "m5.xlarge",
-    "n1-standard-4":  "m5.2xlarge",
-    "n2-standard-2":  "m5.xlarge",
-    "n2-standard-4":  "m5.2xlarge",
-    "n2-standard-8":  "m5.4xlarge",
+    # ---- e2 series (cost-optimized) → Graviton t4g/m7g ----
+    "e2-micro":       "t4g.micro",
+    "e2-small":       "t4g.small",
+    "e2-medium":      "t4g.medium",
+    "e2-standard-2":  "m7g.large",
+    "e2-standard-4":  "m7g.xlarge",
+    "e2-standard-8":  "m7g.2xlarge",
+    "e2-standard-16": "m7g.4xlarge",
+    "e2-standard-32": "m7g.8xlarge",
+    # ---- e2 highcpu (compute-optimized) → c7g ----
+    "e2-highcpu-2":   "c7g.large",
+    "e2-highcpu-4":   "c7g.xlarge",
+    "e2-highcpu-8":   "c7g.2xlarge",
+    "e2-highcpu-16":  "c7g.4xlarge",
+    "e2-highcpu-32":  "c7g.8xlarge",
+    # ---- e2 highmem (memory-optimized) → r7g ----
+    "e2-highmem-2":   "r7g.large",
+    "e2-highmem-4":   "r7g.xlarge",
+    "e2-highmem-8":   "r7g.2xlarge",
+    "e2-highmem-16":  "r7g.4xlarge",
+    # ---- n1 series (legacy general purpose) → m7g ----
+    "n1-standard-1":  "m7g.medium",
+    "n1-standard-2":  "m7g.large",
+    "n1-standard-4":  "m7g.xlarge",
+    "n1-standard-8":  "m7g.2xlarge",
+    "n1-standard-16": "m7g.4xlarge",
+    # ---- n2 series → m7i (Intel) for x86 parity ----
+    "n2-standard-2":  "m7i.large",
+    "n2-standard-4":  "m7i.xlarge",
+    "n2-standard-8":  "m7i.2xlarge",
+    "n2-standard-16": "m7i.4xlarge",
+    "n2-standard-32": "m7i.8xlarge",
+    # ---- n2d series (AMD) → m7a ----
+    "n2d-standard-2": "m7a.large",
+    "n2d-standard-4": "m7a.xlarge",
+    "n2d-standard-8": "m7a.2xlarge",
+    "n2d-standard-16": "m7a.4xlarge",
+    # ---- c2 / c2d (compute-optimized) ----
+    "c2-standard-4":  "c7g.xlarge",
+    "c2-standard-8":  "c7g.2xlarge",
+    "c2-standard-16": "c7g.4xlarge",
+    "c2d-standard-4": "c7a.xlarge",
+    "c2d-standard-8": "c7a.2xlarge",
+    # ---- m1 / m2 (memory-optimized) ----
+    "m1-ultramem-40":  "r7g.8xlarge",
+    "m1-megamem-96":   "r7g.16xlarge",
+    "m2-ultramem-208": "r7g.16xlarge",
 }
+
+
+def _map_instance_type(gcp_type: str) -> str:
+    """Map a GCP machine_type to an AWS instance type. Falls back to a
+    CPU-count heuristic for unrecognized custom shapes (custom-N-M)."""
+    if not gcp_type:
+        return "t4g.medium"
+    mapped = _INSTANCE_TYPE_MAP.get(gcp_type)
+    if mapped:
+        return mapped
+    # Heuristic for unrecognized custom shapes like "custom-N-M":
+    m = re.match(r"custom-(\d+)-(\d+)", gcp_type)
+    if m:
+        cpus = int(m.group(1))
+        memory_mb = int(m.group(2))
+        # Memory-to-CPU ratio guides family choice.
+        mem_per_cpu = memory_mb / cpus if cpus > 0 else 0
+        if mem_per_cpu >= 7000:    # memory-optimized
+            if cpus <= 2:  return "r7g.large"
+            if cpus <= 4:  return "r7g.xlarge"
+            if cpus <= 8:  return "r7g.2xlarge"
+            if cpus <= 16: return "r7g.4xlarge"
+            return "r7g.8xlarge"
+        if mem_per_cpu < 2000:    # compute-optimized
+            if cpus <= 2:  return "c7g.large"
+            if cpus <= 4:  return "c7g.xlarge"
+            if cpus <= 8:  return "c7g.2xlarge"
+            if cpus <= 16: return "c7g.4xlarge"
+            return "c7g.8xlarge"
+        # General-purpose default (Graviton)
+        if cpus <= 2:  return "m7g.large"
+        if cpus <= 4:  return "m7g.xlarge"
+        if cpus <= 8:  return "m7g.2xlarge"
+        if cpus <= 16: return "m7g.4xlarge"
+        return "m7g.8xlarge"
+    return "t4g.medium"   # last-resort default
 
 
 # GCP boot disk image → AWS AMI lookup hint.
@@ -106,9 +167,10 @@ def translate(resource: DiscoveredResource) -> Translation:
             continue
         name = str(src.get("name", "TODO-instance-name"))
         gcp_type = str(src.get("instance_type", "e2-medium"))
-        aws_type = _INSTANCE_TYPE_MAP.get(gcp_type, "t3.medium")
+        aws_type = _map_instance_type(gcp_type)
         if gcp_type not in _INSTANCE_TYPE_MAP:
-            notes.append(f"VM `{name}`: unmapped GCP machine type `{gcp_type}` — defaulted to t3.medium; review.")
+            notes.append(f"VM `{name}`: unmapped GCP machine type `{gcp_type}` → derived `{aws_type}` "
+                         f"via CPU/memory heuristic; review for workload fit.")
 
         gcp_image = str(src.get("boot_disk_image", "debian-cloud/debian-12"))
         ami_hint = _BOOT_IMAGE_MAP.get(gcp_image, f"TODO: lookup AMI for {gcp_image}")
