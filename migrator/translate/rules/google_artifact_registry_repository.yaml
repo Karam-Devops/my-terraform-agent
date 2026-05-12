@@ -1,52 +1,54 @@
 # GCP Artifact Registry → AWS ECR.
 #
-# First rule-driven translator landed (2026-05-12). Proof point: the
-# dispatcher (migrator/translate/__init__.py::translate_resource) tries
-# rules first, falls back to Python TRANSLATORS dict. This file declares
-# the translation contract as DATA; the python_override field below
-# delegates the iteration logic (over the repositories map) to the
-# existing Python translator at migrator/translate/ecr.py.
+# Pure declarative — no python_override. Demonstrates the `for_each`
+# directive added to the rules schema on 2026-05-12. The `repositories`
+# input iterates over the source's `repositories` map (or
+# `repository_config` alias) and emits one entry per source repo into
+# the AWS module's input map.
 #
-# Future iteration: when the schema supports `for_each` natively, the
-# python_override can be removed and the declarative path will handle
-# the per-repository attribute mapping directly.
+# This is the migration template for the other simple-iteration
+# translators (acm, log_sink, route53, secrets, subnet) — same shape,
+# different attribute mappings + enum maps.
 
 source_type:   google_artifact_registry_repository
 target_type:   aws_ecr_repository
 service_name:  ecr-repository
 confidence:    HIGH
-description:   "GCP Artifact Registry → AWS ECR. Container + Helm + Maven/npm registries (Maven/npm route to CodeArtifact separately)."
+description:   "GCP Artifact Registry → AWS ECR. Container + Helm + OCI registries."
 
-# Per-repo attribute schema (documented here even though the iteration
-# happens via python_override today — when for_each lands in the
-# schema, these become the live rule).
 inputs:
-  # Top-level inputs the AWS module accepts.
-  # (No top-level scalars for ECR — everything is per-repo under the
-  # `repositories` map. Documenting the per-repo schema as item_inputs.)
-  __per_repo_schema:
-    # (Schema reference only — not consumed by today's renderer.)
-    name:              "repository name (defaults to map key)"
-    format:            "DOCKER | OCI | HELM | MAVEN | NPM | PYTHON"
-    description:       "human description"
-    scan_on_push:      "force-true under HIPAA/PCI"
-    image_mutability:  "IMMUTABLE recommended for production"
-    kms_encryption:    "customer-managed CMK for HIPAA/PCI"
+  # Iterate over source `repositories` map; emit nested per-repo map.
+  # Source shape: { "<repo_id>" = { name?, format?, description?, ... } }
+  # Target shape: { "<safe_repo_id>" = { name, description, scan_on_push, image_mutability } }
+  repositories:
+    for_each:
+      source: repositories       # source key (also accepts repository_config — handled by emitter normalization)
+      shape:  map
+      item_inputs:
+        # Repository name — falls back to the map key when source has no `name` field.
+        name:
+          from: name
+          default_from_key: true
 
-# Profile-driven defaults (consumed by future declarative iteration).
+        # Description — defaults to a marker string for operator clarity.
+        description:
+          from: description
+          default: "Migrated from GCP Artifact Registry"
+
+        # Hardening defaults — always on for ECR (cheap baseline; HIPAA
+        # mandates anyway). Operator can override per repo if needed.
+        scan_on_push:
+          default: true
+        image_mutability:
+          default: IMMUTABLE
+
+# Profile-driven attrs — applied as TOP-LEVEL module inputs (NOT
+# per-repo). The ECR module's variables.tf accepts these as
+# module-wide defaults; per-repo overrides happen via item attrs.
 compliance_defaults:
   hipaa:
-    image_scanning_enabled: true
-    image_tag_mutability:   IMMUTABLE
-    kms_encryption:         true
+    kms_encryption: true
   pci:
-    image_scanning_enabled: true
-    image_tag_mutability:   IMMUTABLE
-    kms_encryption:         true
+    kms_encryption: true
   soc2:
-    image_scanning_enabled: true
-
-# Python escape hatch — delegate iteration logic to the existing Python
-# translator. Same Python file as before; the rule routes through it
-# instead of being invoked directly by TRANSLATORS dispatch.
-python_override: migrator.translate.ecr
+    image_scan_required: true

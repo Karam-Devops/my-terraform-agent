@@ -181,12 +181,53 @@ def _validate_rule(rule_dict: Dict, file_path: str) -> Optional[Rule]:
 
     # Validate each input spec
     for input_name, spec in inputs.items():
+        # Schema-only fields (documented per-item shape; not consumed)
+        # are prefixed with `__` per convention. Skip them.
+        if input_name.startswith("__"):
+            continue
         if isinstance(spec, str):
             continue   # shorthand: source key string
         if not isinstance(spec, dict):
             logger.error("rules: %s — inputs.%s must be a string or dict",
                          fname, input_name)
             return None
+
+        # for_each (NEW) — iterates over a source map/list and produces
+        # a nested output map.
+        if "for_each" in spec:
+            fe = spec["for_each"]
+            if not isinstance(fe, dict):
+                logger.error("rules: %s — inputs.%s.for_each must be a map",
+                             fname, input_name)
+                return None
+            if not fe.get("source"):
+                logger.error("rules: %s — inputs.%s.for_each.source is required",
+                             fname, input_name)
+                return None
+            shape = str(fe.get("shape", "map")).lower()
+            if shape not in ("map", "list"):
+                logger.error("rules: %s — inputs.%s.for_each.shape must be 'map' or 'list'",
+                             fname, input_name)
+                return None
+            item_inputs = fe.get("item_inputs")
+            if not isinstance(item_inputs, dict):
+                logger.error("rules: %s — inputs.%s.for_each.item_inputs must be a map",
+                             fname, input_name)
+                return None
+            # Validate each item_input spec recursively (one level deep —
+            # nested for_each within item_inputs is intentionally NOT
+            # supported; rare enough to drop to python_override if needed).
+            for ii_name, ii_spec in item_inputs.items():
+                if isinstance(ii_spec, str):
+                    continue
+                if not isinstance(ii_spec, dict):
+                    logger.error(
+                        "rules: %s — inputs.%s.for_each.item_inputs.%s must be a string or dict",
+                        fname, input_name, ii_name,
+                    )
+                    return None
+            continue   # for_each replaces other extraction directives
+
         if "enum_map" in spec and not isinstance(spec["enum_map"], dict):
             logger.error("rules: %s — inputs.%s.enum_map must be a map",
                          fname, input_name)
@@ -280,6 +321,11 @@ def _extract_input_value(spec: Any, source_args: Dict, key_name: str) -> Any:
     """Extract one input value from source_args per the rule's `inputs.X` spec.
 
     Returns None when the source is missing AND no default is set.
+    Handles three forms:
+      1. shorthand string (copy source key verbatim)
+      2. dict with from/enum_map/transform/default
+      3. dict with `for_each` (iterate over a source map/list, building
+         a nested output map per item_inputs)
     """
     if isinstance(spec, str):
         # Shorthand: copy source key verbatim
@@ -287,6 +333,10 @@ def _extract_input_value(spec: Any, source_args: Dict, key_name: str) -> Any:
 
     if not isinstance(spec, dict):
         return None
+
+    # for_each iteration (NEW) — overrides the scalar extraction path.
+    if "for_each" in spec:
+        return _extract_for_each(spec["for_each"], source_args)
 
     source_key = spec.get("from", key_name)
     value = source_args.get(source_key)
@@ -308,8 +358,90 @@ def _extract_input_value(spec: Any, source_args: Dict, key_name: str) -> Any:
     return value
 
 
-def _render_hcl_value(v: Any) -> str:
-    """Render a Python value as an HCL literal for embedding in inputs."""
+def _extract_for_each(fe_spec: Dict, source_args: Dict) -> Dict[str, Dict]:
+    """Build a nested output map by iterating over a source map or list
+    and applying per-item attribute extraction.
+
+    fe_spec shape:
+        source:       <source-key>     — required, holds map or list
+        shape:        "map" | "list"   — defaults to "map"
+        item_inputs:  <map>            — per-item attribute spec (recursive)
+
+    Returns a dict keyed by item-key (preserved from source map; or
+    synthesized from source-list items via name field or index).
+    """
+    source_key = fe_spec.get("source")
+    shape = str(fe_spec.get("shape", "map")).lower()
+    item_inputs = fe_spec.get("item_inputs") or {}
+
+    raw = source_args.get(source_key)
+    if raw is None:
+        return {}
+
+    # Normalize source → list of (key, item_dict) tuples
+    items: List[tuple] = []
+    if shape == "map" and isinstance(raw, dict):
+        for k, v in raw.items():
+            if isinstance(v, dict):
+                items.append((str(k), v))
+    elif shape == "list" and isinstance(raw, list):
+        for i, v in enumerate(raw):
+            if isinstance(v, dict):
+                # Prefer explicit name field; fall back to indexed key
+                key = str(v.get("name") or v.get("id") or f"item{i}")
+                items.append((key, v))
+    elif shape == "map" and isinstance(raw, list):
+        # Some source repos use a list-of-dicts where each has a 'name'
+        # field that becomes the map key. Accept this graceful form.
+        for i, v in enumerate(raw):
+            if isinstance(v, dict):
+                key = str(v.get("name") or v.get("id") or f"item{i}")
+                items.append((key, v))
+
+    # For each item, build the output per item_inputs.
+    out: Dict[str, Dict] = {}
+    for item_key, item_args in items:
+        item_out: Dict[str, Any] = {}
+        for ii_name, ii_spec in item_inputs.items():
+            # Special directive: default_from_key (use the source map key
+            # as the value when source field is missing). Common for
+            # name fields where the dict key IS the resource name.
+            if isinstance(ii_spec, dict) and ii_spec.get("default_from_key") is True:
+                # Build a modified spec without default_from_key to
+                # avoid recursion confusion, then extract with item-key
+                # as a fallback default.
+                mod_spec = {k: v for k, v in ii_spec.items() if k != "default_from_key"}
+                value = _extract_input_value(mod_spec, item_args, ii_name)
+                if value is None or value == "":
+                    value = item_key
+                if value is not None:
+                    item_out[ii_name] = value
+                continue
+
+            value = _extract_input_value(ii_spec, item_args, ii_name)
+            if value is not None:
+                item_out[ii_name] = value
+
+        # Sanitize the item_key for HCL identifier safety (hyphens →
+        # underscores, etc.). Same approach the existing Python
+        # translators use.
+        safe_key = (
+            str(item_key)
+            .replace("-", "_")
+            .replace(".", "_")
+            .replace("/", "_")
+        )
+        out[safe_key] = item_out
+
+    return out
+
+
+def _render_hcl_value(v: Any, indent: int = 0) -> str:
+    """Render a Python value as an HCL literal for embedding in inputs.
+
+    Multi-line dicts when any nested value is itself a dict (preserves
+    readability of for_each output). Single-line otherwise.
+    """
     if isinstance(v, bool):
         return "true" if v else "false"
     if isinstance(v, (int, float)):
@@ -321,23 +453,47 @@ def _render_hcl_value(v: Any) -> str:
         # Pre-quoted (from quote_string transform): emit as-is
         if s.startswith('"') and s.endswith('"'):
             return s
-        # Interpolation expression: emit as-is
+        # Interpolation expression: emit as-is (wrapped in HCL string)
         if s.startswith("${") and s.endswith("}"):
             return f'"{s}"'
         # Plain string: quote + escape
         escaped = s.replace('\\', '\\\\').replace('"', '\\"')
         return f'"{escaped}"'
     if isinstance(v, list):
+        if not v:
+            return "[]"
         return "[" + ", ".join(_render_hcl_value(x) for x in v) + "]"
     if isinstance(v, dict):
         if not v:
             return "{}"
+        # Multi-line if any nested value is a dict or list (typical for
+        # for_each output). Single-line for flat scalar maps.
+        has_nested = any(isinstance(x, (dict, list)) for x in v.values())
+        pad = "  " * (indent + 1)
+        close_pad = "  " * indent
+        if has_nested:
+            lines = ["{"]
+            for k, val in v.items():
+                key_str = _hcl_key(k)
+                rendered = _render_hcl_value(val, indent=indent + 1)
+                lines.append(f"{pad}{key_str} = {rendered}")
+            lines.append(f"{close_pad}}}")
+            return "\n".join(lines)
+        # Flat scalar map → single-line
         parts = []
         for k, val in v.items():
-            key_str = k if str(k).replace("_", "").isalnum() else f'"{k}"'
-            parts.append(f'{key_str} = {_render_hcl_value(val)}')
+            key_str = _hcl_key(k)
+            parts.append(f"{key_str} = {_render_hcl_value(val)}")
         return "{ " + ", ".join(parts) + " }"
     return f'"{str(v)}"'
+
+
+def _hcl_key(k: Any) -> str:
+    """Format a dict key for HCL. Quotes when key has non-identifier chars."""
+    s = str(k)
+    if s.replace("_", "").replace("-", "").isalnum() and not s[0].isdigit() and "-" not in s:
+        return s
+    return f'"{s}"'
 
 
 def translate_from_rule(
