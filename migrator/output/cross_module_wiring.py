@@ -30,6 +30,35 @@ from typing import Dict, List, Optional, Tuple
 logger = logging.getLogger(__name__)
 
 
+# Schema hints for known input attributes. Maps the input-name token
+# to the Terraform type its consumer module's variables.tf declares.
+# Used at module-load time to sanity-check that each wiring rule's
+# `convert` directive matches the consumer's expected shape — catches
+# rule-vs-schema drift before it produces invalid HCL at runtime.
+#
+# Kiro v9 #3 — "schema-aware key indexing":
+#   * convert=scalar_first must match a scalar consumer (string/number/object)
+#   * convert=list_values  must match a list-typed consumer (list/set/tuple)
+#   * convert=raw          accepts any consumer
+#
+# Keys come from observed translator emission patterns. Add new
+# entries when adding a wiring rule for a previously-unseen input.
+_INPUT_SCHEMA_HINTS: Dict[str, str] = {
+    # Networking
+    "vpc_id":            "string",
+    "subnet_ids":        "list(string)",
+    "public_subnet_ids": "list(string)",
+    "private_subnet_route_table_ids": "list(string)",
+    # TLS / certs
+    "ssl_certificate_arn": "string",
+    # Storage
+    "destination_bucket":   "string",
+    "query_results_bucket": "string",
+    # Messaging
+    "target_arn": "string",
+}
+
+
 @dataclass(frozen=True)
 class WiringRule:
     """One wiring rule: when this input name appears in a module call,
@@ -238,6 +267,46 @@ _WIRING_RULES: List[WiringRule] = [
     # ---- EKS → KMS key for secrets (when not already in module) ----
     # (intentionally not auto-wired — EKS module creates its own KMS)
 ]
+
+
+def _validate_rule_schema_consistency() -> List[str]:
+    """Validate each WiringRule's `convert` directive against the
+    declared schema hint for its input_name. Returns a list of
+    warning strings; empty when everything's consistent.
+
+    Run at module-load time to catch drift between rule definitions
+    and module variable declarations. Doesn't raise — caller logs.
+    """
+    warnings: List[str] = []
+    for rule in _WIRING_RULES:
+        hint = _INPUT_SCHEMA_HINTS.get(rule.input_name)
+        if hint is None:
+            continue   # unknown attribute — assume the rule author knew
+        if rule.convert == "scalar_first":
+            # Scalar consumers expect string / number / object — not a list.
+            if hint.startswith(("list(", "set(", "tuple(")):
+                warnings.append(
+                    f"Rule for {rule.input_name!r} uses convert='scalar_first' "
+                    f"but schema hint declares '{hint}' (list-typed). Either "
+                    f"the rule should use convert='list_values' or the hint "
+                    f"is out of date."
+                )
+        elif rule.convert == "list_values":
+            if not hint.startswith(("list(", "set(", "tuple(")):
+                warnings.append(
+                    f"Rule for {rule.input_name!r} uses convert='list_values' "
+                    f"but schema hint declares '{hint}' (scalar). Mismatch — "
+                    f"check the consumer module's variables.tf."
+                )
+    return warnings
+
+
+# Run sanity check at module-load time. The logger uses standard logging
+# (not the structlog binding) because this fires before request scope.
+_schema_warnings = _validate_rule_schema_consistency()
+if _schema_warnings:
+    for _w in _schema_warnings:
+        logger.warning("wiring_rule_schema_mismatch: %s", _w)
 
 
 def _convert_reference(module_ref: str, convert: str, *,
