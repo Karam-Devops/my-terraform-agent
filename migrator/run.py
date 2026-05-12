@@ -293,4 +293,25 @@ def run_migration(
             reason="snapshot persistence failed; engine result unaffected",
         )
 
+    # Result persistence — survives browser refresh + Cloud Run replica
+    # swaps. Writes <output_dir>/.migrator_state.json plus updates the
+    # per-user "last run" registry so the UI can rediscover this run on
+    # page load. Backend-agnostic API: file:// today, gs:// / s3:// when
+    # Cloud Run rollout happens. Best-effort — never blocks the return.
+    try:
+        from .output.result_persistence import save_result
+        # The "user_key" is what isolates one operator's last-run pointer
+        # from another's in multi-tenant Cloud Run. tenant_id + project_id
+        # is a reasonable composite; we fall back to "default" for local
+        # single-user dev.
+        _user_key = "::".join(filter(None, [tenant_id, project_id])) or "default"
+        save_result(result, user_key=_user_key)
+    except Exception as persist_err:  # noqa: BLE001 -- best-effort
+        log.warning(
+            "result_persist_skipped",
+            error=str(persist_err),
+            reason="UI will not be able to recover this run after a refresh; "
+                   "engine result unaffected.",
+        )
+
     return result

@@ -458,6 +458,50 @@ if submitted:
 
 result: Optional[MigrationResult] = st.session_state.get("migrator_last_result")
 
+# Refresh-recovery: if session_state is empty (fresh page load after a
+# browser refresh, WebSocket reconnect, or Cloud Run replica swap),
+# look up the operator's most recent persisted run and offer to
+# restore it. This keeps Migrator usable as a SaaS even though
+# Streamlit's session_state is per-WebSocket-connection (i.e.
+# evaporates on F5).
+if result is None:
+    from migrator.output.result_persistence import (
+        get_last_run_info as _get_last_run_info,
+        load_result as _load_persisted_result,
+    )
+    # user_key matches the engine's composite key. project_id is what
+    # the sidebar picker handed us; tenant_id isn't UI-controlled yet
+    # so we leave it blank — engine + UI compose the same string.
+    _restore_user_key = project_id or "default"
+    _last_info = _get_last_run_info(user_key=_restore_user_key)
+    if _last_info and _last_info.get("destination"):
+        import datetime as _dt
+        _ts = _last_info.get("saved_at") or 0
+        _when = _dt.datetime.fromtimestamp(_ts).strftime("%Y-%m-%d %H:%M:%S") if _ts else "—"
+        _out = _last_info.get("output_dir") or "(unknown)"
+        st.info(
+            f"📂 **Previous migration available** — run completed at "
+            f"`{_when}` for output dir `{_out}`. Restore it below to keep "
+            f"working without re-running the engine.",
+            icon="📂",
+        )
+        _restore_col, _spacer = st.columns([1, 3])
+        with _restore_col:
+            if st.button("↻ Restore previous result", type="primary",
+                         key="migrator_restore_btn"):
+                restored = _load_persisted_result(user_key=_restore_user_key)
+                if restored is not None:
+                    st.session_state["migrator_last_result"] = restored
+                    st.success("Result restored from disk.", icon="✅")
+                    st.rerun()
+                else:
+                    st.error(
+                        "Could not restore previous run. The snapshot may "
+                        "have been deleted or is from an older schema "
+                        "version — please re-run the migration.",
+                        icon="⚠️",
+                    )
+
 if result is None:
     st.info("Configure a repo and click **Run Migration** to get started.", icon="👆")
     st.stop()
