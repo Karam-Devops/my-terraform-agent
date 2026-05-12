@@ -634,8 +634,34 @@ def _apply_per_line_substitution(
             todo_value = f'"TODO-no-matching-{rule.input_name}-for-{hint}"'
             return f"{m.group(1)}{todo_value}{alt_hint}"
 
-        # No hint at all → fall back to values(...)[0]
-        return f"{m.group(1)}{_convert_reference(base_ref, rule.convert)}{alt_hint}"
+        # No hint at all → this line ISN'T meant for our service
+        # (e.g., scheduler with target_type=lambda emits a bare TODO
+        # because there's no SNS topic to wire it to). Walk back through
+        # the preceding lines to find `target_type` + `name` from the
+        # enclosing entry and emit a target-type-specific TODO instead
+        # of silently routing to the wrong service's values()[0].
+        upstream = hcl[max(0, line_start - 800):line_start]
+        type_match = list(re.finditer(
+            r'target_type\s*=\s*"([^"]+)"', upstream,
+        ))
+        name_match = list(re.finditer(
+            r'\bname\s*=\s*"([^"]+)"', upstream,
+        ))
+        # Use the LAST matches before our line (closest to it)
+        target_type = type_match[-1].group(1) if type_match else None
+        target_name = name_match[-1].group(1) if name_match else None
+
+        if target_type and target_name:
+            todo_value = (
+                f'"TODO-no-matching-{target_type}-for-{target_name}"'
+            )
+            return f"{m.group(1)}{todo_value}{alt_hint}"
+        if target_type:
+            todo_value = f'"TODO-no-{target_type}-target-found"'
+            return f"{m.group(1)}{todo_value}{alt_hint}"
+        # Truly unknown context → leave the original TODO in place
+        # rather than silently routing to the wrong service.
+        return m.group(0)
 
     return pat.sub(repl, hcl)
 
