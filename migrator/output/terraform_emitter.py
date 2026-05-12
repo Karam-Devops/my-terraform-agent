@@ -98,29 +98,20 @@ _TF_NORMALIZE: Dict[str, tuple] = {
 _IDENTIFIER_RE = re.compile(r"[^A-Za-z0-9_]+")
 
 
-# Known source-side refs → AWS env-root equivalents. Applied as plain
-# substring replacement, longest-key-first. python-hcl2 mangles
-# `${var.X}` → `${var_X}` inside dict keys, so we match both forms.
-# Same applies to `${local.X}` → `${local_X}` mangling.
-_SOURCE_REF_SUBSTITUTIONS = [
-    # var.X
-    ("${var.environment}", "${local.environment}"),
-    ("${var_environment}", "${local.environment}"),
-    ("${var.region}",      "${local.region}"),
-    ("${var_region}",      "${local.region}"),
-    ("${var.labels}",      "${local.common_tags}"),
-    ("${var_labels}",      "${local.common_tags}"),
-    ("var.environment",    "local.environment"),
-    ("var.region",         "local.region"),
-    ("var.labels",         "local.common_tags"),
-    # local.env (the customer's terragrunt source pattern). python-hcl2
-    # mangles `${local.env}` → `${local_env}` in dict-key positions.
-    ("${local.env}",       "${local.environment}"),
-    ("${local_env}",       "${local.environment}"),
-    # Other common GCP→AWS local rename patterns from customer's source:
-    ("${local._project.locals.project_id}", "${local.environment}"),
-    ("${local._env_configs.locals.env}",    "${local.environment}"),
-]
+# Source-side refs → AWS env-root equivalents.
+# Loaded at runtime from customer_profiles/ YAML files (see
+# migrator/translate/customer_profile_loader.py). The loader merges
+# _default.yaml + an optional customer-named profile, sorts by source-ref
+# length descending (longer keys check first to prevent prefix matches),
+# and returns the substitution list.
+#
+# Onboarding a new customer: add a YAML profile under
+# migrator/translate/customer_profiles/ — no code change needed.
+#
+# Legacy module-level constant retained for tests but not used at
+# runtime — _sanitize_translation() now calls get_substitutions()
+# directly with the active customer_profile.
+_SOURCE_REF_SUBSTITUTIONS: list = []   # deprecated; profile-driven now
 
 
 # Locals defined at env root level (the env main.tf locals block).
@@ -175,7 +166,7 @@ _DEPENDENCY_MANGLED_INTERP_RE = re.compile(r"\$\{dependency_[^}]+\}")
 _DEPENDENCY_BARE_RE = re.compile(r"(?<![\w.${])dependency\.[A-Za-z0-9_.\[\]\"\-]+")
 
 
-def _sanitize_translation(text: str) -> str:
+def _sanitize_translation(text: str, customer_profile: str = "default") -> str:
     """Sanitize translator output for terraform-mode emission.
 
     Translators emit refs like `${var.environment}` or `each.value.x`
@@ -184,16 +175,21 @@ def _sanitize_translation(text: str) -> str:
     nothing — `terraform validate` rightly fails.
 
     Strategy:
-      1. Substitute known refs to env-root equivalents (var.environment
-         → local.environment, etc.)
+      1. Substitute known refs to env-root equivalents using the
+         CUSTOMER PROFILE (loaded from customer_profiles/*.yaml).
+         Profile-aware: customer-specific patterns (like CitiusTech's
+         `${local._project.locals.project_id}`) substitute cleanly;
+         everything else falls through to step 2.
       2. For any remaining refs:
          - Interpolation form ${X}  → ${"TODO-..."}  (keep wrapper)
          - Bare form X              → "TODO-..."     (quoted literal)
     """
+    from migrator.translate.customer_profile_loader import get_substitutions
     out = text
 
-    # Step 1: known substitutions (literal string replace, longest-first).
-    for src, dst in _SOURCE_REF_SUBSTITUTIONS:
+    # Step 1: customer-profile substitutions (literal string replace,
+    # longest-key-first per loader's ordering).
+    for src, dst in get_substitutions(customer_profile):
         out = out.replace(src, dst)
 
     # Step 2a: var.X — never resolves at env root unless it's a var we
@@ -432,6 +428,7 @@ def emit_terraform_skeleton(
     aws_region: Optional[str] = None,
     source_iac: str = "terraform",
     compliance_profile: str = "none",
+    customer_profile: str = "default",
 ) -> List[str]:
     """Write the AWS pure-Terraform skeleton under <output_dir>/target/.
 
@@ -533,6 +530,7 @@ def emit_terraform_skeleton(
             available_module_services=emitted_module_specs,
             source_iac=source_iac,
             compliance_profile=compliance_profile,
+            customer_profile=customer_profile,
         )
         main_path = os.path.join(env_dir, "main.tf")
         _write_text(main_path, main_tf)
@@ -585,6 +583,7 @@ def _render_env_main_tf(
     available_module_services: Set[str],
     source_iac: str = "terraform",
     compliance_profile: str = "none",
+    customer_profile: str = "default",
 ) -> str:
     """One module {} block per source resource. Order: stable by module_path then name."""
     from migrator.translate.compliance_profiles import list_services_hardened_by
@@ -705,7 +704,9 @@ def _render_env_main_tf(
             # in env-root scope. Without this, translator output like
             # `name = "${var.environment}-foo"` survives into the env's
             # main.tf and `terraform validate` fails on undeclared vars.
-            inputs_body = _sanitize_translation(translation.aws_inputs_hcl).rstrip()
+            inputs_body = _sanitize_translation(
+                translation.aws_inputs_hcl, customer_profile=customer_profile,
+            ).rstrip()
             if inputs_body:
                 lines.append(inputs_body)
             lines.append("}")

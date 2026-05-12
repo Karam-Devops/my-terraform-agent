@@ -56,43 +56,24 @@ _DEFAULT_AWS_REGION = "us-east-1"
 
 
 # GCP-style local references → AWS-equivalent local references.
-# Applied as straight string substitution after the per-stack rendering.
-# Order matters: longer keys first so we don't partially-match shorter ones.
-_GCP_TO_AWS_LOCAL_REFS = [
-    # _project.locals.* — customer's project.hcl pattern
-    ("local._project.locals.project_id",            "local.environment"),
-    ("local._project.locals.primary_region",        "local.region"),
-    ("local._project.locals.primary_zone",          '"${local.region}a"'),
-    ("local._project.locals.primary_region_suffix", "local.region"),
-    ("local._project.locals.project_number",        "local.account_id"),
-    # _env_configs / env.hcl pattern
-    ("local._env_configs.locals.env",               "local.environment"),
-    ("local._env_configs.locals.environment",       "local.environment"),
-    # Bare local.env (less common)
-    # NOTE: this is fragile — `local.env` could be a name collision in
-    # other contexts. Apply last so other rules with longer prefixes
-    # have already substituted out.
-    ("local.env ",   "local.environment "),   # space-suffix to avoid prefix-match
-    ("local.env}",   "local.environment}"),   # interpolation tail
-    ("local.env)",   "local.environment)"),
-    ("local.env,",   "local.environment,"),
-    ("local.env\n",  "local.environment\n"),
-    # python-hcl2 sometimes emits `${local.env}` as `${local_env}` —
-    # underscored token. Catch both shapes.
-    ("${local_env}",  "${local.environment}"),
-    ("local_env",     "local.environment"),
-]
+# Loaded at runtime from customer_profiles/*.yaml (see
+# migrator/translate/customer_profile_loader.py).
+#
+# Legacy module-level constant retained for backwards-compat with any
+# external callers; not used by _substitute_gcp_local_refs() anymore.
+_GCP_TO_AWS_LOCAL_REFS: list = []   # deprecated; profile-driven now
 
 
-def _substitute_gcp_local_refs(text: str) -> str:
+def _substitute_gcp_local_refs(text: str, customer_profile: str = "default") -> str:
     """Rewrite GCP-style local references to AWS-equivalents.
 
-    Applied to each leaf's rendered HCL after the translator produces
-    the inputs block. Pure string substitution — preserves everything
-    else verbatim.
+    Pulls substitutions from the customer profile (loaded from
+    customer_profiles/*.yaml). Pure string substitution — preserves
+    everything else verbatim.
     """
+    from migrator.translate.customer_profile_loader import get_substitutions
     out = text
-    for src, dst in _GCP_TO_AWS_LOCAL_REFS:
+    for src, dst in get_substitutions(customer_profile):
         out = out.replace(src, dst)
     return out
 
@@ -165,6 +146,7 @@ def emit_terragrunt_skeleton(
     confidence: List[ConfidenceFinding],
     aws_region: Optional[str] = None,
     compliance_profile: str = "none",
+    customer_profile: str = "default",
 ) -> List[str]:
     """Write the AWS Terragrunt skeleton under <output_dir>/target/.
 
@@ -264,6 +246,7 @@ def emit_terragrunt_skeleton(
             confidence=rep_conf,
             translation=translation,
             available_module_services=emitted_module_specs,
+            customer_profile=customer_profile,
         )
         _write_text(target_stack_path, rendered)
         written.append(target_stack_path)
@@ -516,6 +499,7 @@ def _render_stack_terragrunt(
     confidence,
     translation,                              # Optional[Translation]
     available_module_services: Set[str],
+    customer_profile: str = "default",
 ) -> str:
     """Render one stack's AWS terragrunt.hcl.
 
@@ -642,7 +626,9 @@ def _render_stack_terragrunt(
         #      `${local.X}` references that don't have a substitution
         #      rule, with TODO placeholders so Tier 2 stays green
         #      while the operator does a manual review.
-        substituted_inputs = _substitute_gcp_local_refs(translation.aws_inputs_hcl)
+        substituted_inputs = _substitute_gcp_local_refs(
+            translation.aws_inputs_hcl, customer_profile=customer_profile,
+        )
         substituted_inputs = _strip_unresolved_locals(substituted_inputs)
         lines.append(substituted_inputs.rstrip())
         lines.append("}")

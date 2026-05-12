@@ -1,0 +1,53 @@
+# Default customer profile — applied when no customer-specific profile
+# is selected. Contains GENERIC GCP→AWS local-ref substitutions that
+# work for any customer using standard Terragrunt patterns.
+#
+# Schema:
+#   local_substitutions:
+#     "<source-ref>": "<aws-target-ref>"
+#
+# Substitution semantics:
+#   - Applied as literal-string find/replace in translator output
+#     BEFORE the unresolved-local sanitizer runs.
+#   - Source refs come in two forms: interpolation (${var.X}) and
+#     bare (var.X). Both forms should be listed when applicable.
+#   - python-hcl2 mangles ${var.X} → ${var_X} in dict-key positions.
+#     List both forms if your source has refs in dict keys.
+#
+# Customer profile selection:
+#   - run_migration(..., customer_profile="<name>") loads
+#     customer_profiles/<name>.yaml + merges over _default.yaml.
+#   - Customer-specific keys take precedence over defaults.
+
+local_substitutions:
+  # var.environment / var.env conventions (most common)
+  "${var.environment}": "${local.environment}"
+  "${var_environment}": "${local.environment}"
+  "${var.env}":         "${local.environment}"
+  "${var_env}":         "${local.environment}"
+  "var.environment":    "local.environment"
+  "var.env":            "local.environment"
+
+  # var.region conventions
+  "${var.region}":     "${local.region}"
+  "${var_region}":     "${local.region}"
+  "var.region":        "local.region"
+
+  # var.labels / var.tags conventions
+  "${var.labels}":     "${local.common_tags}"
+  "${var_labels}":     "${local.common_tags}"
+  "${var.tags}":       "${local.common_tags}"
+  "${var_tags}":       "${local.common_tags}"
+  "var.labels":        "local.common_tags"
+  "var.tags":          "local.common_tags"
+
+  # Generic local.env (bare module pattern)
+  "${local.env}":      "${local.environment}"
+  "${local_env}":      "${local.environment}"
+
+# Reserved for future extension — describes what kind of source patterns
+# this profile recognizes. Diagnostic only; not consumed at runtime.
+metadata:
+  name:        "default"
+  description: "Generic GCP→AWS substitutions covering var.environment, var.region, var.labels, local.env conventions. Applied to every customer; customer-specific profiles merge on top."
+  applies_to:  "any Terragrunt or Terraform source repo"

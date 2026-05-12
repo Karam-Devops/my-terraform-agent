@@ -1,0 +1,42 @@
+# CitiusTech / DeepHealth customer profile.
+#
+# Their Terragrunt repos use a project.hcl / env.hcl / global.hcl /
+# deployment.hcl convention with leading-underscore locals
+# (`_project`, `_env_configs`, `_deployment_configs`, `_global_configs`)
+# for "read-once includes" — markers that the local refers to a
+# parent-config read via read_terragrunt_config(find_in_parent_folders(...)).
+#
+# This profile maps THEIR specific patterns to clean AWS-target locals.
+# Anything not listed here falls back to _default.yaml.
+
+local_substitutions:
+  # _project.hcl-derived refs (per-project context)
+  "${local._project.locals.project_id}":            "${local.environment}"
+  "${local._project.locals.primary_region}":        "${local.region}"
+  "${local._project.locals.primary_zone}":          "${local.region}a"
+  "${local._project.locals.primary_region_suffix}": "${local.region}"
+  "${local._project.locals.project_number}":        "${local.account_id}"
+  "${local._project.locals.secondary_region}":      '"us-east-1"'
+
+  # _env_configs.hcl-derived refs (per-env context)
+  "${local._env_configs.locals.env}":               "${local.environment}"
+  "${local._env_configs.locals.environment}":       "${local.environment}"
+
+  # Bare-attribute forms (less common but seen in some leaves)
+  "local._project.locals.project_id":     "local.environment"
+  "local._project.locals.primary_region": "local.region"
+  "local._env_configs.locals.env":        "local.environment"
+
+  # Other CitiusTech conventions.
+  # Note: target values that go INSIDE an interpolation context (the
+  # original source ref was wrapped in `"${...}"` and we're substituting
+  # the inner part) must NOT carry their own quotes — otherwise we end
+  # up with `""dh"-suffix"` which is invalid HCL. Use bare literals.
+  "${local.primary_region_suffix}":   "${local.region}"
+  "${local.secondary_region_suffix}": "us-east-1"
+  "${local.prefix}":                  "dh"   # their org-wide prefix
+
+metadata:
+  name:        "citiustech"
+  description: "CitiusTech / DeepHealth conventions: _project.hcl + _env_configs.hcl with leading-underscore include locals."
+  applies_to:  "Repos with project.hcl/env.hcl/deployment.hcl/global.hcl four-file include pattern and `_project`/`_env_configs`/`_deployment_configs`/`_global_configs` locals."

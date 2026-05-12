@@ -254,6 +254,10 @@ from migrator.translate.compliance_profiles import (
     PROFILE_DESCRIPTIONS as _PROFILE_DESCRIPTIONS,
     list_services_hardened_by as _list_hardened_services,
 )
+from migrator.translate.customer_profile_loader import (
+    list_available_profiles as _list_customer_profiles,
+    get_profile_metadata as _customer_profile_meta,
+)
 
 with st.form(key="migrator_form"):
     repo_path_input = st.text_input(
@@ -292,6 +296,34 @@ with st.form(key="migrator_form"):
                 "Translators not yet wired for this profile emit neutral "
                 "defaults (no harm; visible in their per-resource notes)."
             )
+
+    # Customer-specific translation profile (externalizes hardcoded
+    # local-ref substitutions into YAML files under customer_profiles/).
+    # _default profile is always applied; customer-selected profile
+    # layers on top.
+    _customer_profiles = _list_customer_profiles()
+    customer_profile_choice = st.selectbox(
+        "🏢 Customer translation profile",
+        options=_customer_profiles,
+        index=0,
+        format_func=lambda p: "Default (generic patterns)" if p == "default" else p.title(),
+        help=(
+            "Maps customer-specific local refs in source HCL to AWS-target "
+            "equivalents. **Default** covers generic patterns "
+            "(var.environment, var.region, local.env). Customer-named "
+            "profiles (e.g. 'citiustech') layer on top with their specific "
+            "naming conventions like `_project.locals.X`. Adding a new "
+            "customer = add a YAML file under "
+            "`migrator/translate/customer_profiles/`."
+        ),
+        disabled=not combo_runnable,
+        key="migrator_customer_profile",
+    )
+    if customer_profile_choice != "default":
+        _meta = _customer_profile_meta(customer_profile_choice)
+        st.caption(
+            f"ℹ️ **{_meta['name'].title()}** — {_meta['description']}"
+        )
 
     skip_tier2_choice = st.checkbox(
         "⚡ Fast preview — skip Tier 2 (provider-schema validation)",
@@ -372,6 +404,7 @@ if submitted:
             project_id=project_id,
             skip_tier2=skip_tier2_choice,
             compliance_profile=compliance_profile_choice,
+            customer_profile=customer_profile_choice,
         )
 
         progress.progress(100, text=f"Done in {round(time.monotonic() - started, 2)}s")
