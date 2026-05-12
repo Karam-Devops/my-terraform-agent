@@ -37,6 +37,7 @@ local_substitutions:
   "${local.prefix}":                  "dh"   # DH's org-wide resource prefix
 
 metadata:
-  name:        "dh"
-  description: "DeepHealth conventions: _project.hcl + _env_configs.hcl with leading-underscore include locals."
-  applies_to:  "Repos with project.hcl/env.hcl/deployment.hcl/global.hcl four-file include pattern and `_project`/`_env_configs`/`_deployment_configs`/`_global_configs` locals."
+  name:         "dh"
+  display_name: "DH"   # how the UI shows this profile (case-sensitive label)
+  description:  "DeepHealth conventions: _project.hcl + _env_configs.hcl with leading-underscore include locals."
+  applies_to:   "Repos with project.hcl/env.hcl/deployment.hcl/global.hcl four-file include pattern and `_project`/`_env_configs`/`_deployment_configs`/`_global_configs` locals."

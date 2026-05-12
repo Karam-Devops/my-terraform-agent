@@ -106,7 +106,9 @@ def get_profile_metadata(customer_profile: str = "default") -> Dict:
     """Return the metadata block of a customer profile (for UI tooltips).
 
     Falls back to a minimal placeholder if the profile doesn't exist
-    or has no metadata.
+    or has no metadata. The `display_name` field lets a profile
+    override its UI label — useful for acronyms like "DH" that
+    Python's str.title() would mangle ("Dh").
     """
     profile_name = (customer_profile or "default").strip().lower()
     if profile_name == "default":
@@ -115,7 +117,9 @@ def get_profile_metadata(customer_profile: str = "default") -> Dict:
         data = _load_yaml(os.path.join(_PROFILES_DIR, f"{profile_name}.yaml"))
     meta = data.get("metadata") or {}
     return {
-        "name":        str(meta.get("name", profile_name)),
-        "description": str(meta.get("description", "(no description)")),
-        "applies_to":  str(meta.get("applies_to", "(unspecified)")),
+        "name":         str(meta.get("name", profile_name)),
+        # display_name defaults to title-cased name when not specified
+        "display_name": str(meta.get("display_name") or str(meta.get("name", profile_name)).title()),
+        "description":  str(meta.get("description", "(no description)")),
+        "applies_to":   str(meta.get("applies_to", "(unspecified)")),
     }

@@ -298,16 +298,24 @@ with _profile_col_b:
     # Customer-specific translation profile (YAML-driven local-ref
     # substitutions per customer naming convention).
     _customer_profiles = _list_customer_profiles()
+    # Look up display_name for each profile so the dropdown shows e.g.
+    # "DH" (acronym) instead of Python's title-cased "Dh". Defaults to
+    # title-case when a profile has no explicit display_name.
+    def _customer_label(p: str) -> str:
+        if p == "default":
+            return "Default (generic patterns)"
+        return _customer_profile_meta(p).get("display_name") or p.title()
+
     customer_profile_choice = st.selectbox(
         "🏢 Customer translation profile",
         options=_customer_profiles,
         index=0,
-        format_func=lambda p: "Default (generic patterns)" if p == "default" else p.title(),
+        format_func=_customer_label,
         help=(
             "Maps customer-specific local refs in source HCL to AWS-target "
             "equivalents. **Default** covers generic patterns "
             "(var.environment, var.region, local.env). Customer-named "
-            "profiles (e.g. 'dh') layer on top with their specific "
+            "profiles (e.g. 'DH') layer on top with their specific "
             "naming conventions like `_project.locals.X`. Adding a new "
             "customer = drop a YAML file under "
             "`migrator/translate/customer_profiles/`."
@@ -318,7 +326,7 @@ with _profile_col_b:
     if customer_profile_choice != "default":
         _meta = _customer_profile_meta(customer_profile_choice)
         st.caption(
-            f"ℹ️ **{_meta['name'].title()}** — {_meta['description']}"
+            f"ℹ️ **{_meta['display_name']}** — {_meta['description']}"
         )
     else:
         st.caption(
