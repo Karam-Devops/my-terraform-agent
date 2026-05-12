@@ -337,17 +337,86 @@ with _profile_col_b:
         )
 
 
+# Source-input mode: local path vs Git URL. Picker lives OUTSIDE the
+# form so changing it triggers an immediate page-rerun (form widgets
+# only update on Submit). Live-rerendering of the path/URL field +
+# its caption is the UX we want.
+_input_modes = ("local", "git")
+input_mode = st.radio(
+    "How do you want to point at the repo?",
+    options=_input_modes,
+    index=0,
+    format_func=lambda m: {
+        "local": "📁 Local path (this machine)",
+        "git":   "🔗 Git URL (clone over HTTPS)",
+    }[m],
+    horizontal=True,
+    disabled=not combo_runnable,
+    key="migrator_input_mode",
+    help=(
+        "Local path runs against a directory on this machine — best "
+        "for fixture testing during development. Git URL clones the "
+        "repo to a temp dir before running (works on Cloud Run). "
+        "HTTPS only; SSH isn't supported because the SaaS host can't "
+        "manage per-tenant SSH keys."
+    ),
+)
+
 with st.form(key="migrator_form"):
-    repo_path_input = st.text_input(
-        f"Local path to {_CLOUD_LABEL[src_cloud]} {_FORMAT_LABEL[src_format]} repo",
-        value=_default_path,
-        help=(
-            "Absolute path to a checked-out customer repo (or any "
-            "subdirectory). Default matches the selected combo's fixture. "
-            "Future: paste a Git URL and the Platform clones it."
-        ),
-        disabled=not combo_runnable,
-    )
+    if input_mode == "local":
+        repo_path_input = st.text_input(
+            f"Local path to {_CLOUD_LABEL[src_cloud]} {_FORMAT_LABEL[src_format]} repo",
+            value=_default_path,
+            help=(
+                "Absolute path to a checked-out customer repo (or any "
+                "subdirectory). Default matches the selected combo's fixture."
+            ),
+            disabled=not combo_runnable,
+        )
+        # Git URL inputs are inert in local mode — declare them so the
+        # form has consistent keys, but values are ignored downstream.
+        git_url_input = ""
+        git_pat_input = ""
+        git_branch_input = ""
+    else:
+        repo_path_input = ""   # ignored in git mode
+        git_url_input = st.text_input(
+            "Git URL (HTTPS)",
+            value="",
+            placeholder="https://github.com/owner/repo.git",
+            help=(
+                "Full HTTPS clone URL. Supported providers: GitHub, "
+                "GitLab, Bitbucket, Azure DevOps. Self-hosted instances "
+                "work too (we fall back to GitLab-style auth)."
+            ),
+            disabled=not combo_runnable,
+        )
+        col_pat, col_branch = st.columns([2, 1])
+        with col_pat:
+            git_pat_input = st.text_input(
+                "Personal Access Token (PAT)",
+                value="",
+                type="password",
+                help=(
+                    "Required for private repos. Leave blank for public "
+                    "repos. PAT needs at minimum a 'repo' / read-only "
+                    "code-read scope. The PAT is never persisted server-"
+                    "side — only used in-memory during the clone, then "
+                    "discarded."
+                ),
+                disabled=not combo_runnable,
+            )
+        with col_branch:
+            git_branch_input = st.text_input(
+                "Branch (optional)",
+                value="",
+                placeholder="main",
+                help=(
+                    "Branch / tag / commit SHA to clone. Leave blank "
+                    "for the repo's default branch."
+                ),
+                disabled=not combo_runnable,
+            )
 
     skip_tier2_choice = st.checkbox(
         "⚡ Fast preview — skip Tier 2 (provider-schema validation)",
@@ -381,36 +450,83 @@ target_format_choice = tgt_format
 # ============================================================
 
 if submitted:
-    if not repo_path_input or not repo_path_input.strip():
-        st.error("Please enter a repo path.", icon="❌")
-        st.stop()
+    # Resolve the input mode → concrete repo_path on disk. For git
+    # mode we clone HERE (before run_migration) and stash the cleanup
+    # callable so it fires even if the engine raises.
+    _clone_cleanup = None
 
-    repo_path = repo_path_input.strip()
-    # Persist per-combo so toggling any axis doesn't lose the operator's
-    # last-used path for the OTHER combos.
-    st.session_state[_last_path_key] = repo_path
-    st.session_state["migrator_repo_path"] = repo_path  # legacy key
+    if input_mode == "git":
+        if not git_url_input or not git_url_input.strip():
+            st.error("Please enter a Git URL.", icon="❌")
+            st.stop()
+        # Clone to a temp dir + show progress while we wait.
+        from migrator.ingest.git_clone import clone_repo, detect_provider
+        _clone_status = st.empty()
+        provider = detect_provider(git_url_input)
+        _clone_status.info(
+            f"Cloning from {provider or 'host'}... (shallow clone, "
+            "~5-30s for typical IaC repos)",
+            icon="🔗",
+        )
+        try:
+            _clone_result = clone_repo(
+                git_url_input.strip(),
+                pat=(git_pat_input.strip() or None),
+                branch=(git_branch_input.strip() or None),
+            )
+        except PreflightError as e:
+            _clone_status.empty()
+            render_error(
+                title="Git clone failed",
+                error=e,
+                user_hint=getattr(e, "user_hint", None) or str(e),
+            )
+            st.stop()
+        except Exception as e:  # noqa: BLE001
+            _clone_status.empty()
+            st.exception(e)
+            st.stop()
+        _clone_status.success(
+            f"Cloned to a temp dir. Running migration...",
+            icon="✅",
+        )
+        repo_path = _clone_result.path
+        _clone_cleanup = _clone_result.cleanup
+    else:
+        if not repo_path_input or not repo_path_input.strip():
+            st.error("Please enter a repo path.", icon="❌")
+            st.stop()
+        repo_path = repo_path_input.strip()
+        # Persist per-combo so toggling any axis doesn't lose the operator's
+        # last-used path for the OTHER combos.
+        st.session_state[_last_path_key] = repo_path
+        st.session_state["migrator_repo_path"] = repo_path  # legacy key
 
-    if not os.path.isdir(repo_path):
-        st.error(f"Repo path does not exist or is not a directory: `{repo_path}`", icon="❌")
-        st.stop()
+        if not os.path.isdir(repo_path):
+            st.error(f"Repo path does not exist or is not a directory: `{repo_path}`", icon="❌")
+            st.stop()
 
-    # Output dir: prefer the repo's own migrator_output/, but fall back
-    # to a tempdir if the repo path isn't writable (read-only volume,
-    # etc.). Demo case: writes go into the fixture repo, which is fine.
-    requested_output = os.path.join(repo_path, migrator_config.MIGRATOR_OUTPUT_DIRNAME)
-    try:
-        os.makedirs(requested_output, exist_ok=True)
-        # Touch-test for write permission.
-        _test_path = os.path.join(requested_output, ".writetest")
-        with open(_test_path, "w") as _t:
-            _t.write("ok")
-        os.remove(_test_path)
-        output_dir = requested_output
-    except OSError:
-        # Read-only repo. Use a Streamlit-managed tempdir keyed by
-        # repo path so re-runs of the same repo overwrite cleanly.
-        output_dir = tempfile.mkdtemp(prefix="migrator_out_")
+    # Output dir resolution:
+    #   * Local mode: prefer the repo's own migrator_output/. Falls
+    #     back to a tempdir when the repo path isn't writable (read-only
+    #     volume / Cloud Run mounted FS / etc.).
+    #   * Git mode: always use a SEPARATE tempdir (not inside the clone).
+    #     The clone itself gets wiped after migration via _clone_cleanup;
+    #     the output survives until OS tempdir eviction so the UI's
+    #     refresh-recovery still finds the .migrator_state.json snapshot.
+    if input_mode == "git":
+        output_dir = tempfile.mkdtemp(prefix="migrator_out_git_")
+    else:
+        requested_output = os.path.join(repo_path, migrator_config.MIGRATOR_OUTPUT_DIRNAME)
+        try:
+            os.makedirs(requested_output, exist_ok=True)
+            _test_path = os.path.join(requested_output, ".writetest")
+            with open(_test_path, "w") as _t:
+                _t.write("ok")
+            os.remove(_test_path)
+            output_dir = requested_output
+        except OSError:
+            output_dir = tempfile.mkdtemp(prefix="migrator_out_")
 
     progress = st.progress(0, text="Starting migration…")
     status = st.empty()
@@ -448,6 +564,14 @@ if submitted:
         status.empty()
         st.exception(e)
         st.stop()
+    finally:
+        # Always clean up the temp clone (if any) — success or failure.
+        # output_dir was written to a SEPARATE tempdir per the resolver
+        # above, so refresh-recovery still finds the snapshot. The
+        # cleanup callable is idempotent (no-op if path is already
+        # gone), safe under st.stop()'s StopException flow.
+        if _clone_cleanup:
+            _clone_cleanup()
 
     st.session_state["migrator_last_result"] = result
 

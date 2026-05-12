@@ -132,6 +132,38 @@ entry so we never re-discover it later.
 
 ---
 
+## Git URL ingestion (Path B)
+
+Operators can now point the engine at a Git URL instead of a local
+path. Implemented in `migrator/ingest/git_clone.py`. UI surfaces
+this via a radio toggle on the Migrate page:
+
+* **📁 Local path** — points at a directory on this machine (best for
+  fixture testing during development).
+* **🔗 Git URL** — clones the repo via HTTPS to a temp dir before
+  running. Works on Cloud Run since there's no per-machine path
+  dependency.
+
+Supported providers: GitHub, GitLab, Bitbucket, Azure DevOps. Self-
+hosted instances of those work too (the loader falls back to GitLab-
+style `oauth2:<pat>@host` auth when the host isn't recognised).
+
+SSH URLs are intentionally NOT supported — Cloud Run can't manage
+per-tenant SSH key material. Convert any `git@github.com:owner/repo`
+URLs to `https://github.com/owner/repo.git` form and supply a PAT.
+
+PAT scopes: minimum read-only access to the repo's code. GitHub:
+`repo` (private) or none (public). GitLab: `read_repository`.
+Bitbucket: `repository:read`. Azure DevOps: `Code (read)`.
+
+PATs are NEVER persisted server-side — only used in-memory during
+the clone, then discarded along with the temp dir.
+
+Output dir handling for Git URL mode: the clone goes to one tempdir
+that's wiped after migration; the `migrator_output/` (including
+`.migrator_state.json`) goes to a SEPARATE tempdir that survives so
+the UI's refresh-recovery still finds the snapshot.
+
 ## What the script does NOT cover (yet)
 
 - **No `terraform plan` simulation** — Tier 4 territory, needs AWS
