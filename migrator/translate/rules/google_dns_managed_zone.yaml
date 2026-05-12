@@ -1,0 +1,44 @@
+# GCP google_dns_managed_zone → AWS Route 53 zone.
+#
+# Pure declarative. Customer's source uses one of three keys for the
+# zones map (managed_zones / zones / dns_zones); the for_each.source
+# list lets us try each in turn.
+#
+# Source shape per zone:
+#   { "<zone_key>" = { name?, dns_name, visibility, description? } }
+# Target shape per zone:
+#   { "<safe_zone_key>" = { dns_name, visibility, description } }
+
+source_type:   google_dns_managed_zone
+target_type:   aws_route53_zone
+service_name:  route53-zone
+confidence:    HIGH
+description:   "GCP Cloud DNS managed zones → AWS Route 53 hosted zones."
+
+inputs:
+  zones:
+    for_each:
+      # Try each source key in order until non-empty match (covers the
+      # three input-shape variations seen in customer repos).
+      source: [managed_zones, zones, dns_zones]
+      shape: map
+      item_inputs:
+        # DNS name — strip trailing dot (GCP often includes it, AWS doesn't).
+        dns_name:
+          from: dns_name
+          transform: strip_suffix:.
+
+        # Visibility: public / private — lowercased so the module's
+        # for_each filter matches.
+        visibility:
+          from: visibility
+          transform: lowercase
+          default: public
+
+        # Description — defaults to a marker string for operator clarity.
+        description:
+          from: description
+          default: "Migrated from GCP DNS managed zone"
+
+# No compliance defaults — Route 53 hosted zones have nothing to harden
+# at the zone level (TLS happens at downstream resources like ALB).

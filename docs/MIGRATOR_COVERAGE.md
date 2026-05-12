@@ -1,6 +1,6 @@
 # Cloud Lifecycle Intelligence — Migrator Coverage
 
-_Generated: `2026-05-12T07:06+00:00` from `migrator/plan/coverage.py` + `migrator/translate/__init__.py`._
+_Generated: `2026-05-12T07:25+00:00` from `migrator/plan/coverage.py` + `migrator/translate/__init__.py`._
 
 This document is the **canonical answer** to *"What GCP resources can the Migrator engine translate to AWS today?"* It's machine-generated from the engine's mapping table, so changes here reflect actual engine behavior — not aspirations.
 

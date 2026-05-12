@@ -200,9 +200,17 @@ def _validate_rule(rule_dict: Dict, file_path: str) -> Optional[Rule]:
                 logger.error("rules: %s — inputs.%s.for_each must be a map",
                              fname, input_name)
                 return None
-            if not fe.get("source"):
+            src_field = fe.get("source")
+            if not src_field:
                 logger.error("rules: %s — inputs.%s.for_each.source is required",
                              fname, input_name)
+                return None
+            # source can be a string (single key) OR a list of fallback keys.
+            if not isinstance(src_field, (str, list)):
+                logger.error(
+                    "rules: %s — inputs.%s.for_each.source must be string or list of strings",
+                    fname, input_name,
+                )
                 return None
             shape = str(fe.get("shape", "map")).lower()
             if shape not in ("map", "list"):
@@ -214,9 +222,9 @@ def _validate_rule(rule_dict: Dict, file_path: str) -> Optional[Rule]:
                 logger.error("rules: %s — inputs.%s.for_each.item_inputs must be a map",
                              fname, input_name)
                 return None
-            # Validate each item_input spec recursively (one level deep —
-            # nested for_each within item_inputs is intentionally NOT
-            # supported; rare enough to drop to python_override if needed).
+            # Validate each item_input spec recursively. Nested for_each
+            # IS supported (e.g., subnet's secondary_ip_ranges list inside
+            # each subnet item).
             for ii_name, ii_spec in item_inputs.items():
                 if isinstance(ii_spec, str):
                     continue
@@ -358,25 +366,44 @@ def _extract_input_value(spec: Any, source_args: Dict, key_name: str) -> Any:
     return value
 
 
-def _extract_for_each(fe_spec: Dict, source_args: Dict) -> Dict[str, Dict]:
-    """Build a nested output map by iterating over a source map or list
-    and applying per-item attribute extraction.
+def _extract_for_each(fe_spec: Dict, source_args: Dict):
+    """Build a nested output (map or list) by iterating over a source
+    map or list and applying per-item attribute extraction.
 
     fe_spec shape:
-        source:       <source-key>     — required, holds map or list
-        shape:        "map" | "list"   — defaults to "map"
-        item_inputs:  <map>            — per-item attribute spec (recursive)
+        source:        <key> | [<key1>, <key2>, ...]
+                                       — required; string for one key, OR
+                                         list of fallback keys (first
+                                         non-None wins, common pattern in
+                                         existing translators)
+        shape:         "map" | "list"   — INPUT shape (default "map")
+        output_shape:  "map" | "list"   — OUTPUT shape (default "map")
+        item_inputs:   <map>            — per-item attribute spec (recursive,
+                                          nested for_each supported)
 
-    Returns a dict keyed by item-key (preserved from source map; or
-    synthesized from source-list items via name field or index).
+    Returns:
+        dict keyed by item-key when output_shape="map" (preserves map
+        keys from source, or synthesizes from name/id/index for lists)
+        list of dicts when output_shape="list" (preserves source order;
+        item_key is dropped, only the per-item attrs are emitted)
     """
-    source_key = fe_spec.get("source")
+    source_field = fe_spec.get("source")
     shape = str(fe_spec.get("shape", "map")).lower()
+    output_shape = str(fe_spec.get("output_shape", "map")).lower()
     item_inputs = fe_spec.get("item_inputs") or {}
 
-    raw = source_args.get(source_key)
+    # Resolve source — try each fallback key in order until non-None.
+    raw = None
+    if isinstance(source_field, str):
+        raw = source_args.get(source_field)
+    elif isinstance(source_field, list):
+        for k in source_field:
+            v = source_args.get(str(k))
+            if v is not None and v != {} and v != []:
+                raw = v
+                break
     if raw is None:
-        return {}
+        return [] if output_shape == "list" else {}
 
     # Normalize source → list of (key, item_dict) tuples
     items: List[tuple] = []
@@ -399,7 +426,8 @@ def _extract_for_each(fe_spec: Dict, source_args: Dict) -> Dict[str, Dict]:
                 items.append((key, v))
 
     # For each item, build the output per item_inputs.
-    out: Dict[str, Dict] = {}
+    map_out: Dict[str, Dict] = {}
+    list_out: List[Dict] = []
     for item_key, item_args in items:
         item_out: Dict[str, Any] = {}
         for ii_name, ii_spec in item_inputs.items():
@@ -422,18 +450,21 @@ def _extract_for_each(fe_spec: Dict, source_args: Dict) -> Dict[str, Dict]:
             if value is not None:
                 item_out[ii_name] = value
 
-        # Sanitize the item_key for HCL identifier safety (hyphens →
-        # underscores, etc.). Same approach the existing Python
-        # translators use.
-        safe_key = (
-            str(item_key)
-            .replace("-", "_")
-            .replace(".", "_")
-            .replace("/", "_")
-        )
-        out[safe_key] = item_out
+        if output_shape == "list":
+            list_out.append(item_out)
+        else:
+            # Sanitize the item_key for HCL identifier safety (hyphens →
+            # underscores, etc.). Same approach the existing Python
+            # translators use.
+            safe_key = (
+                str(item_key)
+                .replace("-", "_")
+                .replace(".", "_")
+                .replace("/", "_")
+            )
+            map_out[safe_key] = item_out
 
-    return out
+    return list_out if output_shape == "list" else map_out
 
 
 def _render_hcl_value(v: Any, indent: int = 0) -> str:

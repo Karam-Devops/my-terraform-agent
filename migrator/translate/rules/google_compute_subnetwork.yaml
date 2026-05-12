@@ -1,0 +1,55 @@
+# GCP google_compute_subnetwork → AWS aws_subnet.
+#
+# Pure declarative — uses NESTED for_each (a for_each inside an
+# item_inputs entry) for the secondary IP ranges per subnet.
+#
+# Note: this rule handles "subnet-only" stacks (where the customer
+# adds subnets to a shared VPC). VPCs created alongside their subnets
+# use the vpc translator (still Python; will migrate separately).
+
+source_type:   google_compute_subnetwork
+target_type:   aws_subnet
+service_name:  subnet
+confidence:    MEDIUM
+description:   "GCP Compute subnetwork → AWS Subnet. Note: GCP subnets are region-scoped, AWS subnets are AZ-scoped — operator typically maps 1 source subnet → 2-3 AWS subnets across AZs for HA."
+
+inputs:
+  subnets:
+    for_each:
+      source: subnets
+      shape: list                  # source is a list of subnet dicts
+      item_inputs:
+        name:
+          from: name
+          default: "TODO-subnet"
+
+        cidr:
+          # Try ip_cidr_range first (GCP native), then cidr (Terragrunt
+          # input-name convention some shops use).
+          from: ip_cidr_range
+          default: "10.0.1.0/24"
+
+        private_google_access:
+          from: private_ip_google_access
+          transform: bool
+          default: false
+
+        # NESTED for_each: secondary IP ranges per subnet.
+        # Source: list of dicts under each subnet's secondary_ip_ranges field.
+        # AWS module's variables.tf declares secondary_cidrs as
+        # list(object(...)) — we use output_shape: list to match.
+        secondary_cidrs:
+          for_each:
+            source: secondary_ip_ranges
+            shape: list
+            output_shape: list
+            item_inputs:
+              name:
+                from: range_name
+                default: secondary
+              cidr:
+                from: ip_cidr_range
+                default: "10.1.0.0/16"
+
+# No compliance_defaults — subnet itself has no real hardening
+# attributes (firewall rules live elsewhere via security_group).
