@@ -531,6 +531,39 @@ _GCP_TO_AWS: Dict[str, _MappingEntry] = {
             "AWS services are universally available — no opt-in resource needed. Safe to drop these blocks.",
         ),
     ),
+
+    # Shared VPC — GCP's host-project / service-project pattern.
+    # AWS has NO direct equivalent because VPCs are per-account by design.
+    # Three migration strategies (operator picks based on team topology):
+    #   (a) Transit Gateway hub-spoke: network account owns VPC + TGW; each
+    #       "service project" becomes its own AWS account with TGW attachment.
+    #       Closest analog to the GCP model; recommended for medium-to-large
+    #       orgs that already use AWS Organizations.
+    #   (b) Resource Access Manager (RAM): share subnet IDs across accounts.
+    #       Lighter weight but limited to subnet sharing (no centralized
+    #       routing). Works for small org structures.
+    #   (c) Single-account collapse: merge host + service projects into one
+    #       AWS account with a single VPC. Loses the boundary but simplest.
+    "google_compute_shared_vpc_host_project": _MappingEntry(
+        aws_equivalent="aws_ec2_transit_gateway",
+        score_pct=50,
+        reason="Shared VPC host project → TGW hub in the AWS 'network' account (Strategy A, recommended). Alt: RAM subnet share or single-account collapse.",
+        notes=(
+            "GCP Shared VPC centralizes network ownership; AWS equivalent is a 'network account' owning TGW + VPC.",
+            "Each GCP service project → one AWS account with a TGW VPC attachment back to the network account.",
+            "Subnet/route management is per-attached-account, not host-controlled like GCP — operator decides which routes to publish.",
+            "Strategy B (RAM share): create aws_ram_resource_share + aws_ram_resource_association on subnets if accounts share a single VPC. Simpler but less isolated.",
+        ),
+    ),
+    "google_compute_shared_vpc_service_project_attachment": _MappingEntry(
+        aws_equivalent="aws_ec2_transit_gateway_vpc_attachment",
+        score_pct=50,
+        reason="Service project attachment → TGW VPC attachment from this account to the network account's TGW.",
+        notes=(
+            "AWS TGW attachments are per-VPC, not per-project — translation is 1:1 only when each service project has exactly one VPC.",
+            "If the service project consumes the host's VPC directly (no own VPC), see google_compute_shared_vpc_host_project for alternative strategies.",
+        ),
+    ),
 }
 
 

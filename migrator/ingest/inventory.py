@@ -213,6 +213,14 @@ _INFER_RULES = (
     ("network-connectivity",           "google_network_connectivity_hub"),
     ("ncc-hub",                        "google_network_connectivity_hub"),
     ("ncc-spoke",                      "google_network_connectivity_spoke"),
+
+    # Shared VPC (GCP's host-project + service-project pattern) — no
+    # direct AWS equivalent. Maps to Transit Gateway hub-spoke (or RAM
+    # subnet share). See coverage.py for migration strategies.
+    ("shared-vpc-host",                "google_compute_shared_vpc_host_project"),
+    ("shared-vpc-service",             "google_compute_shared_vpc_service_project_attachment"),
+    ("host-project",                   "google_compute_shared_vpc_host_project"),
+    ("service-project-attach",         "google_compute_shared_vpc_service_project_attachment"),
     # DH-specific path segment for compute address allocation (one
     # leaf stack per env that bundles internal + global static IPs).
     # Maps to google_compute_address (handled by EIP translator).
