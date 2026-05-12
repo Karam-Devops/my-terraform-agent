@@ -69,6 +69,20 @@ class WiringRule:
     # "vpcs" lets wiring resolve which specific VPC each consumer wants.
     # When unset, falls back to values(...)[0] / values(...) wrapping.
     provider_input_map: Optional[str] = None
+    # Per-line key hint regex. When the consumer's block name is too
+    # coarse to disambiguate (e.g., a scheduler module contains many
+    # schedules each pointing at a different SNS topic — the block-level
+    # name is the same for all), translators often leave an inline
+    # comment NAMING the intended target per line. This regex (with
+    # exactly ONE capture group) is matched against each substitution
+    # site's full line; group(1) is treated as the source-side
+    # identifier we should look for in the provider's key list.
+    # Example for EventBridge target_arn:
+    #     # arn:aws:sns:<region>:<account>:check-password-expiration
+    # Pattern: r'#\s*arn:aws:sns:[^:]*:[^:]*:([\w.-]+)'
+    # → capture group "check-password-expiration"
+    # Without this, multi-entry blocks all get wired to the same key.
+    line_context_key_re: Optional[str] = None
 
 
 # The wiring table. Each entry is a (input_attribute) → (provider, output) edge.
@@ -130,12 +144,17 @@ _WIRING_RULES: List[WiringRule] = [
         provider_input_map="certificates",
     ),
     # ---- EventBridge Scheduler → SNS topic ----
-    # The scheduler translator writes `target_arn = "TODO-target-arn"`
-    # per schedule entry; that's the exact placeholder we substitute.
-    # When the env has multiple SNS modules, provider_input_map="topics"
-    # tells wiring to pick the topic whose name overlaps the consumer
-    # block (e.g., scheduler `dh_vm_automate_topic` → SNS module that
-    # has key `dh_vm_automate_topic` in its `topics` map).
+    # Scheduler module blocks bundle MANY schedules, each with its own
+    # target topic. The block-level consumer_block_name can't tell us
+    # which topic each individual schedule wants — we need a per-line
+    # hint. The scheduler translator emits the source's topic_name in
+    # an inline comment like:
+    #     target_arn = "TODO-target-arn"  # arn:aws:sns:<r>:<a>:check-password-expiration
+    # line_context_key_re extracts that final identifier and feeds it
+    # to the key-matcher, so we wire each line to its OWN topic.
+    # When the named topic isn't in the provider's keys, the rewriter
+    # falls back to a clear `TODO-no-matching-topic-for-<name>` instead
+    # of silently picking the first key (Kiro v3c review fix).
     WiringRule(
         input_name="target_arn",
         provider_service="sns-sqs-fanout",
@@ -143,6 +162,7 @@ _WIRING_RULES: List[WiringRule] = [
         todo_placeholder="TODO-target-arn",
         convert="scalar_first",
         provider_input_map="topics",
+        line_context_key_re=r'#\s*arn:aws:sns:[^:]*:[^:]*:([\w.\-]+)',
     ),
     # ---- EKS → KMS key for secrets (when not already in module) ----
     # (intentionally not auto-wired — EKS module creates its own KMS)
@@ -244,11 +264,21 @@ def _pick_key_by_overlap(
     candidates: List[str],
     *,
     consumer_block_name: Optional[str],
+    require_overlap: bool = False,
 ) -> Optional[str]:
     """Among a provider's output keys, pick the one whose name shares
     the most tokens with the consumer's block name. Ties broken by
     shorter key (less specialized). Returns None when ``candidates``
     is empty.
+
+    Args:
+        require_overlap: when True, returns None if NO candidate has a
+            shared token with the consumer name. Prevents silently
+            picking the first available key when nothing actually
+            matches — caller can then emit a visible TODO instead.
+            (Default False keeps backwards compatibility — single-VPC
+            envs where consumer might share zero tokens with the VPC's
+            key but we still want to wire to it.)
 
     Example: consumer `scheduler_dh_vm_automate` + candidates
     [`dh_vm_automate_topic`, `dh_health_check`, `dh_billing`]
@@ -256,12 +286,54 @@ def _pick_key_by_overlap(
     """
     if not candidates:
         return None
-    if len(candidates) == 1 or not consumer_block_name:
+    if not consumer_block_name:
+        return candidates[0] if not require_overlap else None
+    if len(candidates) == 1 and not require_overlap:
         return candidates[0]
-    return max(
+    best = max(
         candidates,
         key=lambda k: (_shared_token_count(k, consumer_block_name), -len(k)),
     )
+    if require_overlap and _shared_token_count(best, consumer_block_name) == 0:
+        return None
+    return best
+
+
+def _normalize_key(s: str) -> str:
+    """Convert a source identifier (`check-password-expiration`) into
+    the form a translator would have synthesized as a map key
+    (`check_password_expiration`). Mirrors the sanitization the
+    translators + rules engine apply when building output maps."""
+    out = re.sub(r"[^A-Za-z0-9_]", "_", s)
+    out = re.sub(r"_+", "_", out).strip("_")
+    if out and out[0].isdigit():
+        out = "_" + out
+    return out
+
+
+def _pick_key_for_line(
+    candidates: List[str],
+    *,
+    line_text: str,
+    line_context_re: str,
+) -> Optional[str]:
+    """Per-line key resolution: extract a hint identifier from the line
+    using ``line_context_re`` (must have exactly one capture group),
+    normalize it to match-key form, and look it up in ``candidates``.
+    Returns None when the line has no hint OR the hint doesn't match
+    any candidate — caller emits a clear TODO in that case rather than
+    silently picking the wrong key."""
+    m = re.search(line_context_re, line_text)
+    if not m:
+        return None
+    raw_hint = m.group(1)
+    normalized = _normalize_key(raw_hint)
+    if normalized in candidates:
+        return normalized
+    # Try unnormalized as a fallback (some maps keep dashes)
+    if raw_hint in candidates:
+        return raw_hint
+    return None
 
 
 def _build_provider_lookup(
@@ -407,14 +479,31 @@ def rewrite_inputs(
             # extracted keys for that map. Picks the key whose name
             # shares the most tokens with the consumer block — handles
             # the multi-VPC / multi-SNS-topic cases Kiro flagged.
-            indexed_key: Optional[str] = None
+            candidate_keys: List[str] = []
             if (
                 rule.convert == "scalar_first"
                 and rule.provider_input_map
                 and provider_output_keys
             ):
                 provider_maps = provider_output_keys.get(provider_block) or {}
-                candidate_keys = provider_maps.get(rule.provider_input_map) or []
+                candidate_keys = list(provider_maps.get(rule.provider_input_map) or [])
+
+            # When the rule has a per-line key hint (e.g., target_arn
+            # picks up the schedule's topic_name from the trailing
+            # `# arn:aws:sns:...:<name>` comment), use the per-line
+            # callback path so each substitution site can resolve to
+            # ITS OWN key. Otherwise use the block-level overlap.
+            if rule.line_context_key_re and candidate_keys:
+                out = _apply_per_line_substitution(
+                    out, rule, base_ref, candidate_keys, alternatives_hint(
+                        rule.provider_service, provider_block,
+                        candidates_by_service,
+                    ),
+                )
+                continue   # per-line callback already wrote pattern 1+2
+
+            indexed_key: Optional[str] = None
+            if candidate_keys:
                 indexed_key = _pick_key_by_overlap(
                     candidate_keys, consumer_block_name=consumer_block_name,
                 )
@@ -467,6 +556,88 @@ def rewrite_inputs(
             out = empty_list_pat.sub(rf"\1{replacement_ref}{alternative_hint}", out)
 
     return out
+
+
+def alternatives_hint(
+    service: str,
+    chosen_block: str,
+    candidates_by_service: Dict[str, List[str]],
+) -> str:
+    """Build the `# auto-picked among N modules; alternatives: ...`
+    comment shown next to each rewrite. Shared between the block-level
+    and per-line substitution paths."""
+    alts = candidates_by_service.get(service) or []
+    if len(alts) <= 1:
+        return ""
+    others = [a for a in alts if a != chosen_block]
+    return (
+        f"  # auto-picked among {len(alts)} {service} modules; "
+        f"alternatives: {', '.join(others[:3])}"
+        f"{'...' if len(others) > 3 else ''}"
+    )
+
+
+def _apply_per_line_substitution(
+    hcl: str,
+    rule: "WiringRule",
+    base_ref: str,
+    candidate_keys: List[str],
+    alt_hint: str,
+) -> str:
+    """Substitute the rule's `<input> = "<todo>"` placeholder line-by-
+    line, resolving each line's specific intended key via the rule's
+    ``line_context_key_re``.
+
+    Behavior per match:
+      * Hint extracted AND found in candidate_keys → emit named lookup
+        ``module.X.Y["matched_key"]``
+      * Hint extracted but NOT in candidate_keys → emit a visible TODO
+        like ``"TODO-no-matching-topic-for-<hint>"`` so the operator
+        sees there's an unresolved reference instead of a silently-
+        wrong key. This is the Kiro v3c fix.
+      * No hint found in the line → fall back to ``values(...)[0]``
+        (preserves existing behavior for un-annotated entries).
+    """
+    if not rule.todo_placeholder:
+        return hcl
+    pat = re.compile(
+        rf'(\b{re.escape(rule.input_name)}\s*=\s*)"{re.escape(rule.todo_placeholder)}"'
+    )
+
+    def repl(m: "re.Match[str]") -> str:
+        # Extract the line containing this match — needed to find the
+        # trailing comment with the topic-name hint.
+        start = m.start()
+        line_start = hcl.rfind("\n", 0, start) + 1
+        line_end = hcl.find("\n", start)
+        if line_end < 0:
+            line_end = len(hcl)
+        line = hcl[line_start:line_end]
+
+        matched_key = _pick_key_for_line(
+            candidate_keys,
+            line_text=line,
+            line_context_re=rule.line_context_key_re or "",
+        )
+        if matched_key:
+            new_value = _convert_reference(
+                base_ref, rule.convert, indexed_key=matched_key,
+            )
+            return f"{m.group(1)}{new_value}{alt_hint}"
+
+        # Hint extracted but unmatched → visible TODO with the
+        # unresolved identifier baked in. Better than silently picking
+        # the first key.
+        hint_match = re.search(rule.line_context_key_re or "", line)
+        if hint_match:
+            hint = hint_match.group(1)
+            todo_value = f'"TODO-no-matching-{rule.input_name}-for-{hint}"'
+            return f"{m.group(1)}{todo_value}{alt_hint}"
+
+        # No hint at all → fall back to values(...)[0]
+        return f"{m.group(1)}{_convert_reference(base_ref, rule.convert)}{alt_hint}"
+
+    return pat.sub(repl, hcl)
 
 
 def cross_env_vars_referenced(
