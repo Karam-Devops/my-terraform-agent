@@ -44,6 +44,7 @@ from typing import Optional
 
 import streamlit as st
 
+from app.ui.auth import auth_status_banner, resolve_tenant_id
 from app.ui.error_surface import render_error
 from app.ui.sidebar import render_sidebar
 from app.ui.theme import apply_theme_polish
@@ -80,6 +81,11 @@ apply_theme_polish()
 # Sidebar (project picker is informational here — Migrator is repo-driven,
 # not project-driven, so project_id is purely for log tagging).
 project_id = render_sidebar()
+
+# Resolve tenant identity from Cloud Run IAP headers (production) or
+# MIGRATOR_TENANT_ID env (local dev). Powers per-tenant snapshot
+# isolation in result_persistence.
+tenant_id = resolve_tenant_id()
 
 st.title("🚀 Migrate Repo")
 st.caption(
@@ -542,6 +548,7 @@ if submitted:
             target_format=target_format_choice,
             output_dir=output_dir,
             project_id=project_id,
+            tenant_id=tenant_id,
             skip_tier2=skip_tier2_choice,
             compliance_profile=compliance_profile_choice,
             customer_profile=customer_profile_choice,
@@ -593,10 +600,14 @@ if result is None:
         get_last_run_info as _get_last_run_info,
         load_result as _load_persisted_result,
     )
-    # user_key matches the engine's composite key. project_id is what
-    # the sidebar picker handed us; tenant_id isn't UI-controlled yet
-    # so we leave it blank — engine + UI compose the same string.
-    _restore_user_key = project_id or "default"
+    # user_key matches the engine's composite key built in run.py:
+    #   MIGRATOR_TENANT_ID ⊕ tenant_id ⊕ project_id  → "::"-joined
+    # Replicate that join so the restore lookup hits the same registry
+    # slot the save_result write created.
+    _env_tenant = os.environ.get("MIGRATOR_TENANT_ID")
+    _restore_user_key = "::".join(filter(None, [
+        _env_tenant, tenant_id, project_id,
+    ])) or "default"
     _last_info = _get_last_run_info(user_key=_restore_user_key)
     if _last_info and _last_info.get("destination"):
         import datetime as _dt

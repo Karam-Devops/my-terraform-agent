@@ -294,18 +294,31 @@ def run_migration(
         )
 
     # Result persistence — survives browser refresh + Cloud Run replica
-    # swaps. Writes <output_dir>/.migrator_state.json plus updates the
-    # per-user "last run" registry so the UI can rediscover this run on
-    # page load. Backend-agnostic API: file:// today, gs:// / s3:// when
-    # Cloud Run rollout happens. Best-effort — never blocks the return.
+    # swaps. Writes a compressed `.migrator_state.json.gz` blob plus
+    # updates the per-user "last run" registry so the UI can rediscover
+    # this run on page load. Best-effort — never blocks the return.
+    #
+    # Destination resolution:
+    #   1. MIGRATOR_PERSIST_BACKEND env var (Cloud Run override; usually
+    #      `gs://<bucket>/<tenant>/<project>/`)
+    #   2. file://<output_dir> (default — same-dir-as-emitted-tree).
+    # On Cloud Run with the gs:// backend, snapshots survive replica
+    # recycling.
     try:
         from .output.result_persistence import save_result
-        # The "user_key" is what isolates one operator's last-run pointer
-        # from another's in multi-tenant Cloud Run. tenant_id + project_id
-        # is a reasonable composite; we fall back to "default" for local
-        # single-user dev.
-        _user_key = "::".join(filter(None, [tenant_id, project_id])) or "default"
-        save_result(result, user_key=_user_key)
+        # Multi-tenant slot key: MIGRATOR_TENANT_ID env (Cloud Run / IAP
+        # injects this per request) ⊕ tenant_id ⊕ project_id. Resolves
+        # to "default" when nothing is set (local single-user dev).
+        _env_tenant = os.environ.get("MIGRATOR_TENANT_ID")
+        _user_key = "::".join(filter(None, [
+            _env_tenant, tenant_id, project_id,
+        ])) or "default"
+        _backend_url = os.environ.get("MIGRATOR_PERSIST_BACKEND")
+        _save_destination = (
+            _backend_url.rstrip("/") + "/" + _user_key.replace("::", "/")
+            if _backend_url else None
+        )
+        save_result(result, user_key=_user_key, destination=_save_destination)
     except Exception as persist_err:  # noqa: BLE001 -- best-effort
         log.warning(
             "result_persist_skipped",

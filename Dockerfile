@@ -27,18 +27,23 @@ FROM python:3.14-slim
 # --- Build args (overridable via --build-arg) ---
 # Pin via .terraform.lock.hcl in repo. Bump together when upgrading.
 ARG TERRAFORM_VERSION=1.9.8
+ARG TERRAGRUNT_VERSION=0.66.9
 ARG GCLOUD_VERSION=496.0.0
 ARG CONFTEST_VERSION=0.55.0
 
 # --- System dependencies ---
 # curl + unzip for tool installation; ca-certificates for HTTPS;
-# git not needed at runtime; tini for clean process supervision.
+# git now REQUIRED for Migrator's Path B (Git URL ingestion — operators
+# paste a GitHub/GitLab/Bitbucket/Azure DevOps URL and we clone over
+# HTTPS, see migrator/ingest/git_clone.py); tini for clean process
+# supervision.
 RUN apt-get update && apt-get install -y --no-install-recommends \
         curl \
         unzip \
         ca-certificates \
         tini \
         gnupg \
+        git \
     && rm -rf /var/lib/apt/lists/*
 
 # --- Terraform binary ---
@@ -50,6 +55,15 @@ RUN curl -fsSL "https://releases.hashicorp.com/terraform/${TERRAFORM_VERSION}/te
     && unzip /tmp/tf.zip -d /usr/local/bin \
     && rm /tmp/tf.zip \
     && terraform --version
+
+# --- Terragrunt binary ---
+# Required by Migrator's Tier 0/1/2 validator pipeline when the
+# emitted target format is Terragrunt (`terragrunt hcl format/validate`).
+# See migrator/validate/terragrunt_validator.py. Single statically-linked
+# binary; no separate component install.
+RUN curl -fsSL "https://github.com/gruntwork-io/terragrunt/releases/download/v${TERRAGRUNT_VERSION}/terragrunt_linux_amd64" -o /usr/local/bin/terragrunt \
+    && chmod +x /usr/local/bin/terragrunt \
+    && terragrunt --version
 
 # --- gcloud SDK ---
 # Installed via the official tarball install path (smaller than
@@ -100,7 +114,24 @@ ENV PORT=8080 \
     PYTHONUNBUFFERED=1 \
     PYTHONPATH=/app \
     TF_IN_AUTOMATION=1 \
-    TF_NO_COLOR=1
+    TF_NO_COLOR=1 \
+    MIGRATOR_REGISTRY_DIR=/tmp/.migrator \
+    MIGRATOR_PERSIST_BACKEND=file:///tmp/.migrator_state \
+    MIGRATOR_TENANT_ID=default
+# Migrator-specific env vars (PUI-7 Cloud Run rollout):
+#   MIGRATOR_REGISTRY_DIR     where the per-user "last run" registry
+#                              lives. file:// today (Cloud Run mounts a
+#                              writable tmpfs at /tmp). gs:// later when
+#                              multi-tenant isolation needs persistence.
+#   MIGRATOR_PERSIST_BACKEND   destination URL for .migrator_state.json
+#                              snapshots. `file://` default works inside
+#                              one Cloud Run instance; override to
+#                              `gs://<bucket>/<prefix>/` for snapshots
+#                              that survive replica recycling.
+#   MIGRATOR_TENANT_ID         per-tenant slot in the registry. Cloud
+#                              Run + IAP injects this via env override
+#                              per tenant; default "default" for single-
+#                              tenant local dev.
 # PYTHONPATH=/app: when streamlit runs `app/🏠_Home.py`, only the script's
 # dir (`/app/app/`) lands on sys.path, NOT the WORKDIR. Without
 # PYTHONPATH=/app, top-level package imports like `from app.ui.sidebar`,
