@@ -408,6 +408,129 @@ _GCP_TO_AWS: Dict[str, _MappingEntry] = {
             "Partitioning preserved if data is exported with the partition columns as folder structure.",
         ),
     ),
+
+    # -----------------------------------------------------------------
+    # Coverage expansion 2026-05-12: unmapped types surfaced by audit
+    # of `unknown_*` synthetic types on the DH customer fixture. Each
+    # entry below replaces a fall-through "Add this type to coverage.py"
+    # error with a real AWS mapping or a curated MANUAL_REVIEW reason.
+    # -----------------------------------------------------------------
+
+    # CI/CD — Cloud Build → AWS CodeBuild / CodePipeline / CodeStar
+    "google_cloudbuild_trigger": _MappingEntry(
+        aws_equivalent="aws_codepipeline",
+        score_pct=65,
+        reason="Cloud Build trigger → CodePipeline (preferred when multi-stage) or EventBridge → CodeBuild.",
+        notes=(
+            "Triggers on push/PR translate via CodeStar Connection → CodePipeline source stage.",
+            "Build steps map to a CodeBuild action; operator copies the buildspec from Cloud Build's YAML.",
+        ),
+    ),
+    "google_cloudbuild_worker_pool": _MappingEntry(
+        aws_equivalent="aws_codebuild_project",
+        score_pct=60,
+        reason="Cloud Build private worker pool → CodeBuild project with VPC config (private build env).",
+        notes=(
+            "Worker pool's VPC + subnet config → CodeBuild project's vpc_config block.",
+            "Compute machine type (e1-standard-N) maps to CodeBuild compute_type (BUILD_GENERAL1_*).",
+        ),
+    ),
+    "google_cloudbuildv2_repository": _MappingEntry(
+        aws_equivalent="aws_codestarconnections_connection",
+        score_pct=60,
+        reason="Cloud Build v2 Repository (GitHub/GitLab/Bitbucket) → CodeStar Connections.",
+        notes=(
+            "Establishes the OAuth/PAT connection AWS CodePipeline uses to clone source repos.",
+            "Authentication setup is a one-time manual step in the AWS console after the resource exists.",
+        ),
+    ),
+
+    # Async work / queues
+    "google_cloud_tasks_queue": _MappingEntry(
+        aws_equivalent="aws_sqs_queue",
+        score_pct=70,
+        reason="Cloud Tasks queue → SQS standard queue. Rate-limit + retry config map closely.",
+        notes=(
+            "GCP Cloud Tasks pushes to HTTP endpoints; AWS SQS is pull-only — front with Lambda or ECS poller.",
+            "App-Engine target type has no AWS analog — redeploy worker as Lambda.",
+        ),
+    ),
+
+    # AlloyDB → Aurora PostgreSQL
+    "google_alloydb_instance": _MappingEntry(
+        aws_equivalent="aws_rds_cluster",
+        score_pct=75,
+        reason="AlloyDB (HA Postgres) → Aurora PostgreSQL cluster. Engine + storage tier align closely.",
+        notes=(
+            "AlloyDB's columnar engine has no direct AWS equivalent — use Aurora's parallel query for similar OLAP workloads.",
+            "Read-replica topology translates 1:1; backup retention + PITR config differ slightly.",
+        ),
+    ),
+    "google_alloydb_cluster": _MappingEntry(
+        aws_equivalent="aws_rds_cluster",
+        score_pct=75,
+        reason="AlloyDB cluster → Aurora cluster. Multi-AZ + writer/reader topology preserved.",
+        notes=("Cluster-level password + maintenance window translate; backup policy differs.",),
+    ),
+
+    # Project & Org hierarchy (no direct 1:1 — operator architectural decisions)
+    "google_project": _MappingEntry(
+        aws_equivalent="aws_organizations_account",
+        score_pct=40,
+        reason="GCP Project → AWS Account. Conceptual analog only; account-creation is governance-gated.",
+        notes=(
+            "AWS Organizations accounts are typically pre-provisioned via Control Tower / IT processes — not Terraform-managed in app repos.",
+            "Most GCP-Project resources translate at the per-resource level (IAM, billing tags) rather than account-level.",
+        ),
+    ),
+    "google_folder_iam_binding": _MappingEntry(
+        aws_equivalent="aws_organizations_policy_attachment",
+        score_pct=55,
+        reason="Folder-level IAM → OU-attached SCP. Hierarchical access control concept maps.",
+        notes=(
+            "GCP folder IAM grants ROLES; AWS SCPs DENY actions (policy model is inverted).",
+            "Operator rewrites principal+role pairs as SCP allow/deny statements.",
+        ),
+    ),
+    "google_folder_iam_member": _MappingEntry(
+        aws_equivalent="aws_organizations_policy_attachment",
+        score_pct=55,
+        reason="Folder-level IAM member binding — see google_folder_iam_binding.",
+        notes=(),
+    ),
+    "google_org_policy_policy": _MappingEntry(
+        aws_equivalent="aws_organizations_policy",
+        score_pct=60,
+        reason="Org Policy constraint → AWS Service Control Policy (SCP).",
+        notes=(
+            "GCP Org Policy uses constraint codes (e.g., constraints/iam.disableServiceAccountKeyCreation); AWS SCPs use JSON action/resource statements.",
+            "Operator translates each constraint by hand — there's no automated rule.",
+        ),
+    ),
+    "google_tags_tag_value": _MappingEntry(
+        aws_equivalent="aws_resourcegroups_group",
+        score_pct=50,
+        reason="GCP resource tag → AWS resource tag (key/value pairs on most AWS resources).",
+        notes=(
+            "AWS doesn't have a separate 'tag value' resource — tags are inline attributes on each resource.",
+            "Migrator emits the tag values as a Resource Groups definition operators can reference from tagged-resource queries.",
+        ),
+    ),
+    "google_tags_tag_binding": _MappingEntry(
+        aws_equivalent="aws_resourcegroupstaggingapi_tagging",
+        score_pct=50,
+        reason="Tag binding (resource ↔ tag) → AWS resource-tag application via tagging API.",
+        notes=("Customer's downstream resources typically pick up tags via provider default_tags block.",),
+    ),
+    "google_project_service": _MappingEntry(
+        aws_equivalent=None,
+        score_pct=10,
+        reason="GCP Project Service (API enablement) — AWS has no equivalent; services are always enabled.",
+        notes=(
+            "GCP requires explicit API enablement (`compute.googleapis.com`) before resources can be created.",
+            "AWS services are universally available — no opt-in resource needed. Safe to drop these blocks.",
+        ),
+    ),
 }
 
 
@@ -428,6 +551,34 @@ _MANUAL_REVIEW_TYPES = {
     # BigQuery removed from MANUAL_REVIEW — moved to _GCP_TO_AWS as LOW
     # (Athena scaffold translator landed 2026-05-12, Kiro-review fix #8).
     "google_vpc_access_connector":  "Serverless VPC Connector → AWS PrivateLink or VPC endpoint. GCP-specific construct.",
+
+    # -----------------------------------------------------------------
+    # Coverage expansion 2026-05-12 — 3rd-party + niche types surfaced
+    # by audit of `unknown_*` synthetic types. The inventory walker now
+    # classifies these instead of leaving them as fall-through unknowns,
+    # but they don't have direct AWS equivalents.
+    # -----------------------------------------------------------------
+
+    # Anthos Service Mesh — GCP-specific. AWS App Mesh is conceptually
+    # similar but uses Envoy-on-EC2/ECS, not in-cluster GKE-Hub features.
+    "google_gke_hub_feature":
+        "Anthos Service Mesh (GKE Hub feature) → AWS App Mesh or Istio-on-EKS. ASM-specific traffic policies and mTLS config need full rewrite.",
+
+    # Service-usage quota overrides — niche, rarely needs translation.
+    "google_service_usage_consumer_quota_override_v1beta":
+        "Service quota override — AWS uses `aws_servicequotas_service_quota` per quota; one-off operator decision per quota.",
+
+    # Cross-stack data sources (GCP-specific `data "google_project"` pattern)
+    "google_project_data_source":
+        "Cross-project data source for reading project_number / project_id from another project. AWS equivalent: `data \"aws_caller_identity\"` or `data \"aws_organizations_organization\"`. Often unnecessary in AWS — resources don't reference parent account by number.",
+
+    # 3rd-party providers — not GCP or AWS resources at all
+    "auth0_provider":
+        "Auth0 SaaS — keep using the Auth0 provider in AWS as well, OR migrate to AWS Cognito (architectural decision; user pools + identity pools rewrite).",
+    "octopusdeploy_resource":
+        "Octopus Deploy — 3rd-party CD platform. Either keep Octopus pointing at AWS resources, or migrate to AWS CodeDeploy / CodePipeline.",
+    "googleworkspace_drive_folder":
+        "Google Drive folder (Workspace provider) — no AWS equivalent. Keep using Google Workspace OR migrate file shares to S3 + IAM-controlled access.",
 }
 
 
@@ -436,6 +587,16 @@ def map_gcp_to_aws(tf_type: str) -> _MappingEntry:
 
     Returns a synthetic MANUAL_REVIEW entry for unknown types so
     callers don't need to special-case absence.
+
+    Two unmapped cases, two different fix paths:
+      1. ``unknown_<segment>`` — the inventory walker couldn't infer
+         the GCP type from the Terragrunt module path. Fix in
+         ``migrator/ingest/inventory.py:_INFER_RULES`` by adding a
+         substring pattern that maps to the real ``google_*`` type.
+      2. ``google_<x>`` we just haven't categorised — Fix in
+         ``migrator/plan/coverage.py:_GCP_TO_AWS`` by adding a mapping.
+    Both messages now point at the right file so operators don't waste
+    time editing the wrong layer.
     """
     if tf_type in _GCP_TO_AWS:
         return _GCP_TO_AWS[tf_type]
@@ -446,11 +607,38 @@ def map_gcp_to_aws(tf_type: str) -> _MappingEntry:
             reason=_MANUAL_REVIEW_TYPES[tf_type],
             notes=("Flagged as MANUAL_REVIEW — operator must decide architecture.",),
         )
+    # `unknown_*` is the synthetic prefix from ``infer_gcp_type_from_module_path``
+    # when no inference rule matched. Different fix path than a real
+    # ``google_*`` type we just haven't added — point operator at the
+    # correct file.
+    if tf_type.startswith("unknown_"):
+        segment = tf_type[len("unknown_"):]
+        return _MappingEntry(
+            aws_equivalent=None,
+            score_pct=0,
+            reason=(
+                f"Inventory walker couldn't classify Terragrunt stack matching "
+                f"`{segment}` — synthetic placeholder `{tf_type}` emitted."
+            ),
+            notes=(
+                "Fix in migrator/ingest/inventory.py:_INFER_RULES — add a substring "
+                f"pattern (e.g., `\"{segment.replace('_', '-')}\"`) that maps to the "
+                "correct `google_*` type. Then re-run; the proper mapping will "
+                "take over from coverage.py's existing table.",
+                "If the stack is genuinely external (Auth0, Octopus, etc.) and "
+                "has no GCP/AWS analog, add it to _MANUAL_REVIEW_TYPES instead.",
+            ),
+        )
+    # Real `google_*` type we haven't mapped yet.
     return _MappingEntry(
         aws_equivalent=None,
         score_pct=0,
-        reason=f"No mapping rule for `{tf_type}` in our table — operator must review.",
-        notes=("Add this type to migrator/plan/coverage.py:_GCP_TO_AWS to enable translation.",),
+        reason=f"No mapping rule for `{tf_type}` in our coverage table.",
+        notes=(
+            "Add this type to migrator/plan/coverage.py:_GCP_TO_AWS to enable "
+            "translation, OR to _MANUAL_REVIEW_TYPES if it has no clean AWS "
+            "equivalent (with a one-line reason for the operator).",
+        ),
     )
 
 

@@ -208,9 +208,15 @@ def _stack_name_from_dir(stack_dir: str) -> str:
 _INFER_RULES = (
     # ---------- Networking ----------
     ("cloud-armor",                    "google_compute_security_policy"),
+    # DH customer uses British spelling — synonym match
+    ("cloud-armour",                   "google_compute_security_policy"),
     ("network-connectivity",           "google_network_connectivity_hub"),
     ("ncc-hub",                        "google_network_connectivity_hub"),
     ("ncc-spoke",                      "google_network_connectivity_spoke"),
+    # DH-specific path segment for compute address allocation (one
+    # leaf stack per env that bundles internal + global static IPs).
+    # Maps to google_compute_address (handled by EIP translator).
+    ("net-address",                    "google_compute_address"),
     ("forwarding-rule",                "google_compute_global_forwarding_rule"),
     ("net-lb",                         "google_compute_global_forwarding_rule"),
     ("load-balancer",                  "google_compute_global_forwarding_rule"),
@@ -257,12 +263,22 @@ _INFER_RULES = (
     ("instance-template",              "google_compute_instance_template"),
     ("compute-instance",               "google_compute_instance"),
     ("vm",                             "google_compute_instance"),
+    # DH customer's module repo uses `compute-disc` (a typo or shortened
+    # spelling) instead of `compute-disk`. Add explicit rule so it
+    # still classifies as a Compute Disk → AWS EBS.
+    ("compute-disc",                   "google_compute_disk"),
     ("disk",                           "google_compute_disk"),
     ("cloud-run-v2",                   "google_cloud_run_v2_service"),
     ("cloud-run",                      "google_cloud_run_v2_service"),
     ("cloud-functions-v2",             "google_cloudfunctions2_function"),
     ("cloud-function",                 "google_cloudfunctions2_function"),
     ("cloud-functions",                "google_cloudfunctions2_function"),
+    # DH-specific: `shared-infra/http` is their wrapper around an
+    # HTTP-triggered Cloud Function. Dependencies (auth0, pubsub,
+    # service-account, cloud-build/trigger) confirm Cloud Function shape.
+    # Path-segment form so this doesn't false-match URLs like
+    # `https://cloud.google.com/foo/http-load-balancer/...`.
+    ("/shared-infra/http",             "google_cloudfunctions2_function"),
 
     # ---------- Data ----------
     ("cloud-sql",                      "google_sql_database_instance"),
@@ -312,6 +328,8 @@ _INFER_RULES = (
     ("logging-sink",                   "google_logging_project_sink"),
     ("log-sink",                       "google_logging_project_sink"),
     ("logging-bucket",                 "google_logging_project_bucket_config"),
+    # DH source alias for the same resource type
+    ("log-bucket",                     "google_logging_project_bucket_config"),
     ("monitoring-alert",               "google_monitoring_alert_policy"),
     ("alert-policy",                   "google_monitoring_alert_policy"),
     ("uptime-check",                   "google_monitoring_uptime_check_config"),
@@ -324,6 +342,67 @@ _INFER_RULES = (
     ("airflow",                        "google_composer_environment"),
     ("dataflow",                       "google_dataflow_job"),
     ("dataform",                       "google_dataform_repository"),
+
+    # ---------- CI/CD (Cloud Build family) ----------
+    # Order matters: longest/most-specific cloud-build path first.
+    ("cloud-build/repository",         "google_cloudbuildv2_repository"),
+    ("cloud-build/trigger",            "google_cloudbuild_trigger"),
+    ("cloud-build/worker-pool",        "google_cloudbuild_worker_pool"),
+    # Generic last-segment matches (when path doesn't include
+    # `cloud-build/` prefix but the leaf clearly indicates the type).
+    ("worker-pool",                    "google_cloudbuild_worker_pool"),
+    ("cloud-build",                    "google_cloudbuild_trigger"),
+    # `trigger` and `repository` are too broad on their own, but match
+    # path-segment forms like `/trigger` / `/repository` to scope them.
+    ("/trigger",                       "google_cloudbuild_trigger"),
+    ("/repository",                    "google_cloudbuildv2_repository"),
+
+    # ---------- Async work / queues ----------
+    ("cloud-tasks",                    "google_cloud_tasks_queue"),
+    ("cloud-task",                     "google_cloud_tasks_queue"),
+
+    # ---------- Data (AlloyDB) ----------
+    ("alloy-db",                       "google_alloydb_instance"),
+    ("alloydb",                        "google_alloydb_instance"),
+
+    # ---------- IAM / Org hierarchy ----------
+    ("folder-iam",                     "google_folder_iam_binding"),
+    ("project-iam-access",             "google_project_iam_member"),
+    ("project-level-access",           "google_project_iam_member"),
+    ("project-org-policy",             "google_org_policy_policy"),
+    ("project-tags",                   "google_tags_tag_value"),
+    ("tag/data",                       "google_tags_tag_value"),
+    ("api-activation",                 "google_project_service"),
+    # `project` is broad — only match path-segment form so dirs like
+    # `prj-dh-n-dev-os-01` (with `project` inside) don't false-match.
+    # Customer's source has `/shared-infra/project/` patterns.
+    ("/project/",                      "google_project"),
+    ("/project",                       "google_project"),
+    ("multiple-projects",              "google_project"),
+
+    # ---------- Project data sources (cross-stack reads) ----------
+    # `projects-data` is DH's pattern for `data "google_project" "X"`
+    # blocks that read OTHER projects' attributes (project_number, etc.)
+    # for cross-project IAM/networking. No AWS resource equivalent —
+    # AWS data sources read accounts via aws_caller_identity.
+    ("projects-data",                  "google_project_data_source"),
+
+    # ---------- Anthos Service Mesh (GCP-specific paradigm) ----------
+    ("asm-setup",                      "google_gke_hub_feature"),
+    ("anthos-service-mesh",            "google_gke_hub_feature"),
+
+    # ---------- Service quota tweaks ----------
+    ("quota-adjuster",                 "google_service_usage_consumer_quota_override_v1beta"),
+
+    # ---------- 3rd-party providers (Auth0 / Octopus / Workspace) ----------
+    # These are non-GCP providers customers wire into the same
+    # Terragrunt repo. They classify as MANUAL_REVIEW (no GCP→AWS
+    # path) but inference here surfaces them with a clean type label
+    # instead of "unknown_X". Coverage.py adds matching _MANUAL_REVIEW
+    # entries with explicit reasons.
+    ("auth0",                          "auth0_provider"),
+    ("octopus",                        "octopusdeploy_resource"),
+    ("google-drive",                   "googleworkspace_drive_folder"),
 
     # ---------- Specials Kiro flags as MANUAL_REVIEW ----------
     ("apigee-organization",            "google_apigee_organization"),
