@@ -821,63 +821,65 @@ with tab_aws:
             if not filtered:
                 st.info("No files match the current filters.", icon="🔎")
             else:
-                # Group filtered by top-level dir (or 2 levels deep if
-                # only 1 top-level dir is selected — keeps the expander
-                # count manageable when filtering down to a single env).
-                from collections import OrderedDict
-                grouped: "OrderedDict[str, list]" = OrderedDict()
-
-                # If user has filtered to a single top dir, group by
-                # second-level (e.g. environments/dev/* shows by project).
-                use_two_level = len(top_filter) == 1
-                for rel, full in filtered:
-                    parts = rel.split("/")
-                    if use_two_level and len(parts) >= 2:
-                        group_key = "/".join(parts[:2])
-                    else:
-                        group_key = parts[0] if "/" in rel else "(root)"
-                    grouped.setdefault(group_key, []).append((rel, full))
-
-                # Pagination — cap how many EXPANDERS we render at once.
-                # Each expander contains a group of files. With 1,050
-                # source files, pagination keeps DOM-element count sane.
-                MAX_GROUPS_PER_PAGE = 20
-                total_groups = len(grouped)
-                if total_groups > MAX_GROUPS_PER_PAGE:
-                    page = st.number_input(
-                        f"Page (1 to {(total_groups + MAX_GROUPS_PER_PAGE - 1) // MAX_GROUPS_PER_PAGE})",
-                        min_value=1,
-                        max_value=(total_groups + MAX_GROUPS_PER_PAGE - 1) // MAX_GROUPS_PER_PAGE,
-                        value=1,
-                        step=1,
-                        key="aws_skel_page",
+                # ---- On-demand single-file viewer ----
+                # The OLD approach rendered up to 500 syntax-highlighted
+                # code blocks eagerly (20 groups × 25 files). With 234
+                # emitted files plus 1k+ source files, that's a DOM-killer
+                # — pages hung for 30+ seconds and refresh wiped state.
+                #
+                # New pattern: file picker + ONE code block. The user
+                # sees the full filtered list, picks what they want to
+                # inspect, and only that file's contents render. DOM is
+                # bounded regardless of repo size.
+                file_options = [rel for rel, _ in filtered]
+                selected_rel = st.selectbox(
+                    f"Pick a file to view ({len(filtered):,} match)",
+                    options=file_options,
+                    index=0,
+                    key="aws_skel_selected_file",
+                )
+                # Map back to the full path
+                sel_full = next(
+                    (full for rel, full in filtered if rel == selected_rel),
+                    None,
+                )
+                if sel_full:
+                    try:
+                        sel_size = os.path.getsize(sel_full)
+                        sel_content = Path(sel_full).read_text(encoding="utf-8")
+                    except (OSError, UnicodeDecodeError) as _e:
+                        sel_content = f"(could not read: {_e})"
+                        sel_size = 0
+                    sel_lang = (
+                        "markdown" if selected_rel.endswith(".md")
+                        else "bash" if selected_rel.endswith(".sh")
+                        else "json" if selected_rel.endswith(".json")
+                        else "hcl"
                     )
-                    start = (page - 1) * MAX_GROUPS_PER_PAGE
-                    end = start + MAX_GROUPS_PER_PAGE
-                    visible_groups = list(grouped.items())[start:end]
-                    st.caption(f"Showing groups {start + 1}-{min(end, total_groups)} of {total_groups}.")
-                else:
-                    visible_groups = list(grouped.items())
+                    _meta_col_a, _meta_col_b = st.columns([3, 1])
+                    with _meta_col_a:
+                        st.caption(f"`{selected_rel}` · {sel_size:,} bytes")
+                    with _meta_col_b:
+                        st.download_button(
+                            "⬇ Download file",
+                            data=sel_content,
+                            file_name=os.path.basename(selected_rel),
+                            mime="text/plain",
+                            key=f"dl_skel_{abs(hash(selected_rel))}",
+                        )
+                    st.code(sel_content, language=sel_lang)
 
-                # Per-group cap on file content rendering (large groups
-                # show summary + first-N).
-                FILE_CAP_PER_GROUP = 25
-                for top, members in visible_groups:
-                    with st.expander(f"📂 `{top}/`  ({len(members)} files)"):
-                        for rel, full in members[:FILE_CAP_PER_GROUP]:
-                            st.markdown(f"**`{rel}`**")
-                            try:
-                                content = Path(full).read_text(encoding="utf-8")
-                                st.code(content, language="hcl" if rel.endswith(".hcl")
-                                        else "markdown" if rel.endswith(".md")
-                                        else "hcl")
-                            except (OSError, UnicodeDecodeError):
-                                st.caption("(could not read)")
-                        if len(members) > FILE_CAP_PER_GROUP:
-                            st.info(
-                                f"... and {len(members) - FILE_CAP_PER_GROUP} more files in `{top}/`. "
-                                f"Refine filters above to narrow further, or use the **💾 Output Files** tab to download the full ZIP."
-                            )
+                # Optional flat directory listing — useful for quick
+                # scanning without opening files. Cheap to render (one
+                # st.dataframe replaces N expanders).
+                with st.expander("📋 Full file list (table view)", expanded=False):
+                    st.dataframe(
+                        [{"Path": rel,
+                          "Size (bytes)": os.path.getsize(full) if os.path.isfile(full) else 0}
+                         for rel, full in filtered],
+                        hide_index=True,
+                        use_container_width=True,
+                    )
 
 
 # ---------------- Validation (Tiers 0–3) ----------------
@@ -1026,7 +1028,7 @@ with tab_files:
     else:
         st.caption(f"Output directory: `{result.output_dir}`")
 
-        # Walk the output dir + render every file with a download button.
+        # Walk the output dir to collect file paths (cheap — no reads).
         files_found = []
         for root, _dirs, fnames in os.walk(result.output_dir):
             for fname in sorted(fnames):
@@ -1037,52 +1039,126 @@ with tab_files:
         if not files_found:
             st.warning("No output files generated.")
         else:
-            # Bundle as a zip for one-click download.
-            with tempfile.NamedTemporaryFile(
-                suffix=".zip", delete=False, prefix="migrator_bundle_"
-            ) as zip_tmp:
-                bundle_path = zip_tmp.name
-            shutil.make_archive(
-                bundle_path[:-4],  # shutil appends .zip
-                "zip",
-                result.output_dir,
-            )
-            with open(bundle_path, "rb") as zf:
-                st.download_button(
-                    label=f"⬇ Download all ({len(files_found)} files) as ZIP",
-                    data=zf.read(),
-                    file_name="migrator_output.zip",
-                    mime="application/zip",
-                    use_container_width=False,
+            # ---- ZIP bundle (cached per output_dir) ----
+            # The OLD code rebuilt the ZIP on EVERY page rerun — for a
+            # 234-file emission that's ~10 MB of compression + temp-file
+            # I/O on every Streamlit interaction. We cache the resulting
+            # bytes in session_state keyed by output_dir so we build
+            # exactly once per migration.
+            _zip_cache_key = f"_migrator_zip_cache::{result.output_dir}"
+            zip_bytes = st.session_state.get(_zip_cache_key)
+            if zip_bytes is None:
+                with tempfile.NamedTemporaryFile(
+                    suffix=".zip", delete=False, prefix="migrator_bundle_"
+                ) as zip_tmp:
+                    bundle_path = zip_tmp.name
+                shutil.make_archive(
+                    bundle_path[:-4],  # shutil appends .zip
+                    "zip",
+                    result.output_dir,
                 )
-            try:
-                os.remove(bundle_path)
-            except OSError:
-                pass
+                with open(bundle_path, "rb") as zf:
+                    zip_bytes = zf.read()
+                try:
+                    os.remove(bundle_path)
+                except OSError:
+                    pass
+                st.session_state[_zip_cache_key] = zip_bytes
 
-            st.markdown("**Files generated:**")
-            for rel, full in files_found:
-                with st.expander(rel):
+            st.download_button(
+                label=f"⬇ Download all ({len(files_found):,} files) as ZIP",
+                data=zip_bytes,
+                file_name="migrator_output.zip",
+                mime="application/zip",
+                use_container_width=False,
+                key="dl_full_bundle",
+            )
+
+            st.markdown("---")
+            st.markdown("**Browse individual files:**")
+            st.caption(
+                "Pick a file to view inline. Previously every file rendered "
+                "eagerly, which froze the browser on large emissions (the "
+                "fix that's running now)."
+            )
+
+            # ---- On-demand single-file viewer ----
+            # Critical DOM-load fix: with 234+ files an expander-per-file
+            # approach loaded ~240 syntax-highlighted code blocks into
+            # the DOM on every page rerun. Now: ONE st.code() rendered
+            # for the selected file. Bounded DOM regardless of repo size.
+            file_paths = [rel for rel, _ in files_found]
+            sel_rel = st.selectbox(
+                "File",
+                options=file_paths,
+                index=0,
+                key="output_files_selected",
+            )
+            sel_full = next((full for rel, full in files_found if rel == sel_rel), None)
+            if sel_full:
+                try:
+                    sel_size = os.path.getsize(sel_full)
+                except OSError:
+                    sel_size = 0
+                st.caption(f"`{sel_rel}` · {sel_size:,} bytes")
+
+                # Treat known text extensions as previewable; everything
+                # else gets a download link instead of an inline render.
+                _text_exts = (".md", ".sh", ".tf", ".hcl", ".json", ".yaml",
+                              ".yml", ".txt", ".py", ".tfvars")
+                if sel_rel.lower().endswith(_text_exts):
                     try:
-                        size = os.path.getsize(full)
-                    except OSError:
-                        size = 0
-                    st.caption(f"{size} bytes")
-                    if rel.endswith(".md") or rel.endswith(".sh") or rel.endswith(".tf") \
-                       or rel.endswith(".hcl") or rel.endswith(".json"):
-                        try:
-                            content = Path(full).read_text(encoding="utf-8")
-                            language = (
-                                "markdown" if rel.endswith(".md")
-                                else "bash" if rel.endswith(".sh")
-                                else "json" if rel.endswith(".json")
-                                else "hcl"
+                        content = Path(sel_full).read_text(encoding="utf-8")
+                        language = (
+                            "markdown" if sel_rel.endswith(".md")
+                            else "bash" if sel_rel.endswith(".sh")
+                            else "json" if sel_rel.endswith(".json")
+                            else "yaml" if sel_rel.endswith((".yaml", ".yml"))
+                            else "python" if sel_rel.endswith(".py")
+                            else "hcl"
+                        )
+                        # Cap inline rendering to 100 KB — anything larger
+                        # gets a download button instead. Prevents the
+                        # .migrator_state.json (246 KB) from re-hanging
+                        # the page.
+                        if len(content) > 100_000:
+                            st.warning(
+                                f"File is {len(content):,} bytes — too large "
+                                "to render inline. Download it below.",
+                                icon="📦",
                             )
+                            st.download_button(
+                                "⬇ Download file",
+                                data=content,
+                                file_name=os.path.basename(sel_rel),
+                                mime="text/plain",
+                                key=f"dl_outfile_{abs(hash(sel_rel))}",
+                            )
+                        else:
+                            _dl_col, _ = st.columns([1, 4])
+                            with _dl_col:
+                                st.download_button(
+                                    "⬇ Download file",
+                                    data=content,
+                                    file_name=os.path.basename(sel_rel),
+                                    mime="text/plain",
+                                    key=f"dl_outfile_{abs(hash(sel_rel))}",
+                                )
                             st.code(content, language=language)
-                        except (OSError, UnicodeDecodeError):
-                            st.warning("Could not read file content (non-text or unreadable).")
-                    else:
-                        st.caption("(binary or unsupported preview format)")
+                    except (OSError, UnicodeDecodeError):
+                        st.warning("Could not read file content (non-text or unreadable).")
+                else:
+                    st.caption("(binary or unsupported preview format — use the ZIP download above)")
+
+            # Cheap flat listing for "what's in here at a glance"
+            with st.expander(f"📋 Full file list — {len(files_found):,} files", expanded=False):
+                st.dataframe(
+                    [{"Path": rel,
+                      "Size (bytes)": os.path.getsize(full) if os.path.isfile(full) else 0}
+                     for rel, full in files_found],
+                    hide_index=True,
+                    use_container_width=True,
+                )
 
 
 # Reset button
