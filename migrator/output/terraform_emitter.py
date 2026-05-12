@@ -667,6 +667,19 @@ def _render_env_main_tf(
     """One module {} block per source resource. Order: stable by module_path then name."""
     from migrator.translate.compliance_profiles import list_services_hardened_by
     _hardened_globally = set(list_services_hardened_by(compliance_profile))
+    # Compliance-profile tokens (alb / eks / rds / s3 / secrets / vpc) don't
+    # match translator service_names 1:1 — eks-cluster / aurora-postgres /
+    # s3-bucket / secretsmanager-secret etc. emit longer slugs. Aliases let
+    # the header's "Hardened defaults applied to" claim reflect REAL
+    # coverage instead of just the exact-token matches. Kiro v9 #6.
+    _HARDENED_TOKEN_TO_SERVICES: Dict[str, tuple] = {
+        "alb":     ("alb",),
+        "eks":     ("eks-cluster",),
+        "rds":     ("rds-postgres", "rds-mysql", "aurora-postgres"),
+        "s3":      ("s3-bucket",),
+        "secrets": ("secretsmanager-secret", "secrets-manager-secret"),
+        "vpc":     ("vpc",),
+    }
 
     # Build the rest of the body FIRST so we can intersect the
     # globally-hardenable service list with the ones actually emitted
@@ -873,9 +886,19 @@ def _render_env_main_tf(
     # all-globals listing as misleading (common_common_network header
     # claimed eks + rds hardening despite emitting neither module).
     services_actually_emitted = {svc for _blk, svc in modules_in_env}
-    services_hardened_here = sorted(
-        _hardened_globally & services_actually_emitted
-    )
+    # Intersect via the alias map so e.g. token "eks" matches when the
+    # env emits service_name "eks-cluster". Without aliases, only
+    # exact-match tokens like "alb" and "vpc" surfaced — Kiro v9 #6
+    # caught terarecon's header claiming only "alb" hardened despite
+    # eks-cluster + aurora-postgres + s3-bucket all having HIPAA
+    # defaults applied.
+    services_hardened_here = sorted([
+        tok for tok in _hardened_globally
+        if any(
+            svc in services_actually_emitted
+            for svc in _HARDENED_TOKEN_TO_SERVICES.get(tok, (tok,))
+        )
+    ])
     header: List[str] = []
     header.append(f"# AWS Terraform root for env={env_name}")
     header.append("# Synthesized by Cloud Lifecycle Intelligence — Migrator engine.")
@@ -978,6 +1001,15 @@ _CROSS_ENV_VAR_SPECS: Dict[str, _CrossEnvVarSpec] = {
             "Wired automatically to the first emitted S3 bucket when this "
             "env has an s3-bucket module; otherwise supplied here for "
             "operators to set via tfvars."
+        ),
+    ),
+    "firehose_destination_bucket": _CrossEnvVarSpec(
+        type="string",
+        default_hcl='"TODO-supply-firehose-destination-bucket"',
+        description=(
+            "S3 bucket NAME (not ARN) that Kinesis Firehose delivers log "
+            "records to. Auto-wired to the first emitted S3 bucket when "
+            "this env has an s3-bucket module; otherwise supply via tfvars."
         ),
     ),
 }

@@ -468,13 +468,30 @@ def _extract_for_each(fe_spec: Dict, source_args: Dict):
                         v = _extract_input_value(ii_spec, source_args, ii_name)
                         if v is not None:
                             synth_item[ii_name] = v
-                    safe_key = (
-                        str(map_key)
-                        .replace("-", "_")
-                        .replace(".", "_")
-                        .replace("/", "_")
-                    )
-                    return {safe_key: synth_item}
+                    # Sanitize the synthesized map key. Strip ${...}
+                    # interpolation chunks BEFORE the identifier-safe
+                    # collapse — without this, a map_key value like
+                    # `${local.root_dns.managed_zone}` (the customer's
+                    # source value, can't be resolved at parse time)
+                    # turns into the misleading map key
+                    # `TODO-local-root-dns-managed-zone`. Better: drop
+                    # the interpolation, fall back to a synthetic name
+                    # derived from the rule's source attribute when
+                    # nothing usable remains. Kiro v9b #4.
+                    import re as _re
+                    clean = _re.sub(r"\$\{[^}]*\}", "", str(map_key))
+                    clean = _re.sub(r"[^A-Za-z0-9_]+", "_", clean).strip("_")
+                    if not clean:
+                        # The source key value was 100% interpolation —
+                        # derive a stable synthetic name from the
+                        # source-key field name (e.g., "managed_zone"
+                        # → "managed_zone_1"). Index protects against
+                        # collisions when synthesize_when_empty fires
+                        # multiple times in one for_each call (rare).
+                        clean = f"{key_from}_1"
+                    if clean[0].isdigit():
+                        clean = "_" + clean
+                    return {clean: synth_item}
         return [] if output_shape == "list" else {}
 
     # Normalize source → list of (key, item_dict) tuples.
@@ -567,51 +584,86 @@ def _extract_for_each(fe_spec: Dict, source_args: Dict):
 
 
 def _clean_garbage_strings(d: Any) -> Any:
-    """Walk a dict/list and replace strings whose values contain
-    source-context interpolation (`${local.X}`, `${var.Y}`, etc.) that
-    won't resolve in the AWS-target Terraform scope.
+    """Walk a dict/list and surgically replace each ${...} expression
+    that won't resolve in the AWS-target Terraform scope with a named
+    TODO marker, preserving the static text around it.
 
-    Without this cleanup, broken expressions like
-    ``"${trim(local.public_dns.domain, \\".\\")}.pvt"`` flow through to
-    ``_render_hcl_value`` as plain strings, get re-quoted but the inner
-    quotes break parsing, and terraform fmt rejects the file. Worse,
-    even when fmt happens to accept it, `terraform validate` fails
-    because `local.public_dns` isn't declared in the env-root scope.
+    Two reasons this function exists:
+      1. Function-wrapped interpolations like
+         ``"${trim(local.public_dns.domain, \\".\\")}.pvt"`` survive
+         the downstream sanitizer (whose regex only matches simple
+         ``${local.X}`` refs) and produce HCL with broken nested
+         quotes that fmt rejects.
+      2. Even when fmt accepts the output, ``cidr = "${local.foo}"``
+         that gets sanitizer-converted to ``"TODO-local-foo"`` is a
+         STRING constant — terraform plan calls the AWS API with the
+         literal "TODO-local-foo" and the create_subnet call rejects
+         it as an invalid CIDR. Better: replace each ${...} chunk
+         IN-PLACE with a named TODO so the operator sees what to fix
+         AND the resulting string is still recognizable.
 
-    Detection: any string that contains ``${`` AND references a known
-    source-context root identifier (`local.`, `var.`, `each.`,
-    `dependency.`) is replaced with a clean TODO marker. We lose the
-    suffix info (e.g., the `-pvt` in `${local.x}-pvt`) but keep the
-    surrounding HCL valid, which is the bigger win.
+    Old behavior (Kiro v9 caught): wholesale string replace lost ALL
+    the source context — name = "TODO-source-interpolation-needs-review"
+    told the operator nothing. New behavior: per-${...} substitution
+    preserves the static parts and names each unresolved reference.
+
+    Example:
+      ``"sb-${local.env}-shared-net-${local.secondary_region_suffix}-02"``
+      becomes
+      ``"sb-TODO-local-env-shared-net-TODO-local-secondary_region_suffix-02"``
+
+    Simple ``${local.X}`` and ``${var.X}`` references are LEFT ALONE
+    here — the downstream sanitizer (terraform_emitter._sanitize_translation)
+    handles them with full customer-profile substitution coverage.
+    Only function-wrapped / complex expressions are surgically replaced.
     """
     if isinstance(d, dict):
         return {k: _clean_garbage_strings(v) for k, v in d.items()}
     if isinstance(d, list):
         return [_clean_garbage_strings(v) for v in d]
     if isinstance(d, str):
-        if "${" in d and _looks_like_source_context_interp(d):
-            return "TODO-source-interpolation-needs-review"
+        if "${" not in d:
+            return d
+        return _replace_complex_interpolations(d)
     return d
 
 
-def _looks_like_source_context_interp(s: str) -> bool:
-    """Heuristic: does the string contain an interpolation referencing a
-    root identifier that won't resolve in the AWS-target Terraform
-    scope? These are the markers our sanitizer would otherwise rewrite
-    into TODO-local-X / TODO-var-X / etc. — but by then the surrounding
-    ``${...}`` wrapping has already turned the value into broken HCL.
+def _replace_complex_interpolations(s: str) -> str:
+    """For each ``${...}`` chunk in ``s``, if it's a COMPLEX expression
+    (function call / index access / contains quoted string), replace
+    with a named TODO based on the embedded local/var/each/dependency
+    reference. Simple references pass through unchanged for the
+    downstream sanitizer + customer-profile path to handle.
     """
+    import re as _re
+
+    def repl(m):
+        expr = m.group(1)
+        # Simple reference (no function/index/quote) → pass through.
+        is_complex = "(" in expr or '"' in expr or "[" in expr
+        if not is_complex:
+            return m.group(0)
+        # Extract the first known reference embedded in the expression
+        # and synthesize a named TODO. This is more informative than
+        # the previous wholesale `TODO-source-interpolation-needs-review`
+        # marker which hid the source context from the operator.
+        for kind in ("local", "var", "each", "dependency"):
+            mref = _re.search(rf"\b{kind}\.([A-Za-z0-9_.\-]+)", expr)
+            if mref:
+                slug = _re.sub(r"[^A-Za-z0-9_]+", "-", mref.group(1)).strip("-")
+                return f"TODO-{kind}-{slug}"
+        return "TODO-unresolved"
+
+    return _re.sub(r"\$\{([^}]*)\}", repl, s)
+
+
+def _looks_like_source_context_interp(s: str) -> bool:
+    """Legacy helper — kept in case other code paths import it. The
+    surgical replacer above doesn't use this since per-${} matching
+    is more precise."""
     needles = (
-        "local.",
-        "var.",
-        "each.",
-        "dependency.",
-        # post-sanitizer signatures (in case this function is called
-        # after the sanitizer ran)
-        "TODO-local-",
-        "TODO_local_",
-        "TODO-var-",
-        "TODO-each-",
+        "local.", "var.", "each.", "dependency.",
+        "TODO-local-", "TODO_local_", "TODO-var-", "TODO-each-",
         "TODO-dependency-",
     )
     return any(n in s for n in needles)

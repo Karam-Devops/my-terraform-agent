@@ -199,6 +199,21 @@ _WIRING_RULES: List[WiringRule] = [
         provider_input_map="buckets",
         cross_env_var="query_results_bucket",
     ),
+    # ---- Kinesis Firehose → S3 (log sink destination bucket) ----
+    # The log-sink-firehose translator emits `destination_bucket =
+    # "TODO-firehose-destination-bucket"` because the GCP source's
+    # destination is a BigQuery URI (no AWS equivalent). Wire to the
+    # first emitted S3 bucket in this env if one exists, OR fall back
+    # to a tfvar so the operator supplies the bucket name. Kiro v9 #3.
+    WiringRule(
+        input_name="destination_bucket",
+        provider_service="s3-bucket",
+        provider_output="bucket_ids",
+        todo_placeholder="TODO-firehose-destination-bucket",
+        convert="scalar_first",
+        provider_input_map="buckets",
+        cross_env_var="firehose_destination_bucket",
+    ),
     # ---- EventBridge Scheduler → SNS topic ----
     # Scheduler module blocks bundle MANY schedules, each with its own
     # target topic. The block-level consumer_block_name can't tell us
@@ -573,6 +588,21 @@ def rewrite_inputs(
             # state. The emitter declares the variable in variables.tf
             # so terraform validate stays green.
             replacement_ref = f"var.{rule.cross_env_var}"
+        elif rule.line_context_key_re:
+            # No in-env provider AND no cross-env fallback, BUT the rule
+            # has a per-line key resolver (e.g., EventBridge target_arn
+            # walks back for target_type + name). Run the per-line path
+            # with an empty candidate list — it'll fall through to the
+            # target-type-aware named TODO (e.g.,
+            # `TODO-no-matching-lambda-for-hasura-graphql-client-scheduler`).
+            # Kiro v9b #3: sb_txw_3 doesn't emit an SNS module but its
+            # scheduler block had `target_arn = "TODO-target-arn"` which
+            # we want re-named to the target-type TODO for consistency
+            # with envs that DO have SNS.
+            out = _apply_per_line_substitution(
+                out, rule, base_ref="", candidate_keys=[], alt_hint="",
+            )
+            continue
         else:
             # No in-env provider AND no cross-env fallback — leave the
             # TODO for manual resolution.

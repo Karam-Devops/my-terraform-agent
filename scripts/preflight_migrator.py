@@ -63,6 +63,16 @@ from typing import Dict, List, Tuple
 _ANTIPATTERNS: List[Tuple[str, str, str, str]] = [
     # ---- Critical: would fail terraform plan or apply ----
     (
+        "TODO-source-interpolation-needs-review (wholesale-replaced source value)",
+        r"TODO-source-interpolation-needs-review",
+        "critical",
+        "rules_engine._clean_garbage_strings did a wholesale replacement "
+        "instead of per-${} surgical replacement. The string ends up as a "
+        "literal AWS API input value — invalid CIDR / DNS name / etc. — and "
+        "terraform plan rejects it. See _replace_complex_interpolations in "
+        "rules_engine.py. Kiro v9 #1+#2.",
+    ),
+    (
         "TODO-RESOLVE in emitted values",
         r"TODO-RESOLVE",
         "critical",
@@ -131,6 +141,64 @@ _ANTIPATTERNS: List[Tuple[str, str, str, str]] = [
         "Cross-env variable still has a TODO-string default — AWS API will "
         "reject the literal at apply. Use `nullable = false` with NO default "
         "so terraform plan fails fast with a clear 'variable is required' message.",
+    ),
+    (
+        "Unwired Firehose destination_bucket",
+        r'destination_bucket\s+=\s+"TODO-firehose-destination-bucket"',
+        "critical",
+        "log-sink-firehose translator emitted the TODO placeholder but the "
+        "wiring layer didn't substitute. Check the WiringRule for "
+        "input_name=destination_bucket. Kiro v9 #3.",
+    ),
+    (
+        "TODO-local-X / TODO-var-X in CIDR field (plan-breaks, operator-action)",
+        r'cidr\s*=\s*"TODO-(local|var|each|dependency)-',
+        # MINOR rather than CRITICAL because this is operator-action-required
+        # output, not an engine regression: the source has unresolvable
+        # ${local.X} interpolation and we surface it with a named TODO.
+        # Preflight reports the count so a reviewer can compare to baseline;
+        # if it grows after an engine change, that IS a regression.
+        "minor",
+        "AWS provider's client-side CIDR validation rejects the literal "
+        "TODO string at plan time. Source has an unresolvable interpolation "
+        "(e.g., local.secondary_subnet_cfgs.X.ip_cidr_range). The fix is "
+        "operator-side: replace the TODO with the real CIDR. Engine-side: "
+        "consider emitting a nullable=false `var.subnet_X_cidr` instead "
+        "so plan fails with a clearer 'variable is required' message. "
+        "Kiro v9 #1.",
+    ),
+    (
+        "TODO-local-X in DNS field (plan-breaks, operator-action)",
+        r'dns_name\s*=\s*"TODO-(local|var|each|dependency)-',
+        "minor",
+        "AWS provider rejects the literal TODO string as an invalid DNS "
+        "name at plan time. Same root cause as cidr: source local can't "
+        "be resolved. Operator must supply the real DNS name. Kiro v9 #2.",
+    ),
+    (
+        "TODO-local-X in ARN field (plan-breaks)",
+        r'(arn|certificate_arn|kms_key_arn|target_arn|role_arn)\s*=\s*"TODO-(local|var|each|dependency)-',
+        "critical",
+        "AWS provider validates ARN format client-side. TODO-local-X "
+        "isn't a valid ARN. Either supply the real ARN via tfvars or use "
+        "a cross-env var fallback (see cross_module_wiring.py).",
+    ),
+    (
+        "TODO-local-X in IP address field (plan-breaks)",
+        r'(ip_address|private_ip|public_ip|allocation_id)\s*=\s*"TODO-(local|var|each|dependency)-',
+        "critical",
+        "AWS provider validates IP format. TODO-local-X isn't a valid IP. "
+        "Operator must replace.",
+    ),
+    (
+        "Module emitted but missing from HIPAA header (compliance audit gap)",
+        # Sentinel pattern — the actual check is done by
+        # `_check_header_completeness`. Listed here so the antipatterns
+        # report includes the bug class.
+        r"__sentinel_never_matches__",
+        "minor",
+        "Header alias map doesn't cover this service. Add it to "
+        "_HARDENED_TOKEN_TO_SERVICES in terraform_emitter.py.",
     ),
     (
         "Mangled interpolation that should have substituted",
@@ -245,17 +313,43 @@ def _scan_antipatterns(envs_dir: str) -> Dict[str, List[Tuple[str, int]]]:
 
 
 def _check_header_accuracy(envs_dir: str) -> List[Tuple[str, str]]:
-    """Verify each env's HIPAA header lists ONLY services actually emitted
-    in that env. Misleading-header bugs (Kiro v8 #2) caught here."""
+    """Bidirectional check on each env's HIPAA header:
+    1. Header claims a service that isn't emitted (misleading — was the
+       only direction the old version caught).
+    2. A service IS emitted that SHOULD have been listed under the
+       compliance profile but the header skipped it (compliance-audit
+       gap — Kiro v9 #6).
+
+    The token-to-service alias map mirrors the one in terraform_emitter.py.
+    Keep them in sync; preflight regression catches mismatches.
+    """
     issues: List[Tuple[str, str]] = []
     if not os.path.isdir(envs_dir):
         return issues
 
+    # Tokens that compliance_profiles.py hardens — short slugs.
+    # Map to the slug-set of translator service_names they cover.
+    token_to_services = {
+        "alb":     {"alb"},
+        "eks":     {"eks-cluster"},
+        "rds":     {"rds-postgres", "rds-mysql", "aurora-postgres"},
+        "s3":      {"s3-bucket"},
+        "secrets": {"secretsmanager-secret", "secrets-manager-secret"},
+        "vpc":     {"vpc"},
+    }
+
     header_re = re.compile(
         r"^# Hardened defaults applied to: (.+)$", re.MULTILINE,
     )
+    profile_re = re.compile(
+        r"^# Compliance profile: (\w+)$", re.MULTILINE,
+    )
+    # Match only LIVE source = "..." lines (not the scaffold-only
+    # comment-prefixed ones the emitter writes for un-translated
+    # resources like `#   source = "../../modules/eks-cluster"`).
+    # Anchored to start-of-line (no leading `#`) via MULTILINE.
     source_re = re.compile(
-        r'source\s*=\s*"\.\./\.\./modules/([^/"]+)/?"',
+        r'(?m)^[ \t]+source\s*=\s*"\.\./\.\./modules/([^/"]+)/?"',
     )
 
     for env_name in sorted(os.listdir(envs_dir)):
@@ -267,23 +361,42 @@ def _check_header_accuracy(envs_dir: str) -> List[Tuple[str, str]]:
                 content = f.read()
         except (OSError, UnicodeDecodeError):
             continue
+
+        profile_match = profile_re.search(content)
+        if not profile_match or profile_match.group(1).lower() == "none":
+            continue   # no compliance profile, no header to check
+
         m = header_re.search(content)
         if not m:
             continue
+
         listed = {s.strip() for s in m.group(1).split(",")}
-        # Services start with a known hardenable name (alb / eks / rds / s3 /
-        # secrets / vpc) — strip any "(none)" markers.
         listed.discard("(none)")
         emitted_services = set(source_re.findall(content))
-        # Per compliance_profiles.py, service tokens are short slugs.
-        # Map them to the prefix of the emitted service_name.
-        # e.g., listed "eks" matches emitted "eks-cluster".
+
+        # Direction 1: header claims X but X isn't emitted.
         for tok in sorted(listed):
-            if not any(svc.startswith(tok) for svc in emitted_services):
+            covers = token_to_services.get(tok, {tok})
+            if not (covers & emitted_services):
                 issues.append((
                     env_name,
-                    f'header claims "{tok}" hardened, but no module starting '
-                    f'with "{tok}" is emitted here',
+                    f'header claims "{tok}" hardened, but no matching '
+                    f'module ({", ".join(sorted(covers))}) is emitted here',
+                ))
+
+        # Direction 2: an emitted service is missing from the header.
+        # Only relevant when the env DOES have a hardenable module but
+        # the header doesn't list its token.
+        for tok, covers in token_to_services.items():
+            if tok in listed:
+                continue
+            matching_modules = covers & emitted_services
+            if matching_modules:
+                issues.append((
+                    env_name,
+                    f'module {next(iter(matching_modules))} is emitted with '
+                    f'hardening defaults but header doesn\'t list token "{tok}" '
+                    f'— compliance audit will miss it',
                 ))
     return issues
 
@@ -392,11 +505,19 @@ def main() -> int:
             return 2
         validation_summary = engine_out["validation"]
         print(f"[run]  Resources: {engine_out['confidence']}")
+        # Engine-reported tier failures are CRITICAL — they mean the
+        # emitted output won't parse or won't fmt-check. Always block
+        # the push when these are non-zero. (Previously preflight only
+        # warned and exited 0 if no antipatterns matched — caused
+        # me to miss a sb_demo HCL-parse failure I'd introduced.)
+        engine_tier_failures = False
         if validation_summary and not validation_summary.get("overall_passed"):
-            print("[WARN] Engine reported tier failures (excluding skipped tier2):")
             for t in validation_summary.get("tiers", []):
                 if t.get("status") == "failed":
-                    print(f"       tier{t['tier']}: {t['failure_count']} failures")
+                    engine_tier_failures = True
+                    print(f"[FAIL] Engine tier{t['tier']}: {t['failure_count']} failures")
+                    for f in t.get("failures", [])[:3]:
+                        print(f"       {str(f)[:200]}")
 
     # --- 2. Antipattern grep ---
     envs_dir = os.path.join(output_dir, "target", "environments")
@@ -421,9 +542,24 @@ def main() -> int:
     # --- 4. Report + exit code ---
     critical = _print_findings(findings, header_issues)
 
+    # Pull `engine_tier_failures` from the migration path if it ran.
+    # When --skip-migration was used, default to False (existing output
+    # is presumed clean per the prior emit run).
+    if not args.skip_migration:
+        # captured into closure-style local — re-derive from validation
+        if validation_summary and not validation_summary.get("overall_passed"):
+            engine_failed = any(
+                t.get("status") == "failed"
+                for t in validation_summary.get("tiers", [])
+            )
+        else:
+            engine_failed = False
+    else:
+        engine_failed = False
+
     print()
     print("=" * 70)
-    if critical or not tier2_pass:
+    if critical or not tier2_pass or engine_failed:
         print("PREFLIGHT FAILED — fix above issues before pushing.")
         print("=" * 70)
         return 1

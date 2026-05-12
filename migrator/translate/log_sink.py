@@ -38,8 +38,11 @@ def translate(resource: DiscoveredResource) -> Translation:
     #   * sinks                — vanilla module library, dict-of-dicts
     #   * log_sinks            — alias
     #   * sink_configs         — alias
-    #   * log_sink_configs     — DH customer pattern, list-of-dicts where
+    #   * log_sink_configs     — DH customer pattern (list-of-dicts) where
     #                            each item has log_sink_name / destination_uri
+    #   * scalar top-level     — DH log-sink-router pattern: single sink
+    #                            declared at the top level with
+    #                            log_sink_name / destination / filter
     raw_sinks = (
         args.get("sinks")
         or args.get("log_sinks")
@@ -56,6 +59,18 @@ def translate(resource: DiscoveredResource) -> Translation:
         }
     if not isinstance(raw_sinks, dict):
         raw_sinks = {}
+
+    # Scalar-top-level fallback: when no collection source matched
+    # AND the stack defines a single sink as top-level scalars (DH's
+    # log-sink-router pattern), synthesize a one-entry map. Kiro v9 #4.
+    if not raw_sinks and args.get("log_sink_name"):
+        single = {
+            "log_sink_name": args.get("log_sink_name"),
+            "name":          args.get("log_sink_name"),
+            "destination":   args.get("destination") or args.get("destination_uri", ""),
+            "filter":        args.get("filter", ""),
+        }
+        raw_sinks = {str(args.get("log_sink_name")): single}
 
     sinks = []
     for key, src in raw_sinks.items():
@@ -113,17 +128,28 @@ def translate(resource: DiscoveredResource) -> Translation:
 def _render_sinks(sinks: list) -> str:
     if not sinks:
         return "{}"
+    import re
     lines = ["{"]
     for s in sinks:
         key = s["name"].replace("-", "_").replace(".", "_")
-        import re
         key = re.sub(r"\$\{[^}]*\}", "", key).strip("_") or "sink"
         lines.append(f'    "{key}" = {{')
         lines.append(f'      name              = "{s["name"]}"')
         lines.append(f'      destination_type  = "{s["destination_type"]}"')
-        lines.append(f'      # source destination: {s["_source_destination"][:80]}')
+        # Truncate-and-sanitize the source destination for the inline
+        # comment. Customer source destinations may include NESTED
+        # interpolation like `${dependency.X[\"${local.Y}-suffix\"]}`.
+        # Naive truncation can slice mid-`${...}` and leave unbalanced
+        # `${` tokens that confuse HCL parsing / fmt counting. Strip all
+        # `${...}` chunks before truncation so the comment is plain text.
+        # (Kiro v9 inner-brace mismatch root cause.)
+        dest_clean = re.sub(r"\$\{[^}]*\}", "<expr>",
+                            str(s["_source_destination"]))[:80]
+        lines.append(f'      # source destination: {dest_clean}')
         if s["_source_filter"]:
-            short_filter = s["_source_filter"][:60].replace('"', "'")
+            filter_clean = re.sub(r"\$\{[^}]*\}", "<expr>",
+                                  str(s["_source_filter"]))
+            short_filter = filter_clean[:60].replace('"', "'")
             lines.append(f'      # source filter: {short_filter}')
             lines.append("      # TODO: translate filter expression to CloudWatch Logs filter pattern syntax")
         lines.append("    }")
