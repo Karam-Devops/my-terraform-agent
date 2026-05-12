@@ -34,9 +34,26 @@ def translate(resource: DiscoveredResource) -> Translation:
     args = resource.arguments or {}
     notes: List[str] = []
 
-    raw_sinks = args.get("sinks") or args.get("log_sinks") or args.get("sink_configs") or {}
+    # Source key variants observed across customer repos:
+    #   * sinks                — vanilla module library, dict-of-dicts
+    #   * log_sinks            — alias
+    #   * sink_configs         — alias
+    #   * log_sink_configs     — DH customer pattern, list-of-dicts where
+    #                            each item has log_sink_name / destination_uri
+    raw_sinks = (
+        args.get("sinks")
+        or args.get("log_sinks")
+        or args.get("sink_configs")
+        or args.get("log_sink_configs")
+        or {}
+    )
     if isinstance(raw_sinks, list):
-        raw_sinks = {s.get("name", f"sink{i}"): s for i, s in enumerate(raw_sinks) if isinstance(s, dict)}
+        # Each item may use `log_sink_name` (DH) or `name` (vanilla)
+        # as its identifier. Normalize to a map keyed by name.
+        raw_sinks = {
+            s.get("log_sink_name") or s.get("name") or f"sink{i}": s
+            for i, s in enumerate(raw_sinks) if isinstance(s, dict)
+        }
     if not isinstance(raw_sinks, dict):
         raw_sinks = {}
 
@@ -44,8 +61,10 @@ def translate(resource: DiscoveredResource) -> Translation:
     for key, src in raw_sinks.items():
         if not isinstance(src, dict):
             continue
-        name = str(src.get("name", key))
-        destination = str(src.get("destination", ""))
+        # `log_sink_name` is DH's per-item identifier; `name` is vanilla.
+        name = str(src.get("name") or src.get("log_sink_name") or key)
+        # `destination_uri` is DH's destination field; `destination` is vanilla.
+        destination = str(src.get("destination") or src.get("destination_uri") or "")
         filter_expr = str(src.get("filter", ""))
 
         # Detect destination type from the destination URL

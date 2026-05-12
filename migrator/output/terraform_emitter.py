@@ -666,26 +666,15 @@ def _render_env_main_tf(
 ) -> str:
     """One module {} block per source resource. Order: stable by module_path then name."""
     from migrator.translate.compliance_profiles import list_services_hardened_by
-    _hardened_services = list_services_hardened_by(compliance_profile)
+    _hardened_globally = set(list_services_hardened_by(compliance_profile))
 
+    # Build the rest of the body FIRST so we can intersect the
+    # globally-hardenable service list with the ones actually emitted
+    # in this env. Without the intersection the header listed services
+    # this env didn't even contain — misleading per Kiro v8 review.
+    # Header lines get prepended at the end once `services_actually_emitted`
+    # is known.
     lines: List[str] = []
-    lines.append(f"# AWS Terraform root for env={env_name}")
-    lines.append("# Synthesized by Cloud Lifecycle Intelligence — Migrator engine.")
-    lines.append("# Each module {} block below corresponds to one source GCP resource.")
-    lines.append("# Review per-resource source comments; replace TODO inputs before plan.")
-    # Compliance profile banner — surfaces what defaults the operator picked.
-    if compliance_profile and compliance_profile != "none":
-        lines.append(f"#")
-        lines.append(f"# Compliance profile: {compliance_profile.upper()}")
-        lines.append(
-            f"# Hardened defaults applied to: {', '.join(_hardened_services) or '(none yet — translators not wired for this profile)'}"
-        )
-        lines.append(
-            f"# (e.g. block_public_access, KMS encryption, deletion_protection)"
-        )
-    else:
-        lines.append(f"# Compliance profile: none (operator hardens each resource manually)")
-    lines.append("")
     lines.append("locals {")
     lines.append(f'  environment = "{env_name}"')
     lines.append(f'  region      = "{aws_region}"')
@@ -878,7 +867,39 @@ def _render_env_main_tf(
             lines.append("# }")
             lines.append("")
 
-    return "\n".join(lines) + "\n"
+    # Header lines — built last so the "Hardened defaults applied to:"
+    # list intersects the globally-hardenable services with the ones
+    # actually emitted in this env. Kiro v8 review caught the previous
+    # all-globals listing as misleading (common_common_network header
+    # claimed eks + rds hardening despite emitting neither module).
+    services_actually_emitted = {svc for _blk, svc in modules_in_env}
+    services_hardened_here = sorted(
+        _hardened_globally & services_actually_emitted
+    )
+    header: List[str] = []
+    header.append(f"# AWS Terraform root for env={env_name}")
+    header.append("# Synthesized by Cloud Lifecycle Intelligence — Migrator engine.")
+    header.append("# Each module {} block below corresponds to one source GCP resource.")
+    header.append("# Review per-resource source comments; replace TODO inputs before plan.")
+    if compliance_profile and compliance_profile != "none":
+        header.append("#")
+        header.append(f"# Compliance profile: {compliance_profile.upper()}")
+        if services_hardened_here:
+            header.append(
+                f"# Hardened defaults applied to: {', '.join(services_hardened_here)}"
+            )
+            header.append("# (e.g. block_public_access, KMS encryption, deletion_protection)")
+        else:
+            header.append(
+                f"# This env emits no modules that {compliance_profile.upper()} "
+                f"hardens (would harden: {', '.join(sorted(_hardened_globally)) or '(none)'} "
+                "— but none of those modules are in this env)."
+            )
+    else:
+        header.append("# Compliance profile: none (operator hardens each resource manually)")
+    header.append("")
+
+    return "\n".join(header + lines) + "\n"
 
 
 # Description text for each known cross-env variable. Keeps the

@@ -187,10 +187,17 @@ def translate(resource: DiscoveredResource) -> Translation:
         if not isinstance(gcp_network_tags, list):
             gcp_network_tags = []
 
-        # service account email → IAM instance profile name
+        # service account email → IAM instance profile name.
+        # When the source's `service_account_email` is itself an
+        # unresolvable interpolation (dependency.X / var.X / each.X /
+        # ${local...}), we can't derive a useful profile name from it
+        # — constructing "${...}-instance-profile" yields a literal
+        # TODO string that breaks at apply time (the IAM profile
+        # doesn't exist). Skip and leave the line commented out;
+        # operator wires manually or via a var. Kiro v8 review fix.
         sa_email = str(src.get("service_account_email", ""))
         instance_profile = ""
-        if sa_email:
+        if sa_email and "${" not in sa_email and "TODO-" not in sa_email:
             # extract local part of email as profile-name hint
             local = sa_email.split("@")[0]
             instance_profile = f"{local}-instance-profile"
