@@ -233,6 +233,20 @@ _INFER_RULES = (
     ("dns-record",                     "google_dns_record_set"),
     ("dns",                            "google_dns_managed_zone"),
     ("vpc-access-connector",           "google_vpc_access_connector"),
+    # VPN classification MUST come before vpc/network — customer's source
+    # has paths like `common-network/network/net-vpn/net-vpn-ha` where the
+    # `network` substring would otherwise match first (false positive:
+    # VPN module classified as VPC).
+    ("net-vpn-ha",                     "google_compute_vpn_tunnel"),
+    ("net-vpn",                        "google_compute_vpn_tunnel"),
+    ("aws-vpn",                        "google_compute_vpn_tunnel"),
+    ("vpn-common-mgmt",                "google_compute_vpn_tunnel"),
+    ("vpn-gateway",                    "google_compute_vpn_gateway"),
+    ("vpn-tunnel",                     "google_compute_vpn_tunnel"),
+    # Bare "vpn" segment — careful, this is broad. Only matches when
+    # path contains "/vpn/" or ends in "/vpn".
+    ("/vpn/",                          "google_compute_vpn_tunnel"),
+    ("/vpn",                           "google_compute_vpn_tunnel"),
     ("vpc",                            "google_compute_network"),
     ("network",                        "google_compute_network"),
 

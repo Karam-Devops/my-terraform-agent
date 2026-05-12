@@ -236,11 +236,31 @@ _MAIN_TF = '''# AWS S3 Bucket module — emitted by Cloud Lifecycle Intelligence
 # Swap path: replace this main.tf only. variables.tf + outputs.tf
 # define the contract — keep stable.
 
+# ---- Customer-managed KMS CMK (created once per module instance) ----
+# Used by buckets that opt-in via `kms_encryption = true`. Required
+# under HIPAA / PCI compliance profiles.
+resource "aws_kms_key" "bucket_cmk" {
+  count = anytrue([for b in values(var.buckets) : lookup(b, "kms_encryption", false)]) ? 1 : 0
+
+  description             = "${var.name_prefix} S3 bucket-encryption CMK (HIPAA/PCI)"
+  deletion_window_in_days = 30
+  enable_key_rotation     = true
+  tags                    = var.tags
+}
+
+resource "aws_kms_alias" "bucket_cmk" {
+  count = length(aws_kms_key.bucket_cmk) > 0 ? 1 : 0
+
+  name          = "alias/${var.name_prefix}-s3-cmk"
+  target_key_id = aws_kms_key.bucket_cmk[0].key_id
+}
+
+# ---- Buckets ----
 resource "aws_s3_bucket" "this" {
   for_each = var.buckets
 
   bucket        = each.value.name
-  force_destroy = false
+  force_destroy = lookup(each.value, "force_destroy", false)
 
   tags = merge(
     var.tags,
@@ -266,6 +286,43 @@ resource "aws_s3_bucket_public_access_block" "this" {
   restrict_public_buckets = true
 }
 
+# ---- Server-side encryption (HIPAA/PCI compliance profiles) ----
+# Two modes:
+#   - kms_encryption = true   → SSE-KMS using the module's CMK above
+#   - kms_encryption omitted  → SSE-S3 (AES-256, default-on as of 2023)
+# SSE-S3 satisfies SOC2 baseline; HIPAA/PCI require SSE-KMS for the
+# additional access-control + audit trail KMS provides.
+resource "aws_s3_bucket_server_side_encryption_configuration" "this" {
+  for_each = var.buckets
+
+  bucket = aws_s3_bucket.this[each.key].id
+
+  rule {
+    apply_server_side_encryption_by_default {
+      sse_algorithm     = lookup(each.value, "kms_encryption", false) ? "aws:kms" : "AES256"
+      kms_master_key_id = lookup(each.value, "kms_encryption", false) ? aws_kms_key.bucket_cmk[0].arn : null
+    }
+    bucket_key_enabled = lookup(each.value, "kms_encryption", false)
+  }
+}
+
+# ---- Access logging (HIPAA/SOC2/PCI compliance profiles) ----
+# Each opt-in bucket logs to var.access_logs_bucket. Operator wires
+# that bucket via the input variable; module doesn't create it
+# (avoids the chicken-and-egg problem of logging buckets logging
+# to themselves).
+resource "aws_s3_bucket_logging" "this" {
+  for_each = {
+    for k, v in var.buckets :
+    k => v if lookup(v, "access_logging", false) && var.access_logs_bucket != ""
+  }
+
+  bucket        = aws_s3_bucket.this[each.key].id
+  target_bucket = var.access_logs_bucket
+  target_prefix = "s3-access-logs/${each.value.name}/"
+}
+
+# ---- Lifecycle rules ----
 resource "aws_s3_bucket_lifecycle_configuration" "this" {
   for_each = { for k, v in var.buckets : k => v if length(keys(v.lifecycle_rules)) > 0 }
   bucket   = aws_s3_bucket.this[each.key].id
@@ -310,6 +367,18 @@ _VARIABLES_TF = '''variable "buckets" {
   type        = map(any)
   description = "Map of bucket key -> spec (heterogeneous lifecycle_rules allowed). Schema documented in translator source."
   default     = {}
+}
+
+variable "name_prefix" {
+  type        = string
+  default     = "migrator"
+  description = "Prefix for shared resources (KMS key alias, etc.)."
+}
+
+variable "access_logs_bucket" {
+  type        = string
+  default     = ""
+  description = "Existing S3 bucket name to write access logs to (HIPAA/SOC2/PCI: required). Empty disables access logging even when individual buckets opt in."
 }
 
 variable "tags" {

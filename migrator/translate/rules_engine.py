@@ -405,25 +405,40 @@ def _extract_for_each(fe_spec: Dict, source_args: Dict):
     if raw is None:
         return [] if output_shape == "list" else {}
 
-    # Normalize source → list of (key, item_dict) tuples
+    # Normalize source → list of (key, item_dict) tuples.
+    # Three source shapes are common in customer Terragrunt repos:
+    #   1. dict-of-dicts   {"name1": {attrs}, "name2": {attrs}}
+    #   2. list-of-dicts   [{"name": "n1", ...}, {"name": "n2", ...}]
+    #   3. list-of-strings ["n1", "n2", "n3"]   ← ECR's "repositories" pattern
     items: List[tuple] = []
     if shape == "map" and isinstance(raw, dict):
         for k, v in raw.items():
             if isinstance(v, dict):
                 items.append((str(k), v))
+            elif isinstance(v, str):
+                # dict value is a bare string (rare; treat as {name: v})
+                items.append((str(k), {"name": v}))
     elif shape == "list" and isinstance(raw, list):
         for i, v in enumerate(raw):
             if isinstance(v, dict):
                 # Prefer explicit name field; fall back to indexed key
                 key = str(v.get("name") or v.get("id") or f"item{i}")
                 items.append((key, v))
+            elif isinstance(v, str):
+                # List-of-strings: each entry is just the item's name.
+                # Synthesize a minimal item dict so item_inputs's `from: name`
+                # spec finds the value.
+                items.append((v, {"name": v}))
     elif shape == "map" and isinstance(raw, list):
-        # Some source repos use a list-of-dicts where each has a 'name'
+        # Some source repos use a list where each entry has a 'name'
         # field that becomes the map key. Accept this graceful form.
+        # Also handle bare strings (list-of-strings as map source).
         for i, v in enumerate(raw):
             if isinstance(v, dict):
                 key = str(v.get("name") or v.get("id") or f"item{i}")
                 items.append((key, v))
+            elif isinstance(v, str):
+                items.append((v, {"name": v}))
 
     # For each item, build the output per item_inputs.
     map_out: Dict[str, Dict] = {}

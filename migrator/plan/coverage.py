@@ -361,6 +361,29 @@ _GCP_TO_AWS: Dict[str, _MappingEntry] = {
         reason="NEG has no direct AWS equivalent — depends on workload type.",
         notes=("Serverless NEG → ALB → Lambda or container.", "Internet NEG → external target group.",),
     ),
+
+    # VPN — multi-resource translation (gateway + customer gateway + connection).
+    # Today MANUAL_REVIEW with high score (well-understood pattern, operator
+    # picks BGP ASN + remote endpoints). Future: full translator landing
+    # as part of the cross-module wiring sprint.
+    "google_compute_vpn_gateway": _MappingEntry(
+        aws_equivalent="aws_vpn_gateway",
+        score_pct=70,
+        reason="HA VPN gateway → AWS VPN Gateway. Tunnel topology + BGP settings translate; on-prem peer IPs come from operator.",
+        notes=(
+            "Maps to aws_vpn_gateway + aws_customer_gateway (per peer) + aws_vpn_connection (per tunnel).",
+            "BGP ASN, peer IPs, and pre-shared keys are operator-supplied per customer landing zone.",
+        ),
+    ),
+    "google_compute_vpn_tunnel": _MappingEntry(
+        aws_equivalent="aws_vpn_connection",
+        score_pct=70,
+        reason="Per-tunnel translation under a single aws_vpn_gateway.",
+        notes=(
+            "Each GCP tunnel becomes one aws_vpn_connection with its tunnel-specific PSK + peer IP.",
+            "GCP IPsec defaults map cleanly; only BGP routing config needs operator review.",
+        ),
+    ),
 }
 
 
