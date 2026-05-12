@@ -190,6 +190,11 @@ def load_result(
             return None
 
         if payload is None:
+            # State file was advertised but isn't actually there — most
+            # likely operator deleted the output dir between get_last_run_info
+            # and the restore click. Prune the slot so subsequent page
+            # loads don't keep offering an impossible restore.
+            _prune_registry_slot(user_key)
             return None
 
         version = payload.get("_schema_version")
@@ -225,19 +230,65 @@ def get_last_run_info(*, user_key: str = "default") -> Optional[Dict[str, Any]]:
     """Read-only peek at the registry — for surfacing a "Restore?" prompt.
 
     Returns a dict with ``destination``, ``output_dir``, ``saved_at``
-    when a run exists, or None when the slot is empty. The UI uses this
-    to decide whether to show the restore button BEFORE actually
-    loading the (potentially large) snapshot.
+    when a run exists AND the underlying state file is still on disk.
+    Returns None when the slot is empty OR the file is gone (e.g.,
+    operator deleted the output dir manually, or the temp volume got
+    recycled on Cloud Run). The UI uses this to decide whether to
+    show the restore button BEFORE actually loading the (potentially
+    large) snapshot.
+
+    Self-healing: if the registry points at a missing destination, the
+    stale slot is auto-pruned so the banner doesn't keep advertising a
+    recovery that can't succeed.
     """
     registry = _read_registry()
     entry = registry.get(user_key)
     if not entry:
         return None
+
+    destination = str(entry.get("destination", ""))
+    # Verify the snapshot actually exists where the registry claims.
+    # Only file:// is implemented today; for gs:// / s3:// we'll add
+    # a HEAD-style check in the same place when those backends land.
+    snapshot_present = False
+    if destination.startswith("file://"):
+        dirpath = destination[len("file://"):]
+        snapshot_present = os.path.isfile(os.path.join(dirpath, STATE_FILENAME))
+
+    if not snapshot_present:
+        # Stale entry — prune and pretend the slot is empty. The next
+        # successful save_result will re-populate.
+        _log.info(
+            "registry_entry_pruned_stale",
+            user_key=user_key,
+            destination=destination,
+            reason="snapshot file missing on disk",
+        )
+        _prune_registry_slot(user_key)
+        return None
+
     return {
-        "destination": entry.get("destination", ""),
+        "destination": destination,
         "output_dir":  entry.get("output_dir", ""),
         "saved_at":    entry.get("saved_at", 0),
     }
+
+
+def _prune_registry_slot(user_key: str) -> None:
+    """Drop one user's slot from the registry. Best-effort — failures
+    are logged but never raise."""
+    try:
+        registry = _read_registry()
+        if user_key not in registry:
+            return
+        del registry[user_key]
+        path = os.path.join(_registry_dir(), _REGISTRY_FILENAME)
+        tmp = path + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(registry, f, indent=2, sort_keys=True)
+        os.replace(tmp, path)
+    except OSError as e:
+        _log.warning("registry_prune_failed", user_key=user_key, error=str(e))
 
 
 # ---------------------------------------------------------------------
