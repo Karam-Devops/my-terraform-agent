@@ -1,12 +1,22 @@
 # GCP google_dns_managed_zone → AWS Route 53 zone.
 #
-# Pure declarative. Customer's source uses one of three keys for the
-# zones map (managed_zones / zones / dns_zones); the for_each.source
-# list lets us try each in turn.
+# Pure declarative. Two source patterns are common:
 #
-# Source shape per zone:
+#  Pattern A: explicit map (vanilla GCP module library)
+#     managed_zones = { "deephealthos" = { dns_name = "...", visibility = "public" }, ... }
+#
+#  Pattern B: single zone declared as scalars (DH customer pattern)
+#     managed_zone = "deephealthos"
+#     domain       = "deephealthos.com."
+#     recordsets   = [...]
+#
+# Pattern A is handled by the for_each iteration. Pattern B falls
+# through to synthesize_when_empty, which builds a single-entry map
+# from the scalar fields.
+#
+# Source shape per zone (Pattern A):
 #   { "<zone_key>" = { name?, dns_name, visibility, description? } }
-# Target shape per zone:
+# Target shape per zone (both patterns):
 #   { "<safe_zone_key>" = { dns_name, visibility, description } }
 
 source_type:   google_dns_managed_zone
@@ -19,13 +29,23 @@ inputs:
   zones:
     for_each:
       # Try each source key in order until non-empty match (covers the
-      # three input-shape variations seen in customer repos).
+      # three input-shape variations seen in customer repos for the
+      # MAP pattern).
       source: [managed_zones, zones, dns_zones]
       shape: map
+
+      # SCALAR fallback (DH pattern). When none of the map sources yield
+      # a populated collection, synthesize a single-entry map using the
+      # top-level scalar fields. `managed_zone` becomes the map key;
+      # item_inputs are then evaluated against the top-level source args
+      # (so `from: domain` reads the scalar `domain` field).
+      synthesize_when_empty:
+        key_from: managed_zone
+
       item_inputs:
         # DNS name — strip trailing dot (GCP often includes it, AWS doesn't).
         dns_name:
-          from: dns_name
+          from: [dns_name, domain]
           transform: strip_suffix:.
 
         # Visibility: public / private — lowercased so the module's

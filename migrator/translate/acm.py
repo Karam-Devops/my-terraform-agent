@@ -29,36 +29,94 @@ def translate(resource: DiscoveredResource) -> Translation:
     args = resource.arguments or {}
     notes: List[str] = []
 
+    # Source-shape detection — five customer patterns observed:
+    #   1. `certificates`         list-of-dicts with `{name, domains}`
+    #   2. `certificate_configs`  alias for #1
+    #   3. `ssl_certificates.certificate_ids`  cert-id refs only
+    #   4. `classic_certificates` (DH customer) dict-of-dicts where each
+    #      entry holds Secret Manager refs but NO domains:
+    #        {
+    #          "deephealth-tls-certificate-dec-2026" = {
+    #            description        = "..."
+    #            certificate_secret = "secret-name-in-secret-manager"
+    #            private_key_secret = "key-secret-name"
+    #          }
+    #        }
+    #      For #4 we emit the cert NAMES with placeholder domains + a
+    #      loud note that the operator must (a) migrate the cert+key
+    #      from Secret Manager → AWS Secrets Manager and (b) fill in
+    #      the real domain(s) the cert covers (or use imported cert
+    #      material).
     raw_certs = (
         args.get("certificates")
         or args.get("certificate_configs")
+        or args.get("classic_certificates")
         or args.get("ssl_certificates", {}).get("certificate_ids")
         or []
     )
-    if not isinstance(raw_certs, list):
-        raw_certs = []
+
+    # Normalize the four source shapes into a uniform iteration:
+    #   * dict-of-dicts  → list of (key, value-dict)
+    #   * list-of-dicts  → list of (None, value-dict)   ← keep order
+    #   * list-of-strs   → list of (str, None)          ← bare id refs
+    iter_pairs: list = []
+    if isinstance(raw_certs, dict):
+        for k, v in raw_certs.items():
+            if isinstance(v, dict):
+                iter_pairs.append((str(k), v))
+    elif isinstance(raw_certs, list):
+        for entry in raw_certs:
+            if isinstance(entry, dict):
+                iter_pairs.append((None, entry))
+            elif isinstance(entry, str):
+                iter_pairs.append((entry, None))
 
     certs = []
-    for src in raw_certs:
+    for map_key, src in iter_pairs:
         if isinstance(src, dict):
-            name = str(src.get("name", "TODO-cert-name"))
+            # Prefer explicit `name`; fall back to the source map key
+            # (DH's classic_certificates pattern uses the key as the id).
+            name = str(src.get("name") or map_key or "TODO-cert-name")
             domains = src.get("domains") or src.get("subject_alternative_names") or []
             if not isinstance(domains, list):
                 domains = [domains] if isinstance(domains, str) else []
             domains = [str(d) for d in domains]
-            primary_domain = domains[0] if domains else "TODO-domain.example.com"
-            sans = domains[1:] if len(domains) > 1 else []
-        elif isinstance(src, str):
-            # Cert ID-only references — no domain info
-            name = src
+            if domains:
+                primary_domain = domains[0]
+                sans = domains[1:] if len(domains) > 1 else []
+            else:
+                # No inline domain info — common with Secret-Manager-backed
+                # "classic" certs. Surface this to the operator instead of
+                # silently emitting an empty domains list (which is what
+                # was happening before the fix).
+                primary_domain = f"TODO-domain-for-{name}.example.com"
+                sans = []
+                # If this is a classic-cert pattern (Secret-Manager refs),
+                # include those refs in the note so the operator knows
+                # exactly which secrets to migrate.
+                secret_hint = ""
+                if src.get("certificate_secret") or src.get("private_key_secret"):
+                    secret_hint = (
+                        f" Source uses Secret Manager refs: "
+                        f"cert={src.get('certificate_secret', '?')}, "
+                        f"key={src.get('private_key_secret', '?')}. "
+                        f"Migrate these to AWS Secrets Manager and import "
+                        f"the cert material via aws_acm_certificate.private_key + "
+                        f"certificate_body, OR re-issue via ACM DNS validation."
+                    )
+                notes.append(
+                    f"certificate `{name}` has no inline domains in source — "
+                    f"operator must fill in primary_domain + SANs.{secret_hint}"
+                )
+        else:
+            # Bare cert-id reference (list-of-strings shape)
+            name = map_key or "TODO-cert-name"
             primary_domain = f"TODO-domain-for-{name}.example.com"
             sans = []
             notes.append(
                 f"certificate `{name}` referenced by name only (source had no inline domains); "
                 "operator must fill in primary_domain + SANs."
             )
-        else:
-            continue
 
         certs.append({
             "name":             name,

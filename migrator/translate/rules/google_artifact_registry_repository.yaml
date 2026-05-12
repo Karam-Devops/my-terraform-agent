@@ -17,12 +17,21 @@ confidence:    HIGH
 description:   "GCP Artifact Registry → AWS ECR. Container + Helm + OCI registries."
 
 inputs:
-  # Iterate over source `repositories` map; emit nested per-repo map.
-  # Source shape: { "<repo_id>" = { name?, format?, description?, ... } }
-  # Target shape: { "<safe_repo_id>" = { name, description, scan_on_push, image_mutability } }
+  # Iterate over the source's artifact-registry list/map and emit one
+  # entry per source repo into the AWS ECR module's input map.
+  #
+  # Source shape varies by customer:
+  #   * `repositories` — map keyed by repo id (vanilla GCP pattern)
+  #   * `repository_config` — alias used by some module libraries
+  #   * `artifact_registry_config` — list-of-dicts (DH customer pattern,
+  #     each entry typically just `{ name = "..." }`)
+  #
+  # for_each.source accepts a fallback list — first non-empty match wins.
+  # shape: map handles list-of-dicts when each item has a `name` field
+  # (engine auto-synthesizes the map key from `name`).
   repositories:
     for_each:
-      source: repositories       # source key (also accepts repository_config — handled by emitter normalization)
+      source: [repositories, repository_config, artifact_registry_config]
       shape:  map
       item_inputs:
         # Repository name — falls back to the map key when source has no `name` field.

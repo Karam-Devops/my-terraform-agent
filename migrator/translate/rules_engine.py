@@ -346,8 +346,21 @@ def _extract_input_value(spec: Any, source_args: Dict, key_name: str) -> Any:
     if "for_each" in spec:
         return _extract_for_each(spec["for_each"], source_args)
 
-    source_key = spec.get("from", key_name)
-    value = source_args.get(source_key)
+    # `from:` accepts either a single key OR a list of fallback keys.
+    # List form is "try each in order; first non-empty wins" — same
+    # pattern as for_each.source. Common when source uses different
+    # attribute names across customer module libraries (e.g.
+    # `dns_name` vs scalar `domain`).
+    from_field = spec.get("from", key_name)
+    if isinstance(from_field, list):
+        value = None
+        for k in from_field:
+            v = source_args.get(str(k))
+            if v is not None and v != "":
+                value = v
+                break
+    else:
+        value = source_args.get(from_field)
 
     # Apply enum_map (if value matches a key in the map)
     enum_map = spec.get("enum_map") or {}
@@ -380,6 +393,20 @@ def _extract_for_each(fe_spec: Dict, source_args: Dict):
         output_shape:  "map" | "list"   — OUTPUT shape (default "map")
         item_inputs:   <map>            — per-item attribute spec (recursive,
                                           nested for_each supported)
+        synthesize_when_empty:          — OPTIONAL fallback that builds a
+                                          ONE-entry map from scalar source
+                                          fields when none of the source
+                                          keys yielded a populated collection.
+                                          Used for customer patterns like
+                                          DH's cloud-dns where each stack has
+                                          a single zone declared as scalars
+                                          (domain = "...", managed_zone = "...")
+                                          rather than a `zones = {...}` map.
+                                          Shape:
+                                            { key_from: <source-key-of-map-key> }
+                                          item_inputs is reused — but applied
+                                          to source_args (top level) instead
+                                          of per-item dicts.
 
     Returns:
         dict keyed by item-key when output_shape="map" (preserves map
@@ -391,6 +418,7 @@ def _extract_for_each(fe_spec: Dict, source_args: Dict):
     shape = str(fe_spec.get("shape", "map")).lower()
     output_shape = str(fe_spec.get("output_shape", "map")).lower()
     item_inputs = fe_spec.get("item_inputs") or {}
+    synth = fe_spec.get("synthesize_when_empty") or None
 
     # Resolve source — try each fallback key in order until non-None.
     raw = None
@@ -403,6 +431,40 @@ def _extract_for_each(fe_spec: Dict, source_args: Dict):
                 raw = v
                 break
     if raw is None:
+        # Last-resort: synthesize a single-entry map from top-level
+        # scalar fields. The synth.key_from scalar in source_args
+        # becomes the map key; item_inputs is applied against the
+        # full source_args dict (not a per-item one) so its `from:`
+        # references resolve to the top-level scalars.
+        if synth and output_shape != "list":
+            key_from = synth.get("key_from")
+            if key_from:
+                map_key = source_args.get(key_from)
+                if map_key:
+                    # Re-use the standard item builder but pass source_args
+                    # as the "item" dict. This lets the same item_inputs
+                    # spec serve both the iterating path and the synth path.
+                    synth_item: Dict[str, Any] = {}
+                    for ii_name, ii_spec in item_inputs.items():
+                        if isinstance(ii_spec, dict) and ii_spec.get("default_from_key") is True:
+                            mod_spec = {k: v for k, v in ii_spec.items()
+                                        if k != "default_from_key"}
+                            v = _extract_input_value(mod_spec, source_args, ii_name)
+                            if v is None or v == "":
+                                v = map_key
+                            if v is not None:
+                                synth_item[ii_name] = v
+                            continue
+                        v = _extract_input_value(ii_spec, source_args, ii_name)
+                        if v is not None:
+                            synth_item[ii_name] = v
+                    safe_key = (
+                        str(map_key)
+                        .replace("-", "_")
+                        .replace(".", "_")
+                        .replace("/", "_")
+                    )
+                    return {safe_key: synth_item}
         return [] if output_shape == "list" else {}
 
     # Normalize source → list of (key, item_dict) tuples.

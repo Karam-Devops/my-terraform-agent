@@ -539,8 +539,16 @@ def emit_terraform_skeleton(
         _write_text(main_path, main_tf)
         written.append(main_path)
 
+        # Cross-env variable declarations: scan the rendered main.tf for
+        # `var.X` references that the cross_module_wiring layer substituted
+        # in place of unresolvable in-env module refs, and add matching
+        # `variable {}` blocks to variables.tf so terraform validate
+        # stays green. Operators supply the actual values via tfvars or
+        # workspace inputs.
+        cross_env_vars_used = _scan_cross_env_vars(main_tf)
+
         for fname, content in (
-            ("variables.tf", _render_env_variables_tf(aws_region)),
+            ("variables.tf", _render_env_variables_tf(aws_region, cross_env_vars_used)),
             ("outputs.tf",   _render_env_outputs_tf()),
             ("providers.tf", _render_env_providers_tf()),
             ("backend.tf",   _render_env_backend_tf(root_name)),
@@ -784,8 +792,15 @@ def _render_env_main_tf(
             # etc. with module.X.Y references when the provider module
             # exists in this env. Wiring rules table is in
             # cross_module_wiring.py.
+            #
+            # consumer_block_name lets the wiring layer pick the
+            # closest-named provider when there are multiple of the
+            # same service in the env (DH's common-network has 8 VPC
+            # modules — Kiro's review fix #5).
             inputs_body = _wire_rewrite(
-                inputs_body, modules_in_env=modules_in_env,
+                inputs_body,
+                modules_in_env=modules_in_env,
+                consumer_block_name=block_name,
             )
             if inputs_body:
                 lines.append(inputs_body)
@@ -812,8 +827,51 @@ def _render_env_main_tf(
     return "\n".join(lines) + "\n"
 
 
-def _render_env_variables_tf(aws_region: str) -> str:
-    return (
+# Description text for each known cross-env variable. Keeps the
+# generated variables.tf self-documenting so operators understand
+# why a `var.X` placeholder exists and how to wire it.
+_CROSS_ENV_VAR_DESCRIPTIONS: Dict[str, str] = {
+    "ssl_certificate_arn": (
+        "ACM certificate ARN for ALB listeners. Set in this env's "
+        "tfvars when the cert is provisioned in a different env "
+        "(e.g., a shared 'certificate-manager' env) — Migrator emits "
+        "this placeholder when no in-env ACM module is available to "
+        "wire automatically."
+    ),
+}
+
+
+def _scan_cross_env_vars(rendered_main_tf: str) -> List[str]:
+    """Find which `var.X` placeholders the wiring layer injected into
+    this env's main.tf. Returns the set of var names (de-duped, sorted)
+    that have matching cross-env descriptions and therefore need a
+    `variable {}` block emitted in variables.tf.
+
+    Pure string scan — keeps the emitter cycle-free (rendering main.tf
+    doesn't need to know about variables.tf and vice-versa).
+    """
+    import re as _re
+    found: Set[str] = set()
+    for var_name in _CROSS_ENV_VAR_DESCRIPTIONS.keys():
+        pat = _re.compile(rf"\bvar\.{_re.escape(var_name)}\b")
+        if pat.search(rendered_main_tf):
+            found.add(var_name)
+    return sorted(found)
+
+
+def _render_env_variables_tf(
+    aws_region: str,
+    cross_env_vars: Optional[List[str]] = None,
+) -> str:
+    """Render variables.tf for one env root.
+
+    Always emits aws_account_id + region. When the env's main.tf has
+    `var.X` placeholders injected by the cross_module_wiring layer
+    (because the provider module wasn't in this env), additional
+    `variable {}` blocks are added so terraform validate stays green
+    and the operator has a clear knob to wire via tfvars / workspaces.
+    """
+    parts: List[str] = [
         "# Inputs to this AWS Terraform root.\n\n"
         'variable "aws_account_id" {\n'
         "  type        = string\n"
@@ -825,7 +883,19 @@ def _render_env_variables_tf(aws_region: str) -> str:
         '  description = "AWS region for primary resources."\n'
         f'  default     = "{aws_region}"\n'
         "}\n"
-    )
+    ]
+    for v in cross_env_vars or []:
+        desc = _CROSS_ENV_VAR_DESCRIPTIONS.get(v, "Cross-env reference.")
+        # Single-quoted heredoc keeps quotes inside the description intact.
+        parts.append(
+            "\n"
+            f'variable "{v}" {{\n'
+            "  type        = string\n"
+            f'  description = "{desc}"\n'
+            f'  default     = "TODO-supply-{v}"\n'
+            "}\n"
+        )
+    return "".join(parts)
 
 
 def _render_env_outputs_tf() -> str:
