@@ -248,7 +248,13 @@ _INFER_RULES = (
     # ---------- Data ----------
     ("cloud-sql",                      "google_sql_database_instance"),
     ("sql-database-instance",          "google_sql_database_instance"),
+    ("sql-old-module",                 "google_sql_database_instance"),
+    ("sql-import-data",                "google_sql_database_instance"),
     ("postgres",                       "google_sql_database_instance"),
+    ("mysql",                          "google_sql_database_instance"),
+    # Bare `sql` catch-all — must come AFTER more specific patterns
+    # like `cloud-sql` (else `cloud-sql` would never match).
+    ("sql",                            "google_sql_database_instance"),
     ("memorystore",                    "google_redis_instance"),
     ("redis",                          "google_redis_instance"),
     ("bigquery-dataset",               "google_bigquery_dataset"),

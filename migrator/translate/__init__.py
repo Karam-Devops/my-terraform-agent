@@ -38,6 +38,7 @@ from migrator.results import DiscoveredResource
 
 from . import (
     acm,
+    aurora_postgres,
     ec2,
     ecr,
     eip,
@@ -145,7 +146,7 @@ def all_aws_module_specs() -> List[AWSModuleSpec]:
         # Tier 2 expansion
         waf, log_sink, eventbridge_scheduler,
         # FCR v3 Week 2 expansion
-        eks,
+        eks, aurora_postgres,
     )
     for mod in all_modules:
         spec = mod.aws_module_spec()

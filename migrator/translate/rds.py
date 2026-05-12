@@ -74,7 +74,13 @@ def translate(
     *,
     compliance_profile: str = "none",
 ) -> Translation:
-    """Translate Cloud SQL → RDS.
+    """Translate Cloud SQL → RDS (single instance) OR Aurora-Postgres (HA cluster).
+
+    Dispatches to aurora_postgres translator when source criteria match
+    (REGIONAL availability, tier db-custom-2-X+, disk_size ≥ 100 GB). The
+    aurora_postgres translator returns a Translation pointing at the
+    aurora-postgres module; this translator falls through to RDS-instance
+    output otherwise.
 
     Compliance profile defaults (when not specified per-instance in source):
       - deletion_protection: forced True under HIPAA/SOC2/PCI
@@ -95,6 +101,23 @@ def translate(
                   or args.get("cloudsql_config")
                   or args.get("database_instance")
                   or {})
+
+    # ---- Aurora dispatch ----
+    # Send to Aurora translator when ANY source instance meets the criteria
+    # (REGIONAL, big tier, big disk, explicit hint, OR compliance_profile
+    # in {hipaa, pci}). For terragrunt-source customers whose terragrunt.hcl
+    # inputs don't include availability_type explicitly, the compliance
+    # signal is what triggers the Aurora path.
+    from .aurora_postgres import is_aurora_grade, translate as translate_aurora
+    inspect_instances = (
+        [sql_config] if isinstance(sql_config, dict)
+        else (sql_config if isinstance(sql_config, list) else [{}])
+    )
+    if any(
+        is_aurora_grade(args, inst, compliance_profile=compliance_profile)
+        for inst in inspect_instances if isinstance(inst, dict)
+    ):
+        return translate_aurora(resource, compliance_profile=compliance_profile)
 
     if isinstance(sql_config, dict):
         instances = [sql_config]
