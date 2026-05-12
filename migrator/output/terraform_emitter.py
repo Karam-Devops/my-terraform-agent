@@ -548,6 +548,17 @@ def emit_terraform_skeleton(
             compliance_profile=compliance_profile,
             customer_profile=customer_profile,
         )
+        # Post-render: promote operator-action TODOs in strict-format
+        # fields (cidr, dns_name, ip_address, arn) into required
+        # `var.X` references. The literal TODO strings would otherwise
+        # fail terraform plan with "invalid CIDR block format" or
+        # similar cryptic errors at AWS API call time. Now plan fails
+        # earlier with "Variable X is required" + the variable's
+        # description naming the unresolvable source local.
+        # Kiro v9 Gap 1+2 final cleanup.
+        main_tf, promoted_vars = _promote_strict_field_todos(main_tf)
+        if promoted_vars:
+            _write_text(os.path.join(env_dir, "main.tf"), main_tf)
         main_path = os.path.join(env_dir, "main.tf")
         _write_text(main_path, main_tf)
         written.append(main_path)
@@ -559,6 +570,12 @@ def emit_terraform_skeleton(
         # stays green. Operators supply the actual values via tfvars or
         # workspace inputs.
         cross_env_vars_used = _scan_cross_env_vars(main_tf)
+        # Merge in any vars promoted from strict-format TODOs (each
+        # carries its own description naming the source local that
+        # needs operator resolution).
+        cross_env_vars_used = list(cross_env_vars_used) + sorted(
+            promoted_vars.keys()
+        )
 
         # Service modules emitted in this env — drives versions.tf
         # provider-required block (Kiro v7 fix #1: aurora uses random,
@@ -1021,6 +1038,66 @@ _CROSS_ENV_VAR_DESCRIPTIONS: Dict[str, str] = {
 }
 
 
+# Strict-format fields where a literal TODO string fails plan with
+# obscure AWS API errors. When the source has an unresolvable local
+# (`cidr = local.X`) and the surgical sanitizer leaves
+# `cidr = "TODO-local-X"`, plan fails with "invalid CIDR block
+# format" — operator has no idea what to do. Promote to a required
+# variable so plan fails earlier with the cleaner error "Variable
+# subnet_cidr_X is required" + description naming the source local.
+# Kiro v9 Gap 1+2 polish.
+_STRICT_FIELD_PATTERN = re.compile(
+    # Matches `<field> = "TODO-(local|var|each|dependency)-<slug>"`
+    # anywhere on a line — handles both top-level attributes AND
+    # nested object literals like `{ dns_name = "TODO-X", visibility = "..." }`.
+    # Captures (prefix-with-whitespace, field, todo-slug).
+    r'(^|\s|[{,])\s*(cidr|dns_name|ip_address|allocation_id|certificate_arn|kms_key_arn|target_arn|role_arn|arn|public_ip|private_ip)\s*=\s*"(TODO-(?:local|var|each|dependency)-[\w.\-]+)"',
+    re.MULTILINE,
+)
+
+# Module-level cache of promoted var descriptions. Populated during
+# emission for each env; consumed by _render_env_variables_tf.
+_PROMOTED_VAR_DESCRIPTIONS: Dict[str, str] = {}
+
+
+def _promote_strict_field_todos(rendered_main_tf: str) -> "tuple[str, Dict[str, str]]":
+    """Scan ``rendered_main_tf`` for literal TODO values in strict-format
+    fields and rewrite them as ``var.<safe_name>`` references.
+
+    Returns the rewritten HCL + a dict {var_name: description} of the
+    variables that need declaring in variables.tf. The descriptions
+    name the source local so operators see exactly what to supply.
+    """
+    promoted: Dict[str, str] = {}
+
+    def repl(m: "re.Match[str]") -> str:
+        prefix, field, todo_slug = m.group(1), m.group(2), m.group(3)
+        # Build a stable, identifier-safe var name from the field name
+        # + the TODO slug.
+        # e.g., `cidr` + `TODO-local-secondary_subnet_cfgs-primary-subnet-1-ip_cidr_range`
+        # → `cidr_local_secondary_subnet_cfgs_primary_subnet_1_ip_cidr_range`
+        suffix = re.sub(r"[^A-Za-z0-9_]+", "_", todo_slug.lower()).strip("_")
+        var_name = f"{field}_{suffix}"[:200]   # cap length
+        # Build a description that names the original source reference
+        # so operator knows exactly which local/var to supply.
+        # Escape `${` as `$$ {` (terraform's literal-dollar syntax) so
+        # the description doesn't get interpreted as an interpolation.
+        source_ref = todo_slug[len("TODO-"):].replace("-", ".", 1).replace("-", "_")
+        desc = (
+            f"Required value for {field}. Source had `{field} = "
+            f"$${{{source_ref}}}` which cannot be resolved at parse time. "
+            f"Supply via tfvars."
+        )
+        promoted[var_name] = desc
+        return f"{prefix}{field} = var.{var_name}"
+
+    rewritten = _STRICT_FIELD_PATTERN.sub(repl, rendered_main_tf)
+    # Stash descriptions in the module-level cache so
+    # _render_env_variables_tf can pick them up when rendering this env.
+    _PROMOTED_VAR_DESCRIPTIONS.update(promoted)
+    return rewritten, promoted
+
+
 def _scan_cross_env_vars(rendered_main_tf: str) -> List[str]:
     """Find which `var.X` placeholders the wiring layer injected into
     this env's main.tf. Returns the set of var names (de-duped, sorted)
@@ -1074,11 +1151,25 @@ def _render_env_variables_tf(
         # validate but produced literal-TODO values at apply time, which
         # then failed at the AWS API call with cryptic errors.
         if spec is None:
+            # Check if this is a promoted strict-field TODO (Kiro v9
+            # Gap 1+2 polish). Those carry custom descriptions naming
+            # the source local that needs resolution.
+            promoted_desc = _PROMOTED_VAR_DESCRIPTIONS.get(v)
+            description = (
+                promoted_desc
+                if promoted_desc
+                else "Cross-env reference. Must be supplied via tfvars or -var."
+            )
+            # Best-effort type inference: list-y fields get list type.
+            vtype = (
+                "list(string)" if v.startswith(("subnet_ids", "public_subnet_ids", "private_subnet_route_table"))
+                else "string"
+            )
             parts.append(
                 "\n"
                 f'variable "{v}" {{\n'
-                "  type        = string\n"
-                f'  description = "Cross-env reference. Must be supplied via tfvars or -var."\n'
+                f"  type        = {vtype}\n"
+                f'  description = "{description}"\n'
                 f"  nullable    = false\n"
                 "}\n"
             )
