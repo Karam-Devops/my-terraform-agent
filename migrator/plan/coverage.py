@@ -384,6 +384,30 @@ _GCP_TO_AWS: Dict[str, _MappingEntry] = {
             "GCP IPsec defaults map cleanly; only BGP routing config needs operator review.",
         ),
     ),
+
+    # BigQuery — scaffold translator (Kiro-review fix #8, 2026-05-12).
+    # Bumped from MANUAL_REVIEW to LOW because we now emit an Athena
+    # workgroup scaffold; data migration remains operator-driven.
+    "google_bigquery_dataset": _MappingEntry(
+        aws_equivalent="aws_athena_workgroup",
+        score_pct=55,
+        reason="BigQuery dataset → Athena workgroup + Glue catalog DB (default) or Redshift Serverless (commented alternative in module).",
+        notes=(
+            "Athena is the default target for ad-hoc analytics over S3-backed data.",
+            "Redshift Serverless is the alternative when BI tooling / high concurrency / complex joins are required.",
+            "Data migration (BQ → GCS → S3 → Athena) is a separate workstream — see migration_helpers/.",
+            "BigQuery views and stored procedures need operator rewrite as Athena CREATE VIEW or Redshift materialized views.",
+        ),
+    ),
+    "google_bigquery_table": _MappingEntry(
+        aws_equivalent="aws_glue_catalog_table",
+        score_pct=50,
+        reason="BigQuery table → Glue catalog table pointing at S3-backed Parquet data.",
+        notes=(
+            "Table schema translates via Glue crawler or explicit CREATE EXTERNAL TABLE in Athena.",
+            "Partitioning preserved if data is exported with the partition columns as folder structure.",
+        ),
+    ),
 }
 
 
@@ -401,8 +425,8 @@ _MANUAL_REVIEW_TYPES = {
     "google_dataform_repository":   "Dataform has no direct AWS equivalent — consider Glue or dbt on MWAA.",
     "google_filestore_instance":    "Filestore → Amazon EFS. NFS mount points and IAM model differ.",
     "google_cloud_run_v2_service":  "Cloud Run v2 → ECS Fargate or AWS App Runner. Container config translates; networking and auth need review.",
-    "google_bigquery_dataset":      "BigQuery → Redshift Serverless or Athena+S3. Schema and partitioning logic need review; data migration is a separate workstream.",
-    "google_bigquery_table":        "BigQuery table — see google_bigquery_dataset note.",
+    # BigQuery removed from MANUAL_REVIEW — moved to _GCP_TO_AWS as LOW
+    # (Athena scaffold translator landed 2026-05-12, Kiro-review fix #8).
     "google_vpc_access_connector":  "Serverless VPC Connector → AWS PrivateLink or VPC endpoint. GCP-specific construct.",
 }
 

@@ -168,10 +168,14 @@ def run_migration(
     )
     log.info("migrator_guide_emitted", path=guide_path)
 
+    # AWS region for helper-script substitution. Defaults to us-east-1
+    # (HIPAA-compliant general-purpose region). Future: when the picker
+    # exposes a region selector, plumb it through here.
     helper_paths = emit_helper_scripts(
         output_dir=output_dir,
         target_cloud=target,
         confidence=confidence,
+        aws_region="us-east-1",
     )
     log.info("migrator_helpers_emitted", count=len(helper_paths))
 

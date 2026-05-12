@@ -27,7 +27,8 @@ AWS WAF v2 differs significantly:
 
 from __future__ import annotations
 
-from typing import Any, Dict, List
+import re
+from typing import Any, Dict, List, Optional
 
 from migrator.results import DiscoveredResource
 
@@ -35,6 +36,48 @@ from .base import DEFAULT_VERSIONS_TF, AWSModuleSpec, Translation
 
 
 SERVICE_NAME = "wafv2-web-acl"
+
+
+# CEL expression patterns we know how to translate. Order matters:
+# more specific patterns first (e.g., geo-block before generic match).
+
+# Geo-block pattern: 'CC,CC,CC'.contains(origin.region_code)
+# Example from CitiusTech: '[RU,UA,CN,KR,LV,MD,KP,TW]'.contains(origin.region_code)
+_GEO_MATCH_RE = re.compile(
+    r"""['"]?\[?([A-Z][A-Z](?:\s*,\s*[A-Z][A-Z])*)\]?['"]?\s*\.contains\s*\(\s*origin\.region_code\s*\)""",
+    re.IGNORECASE,
+)
+
+# Rate-limit pattern: rate_limit_options at the source rule level
+# (already a dict, not a CEL expression — handled separately).
+
+
+def _try_translate_cel_to_aws_statement(expression: str) -> Optional[Dict[str, Any]]:
+    """Best-effort translation of a Cloud Armor CEL expression to an
+    AWS WAF Statement JSON structure.
+
+    Returns a dict like:
+      { "kind": "geo_match", "country_codes": ["RU", "UA", ...] }
+    when the pattern is recognized; None otherwise. The renderer turns
+    this into HCL.
+
+    Today: only geo-match patterns. Other CEL constructs (path matches,
+    header inspection, source IP ranges) need follow-up extensions.
+    """
+    if not isinstance(expression, str) or not expression:
+        return None
+
+    # Try geo-match pattern
+    m = _GEO_MATCH_RE.search(expression)
+    if m:
+        codes_str = m.group(1)
+        codes = [c.strip().upper() for c in codes_str.split(",") if c.strip()]
+        # Sanity-check: ISO 3166-1 alpha-2 codes are exactly 2 chars
+        codes = [c for c in codes if len(c) == 2]
+        if codes:
+            return {"kind": "geo_match", "country_codes": codes}
+
+    return None
 
 
 # Map Cloud Armor's pre-configured rule names to AWS WAF Managed Rule Group names.
@@ -114,11 +157,28 @@ def translate(resource: DiscoveredResource) -> Translation:
                 priority = int(rule.get("priority", 5000) or 5000)
                 action = str(rule.get("action", "allow")).lower()
                 action_aws = "block" if "deny" in action else "allow"
+
+                # Try to translate the CEL expression to a known AWS WAF
+                # Statement shape (today: geo-match).
+                expression = (
+                    rule.get("expression")
+                    or rule.get("match", {}).get("expression")
+                    or ""
+                )
+                aws_statement = _try_translate_cel_to_aws_statement(str(expression))
+                if aws_statement:
+                    notes.append(
+                        f"WAF rule `{rule_name}` translated: CEL expression "
+                        f"recognized as {aws_statement['kind']} pattern "
+                        f"({len(aws_statement.get('country_codes', []))} country codes)."
+                    )
+
                 custom_rules.append({
                     "name": str(rule_name),
                     "priority": priority,
                     "action": action_aws,
-                    "_source": rule,
+                    "aws_statement": aws_statement,   # None when not translated
+                    "_source_expression": expression,
                 })
 
         web_acls.append({
@@ -182,7 +242,15 @@ def _render_acls(acls: list) -> str:
                 lines.append(f'          name     = "{r["name"]}"')
                 lines.append(f'          priority = {r["priority"]}')
                 lines.append(f'          action   = "{r["action"]}"')
-                lines.append("          # TODO: translate Cloud Armor CEL expression to AWS WAF Statement DSL")
+                # Emit translated AWS WAF Statement when CEL was recognized.
+                aws_stmt = r.get("aws_statement")
+                if aws_stmt and aws_stmt.get("kind") == "geo_match":
+                    codes = ", ".join(f'"{c}"' for c in aws_stmt["country_codes"])
+                    lines.append(f'          statement_kind  = "geo_match"')
+                    lines.append(f'          country_codes   = [{codes}]')
+                else:
+                    lines.append('          statement_kind  = "todo"')
+                    lines.append("          # TODO: translate Cloud Armor CEL expression to AWS WAF Statement DSL")
                 lines.append("        },")
             lines.append("      ]")
         else:
@@ -223,6 +291,7 @@ resource "aws_wafv2_web_acl" "this" {
     }
   }
 
+  # ---- Managed Rule Groups (AWS-curated OWASP / SQLi / etc.) ----
   dynamic "rule" {
     for_each = each.value.managed_rules
     content {
@@ -248,6 +317,44 @@ resource "aws_wafv2_web_acl" "this" {
     }
   }
 
+  # ---- Custom Rules (translated from Cloud Armor CEL expressions) ----
+  # Today: geo_match_statement when source CEL was
+  # '[CC,CC,...]'.contains(origin.region_code). Other CEL constructs
+  # land as `statement_kind = "todo"` with operator-facing comments.
+  dynamic "rule" {
+    for_each = [
+      for r in each.value.custom_rules :
+      r if lookup(r, "statement_kind", "") == "geo_match"
+    ]
+    content {
+      name     = rule.value.name
+      priority = rule.value.priority
+
+      action {
+        dynamic "block" {
+          for_each = rule.value.action == "block" ? [1] : []
+          content {}
+        }
+        dynamic "allow" {
+          for_each = rule.value.action == "allow" ? [1] : []
+          content {}
+        }
+      }
+
+      statement {
+        geo_match_statement {
+          country_codes = rule.value.country_codes
+        }
+      }
+
+      visibility_config {
+        cloudwatch_metrics_enabled = true
+        metric_name                = replace(rule.value.name, "-", "_")
+        sampled_requests_enabled   = true
+      }
+    }
+  }
+
   visibility_config {
     cloudwatch_metrics_enabled = true
     metric_name                = replace(each.value.name, "-", "_")
@@ -262,24 +369,13 @@ resource "aws_wafv2_web_acl" "this" {
 '''
 
 
+# `web_acls` declared as map(any) because custom_rules entries are
+# heterogeneous: geo_match rules carry country_codes; todo rules don't.
+# Strict map(object(...)) would fail type-inference on that variance.
+# Implicit schema documented in the translator source.
 _VARIABLES_TF = '''variable "web_acls" {
-  type = map(object({
-    name           = string
-    scope          = string  # REGIONAL (ALB/API GW) or CLOUDFRONT (must be us-east-1)
-    default_action = string  # "allow" or "block"
-    managed_rules = list(object({
-      name          = string
-      priority      = number
-      managed_group = string  # e.g. "AWSManagedRulesCommonRuleSet"
-      action        = string  # "allow" or "block"
-    }))
-    custom_rules = list(object({
-      name     = string
-      priority = number
-      action   = string
-    }))
-  }))
-  description = "Map of WAF ACL key -> spec."
+  type        = map(any)
+  description = "Map of WAF ACL key -> spec. Schema in translator source."
   default     = {}
 }
 

@@ -24,8 +24,14 @@ def emit_helper_scripts(
     output_dir: str,
     target_cloud: str,
     confidence: List[ConfidenceFinding],
+    aws_region: str = "us-east-1",
 ) -> List[str]:
     """Emit one helper script per service family present in the inventory.
+
+    Args:
+        aws_region: target AWS region to bake into the helper scripts.
+            HIPAA-compliant regions in the customer's actual deployment
+            target. Defaults to us-east-1 to match the engine's default.
 
     Returns absolute paths of generated files.
     """
@@ -35,42 +41,52 @@ def emit_helper_scripts(
     helpers_dir = os.path.join(output_dir, "migration_helpers")
     os.makedirs(helpers_dir, exist_ok=True)
 
+    # Substitute region placeholder in every template so the operator
+    # gets aws-cli commands that point at their actual region. Previously
+    # the templates had ca-central-1 hardcoded — wrong for the HIPAA
+    # us-east-1 default. Variable substitution: __AWS_REGION__ →
+    # aws_region argument.
+    def _substituted(template: str) -> str:
+        return template.replace("__AWS_REGION__", aws_region)
+
     # Detect which service families need helpers based on tf_types present.
     types_present = {c.tf_type for c in confidence}
 
     written: List[str] = []
 
     if "google_storage_bucket" in types_present:
-        path = _write(helpers_dir, "01-gcs-to-s3-sync.sh", _GCS_TO_S3_TEMPLATE)
+        path = _write(helpers_dir, "01-gcs-to-s3-sync.sh", _substituted(_GCS_TO_S3_TEMPLATE))
         written.append(path)
 
     if any(t in types_present for t in (
         "google_sql_database_instance", "google_sql_database",
     )):
-        path = _write(helpers_dir, "02-cloudsql-to-rds-dms.sh", _CLOUDSQL_TO_RDS_TEMPLATE)
+        path = _write(helpers_dir, "02-cloudsql-to-rds-dms.sh",
+                      _substituted(_CLOUDSQL_TO_RDS_TEMPLATE))
         written.append(path)
 
     if "google_secret_manager_secret" in types_present:
-        path = _write(helpers_dir, "03-secrets-migrate.sh", _SECRETS_MIGRATE_TEMPLATE)
+        path = _write(helpers_dir, "03-secrets-migrate.sh",
+                      _substituted(_SECRETS_MIGRATE_TEMPLATE))
         written.append(path)
 
     if "google_redis_instance" in types_present:
         path = _write(helpers_dir, "04-memorystore-to-elasticache.sh",
-                      _MEMORYSTORE_TO_ELASTICACHE_TEMPLATE)
+                      _substituted(_MEMORYSTORE_TO_ELASTICACHE_TEMPLATE))
         written.append(path)
 
     if "google_artifact_registry_repository" in types_present:
         path = _write(helpers_dir, "05-artifact-registry-to-ecr.sh",
-                      _ARTIFACT_TO_ECR_TEMPLATE)
+                      _substituted(_ARTIFACT_TO_ECR_TEMPLATE))
         written.append(path)
 
     if "google_pubsub_topic" in types_present:
         path = _write(helpers_dir, "06-pubsub-to-sns-sqs-replay.md",
-                      _PUBSUB_TO_SNS_NOTES)
+                      _substituted(_PUBSUB_TO_SNS_NOTES))
         written.append(path)
 
     # Always emit the high-level checklist
-    path = _write(helpers_dir, "00-MIGRATION_CHECKLIST.md", _CHECKLIST_TEMPLATE)
+    path = _write(helpers_dir, "00-MIGRATION_CHECKLIST.md", _substituted(_CHECKLIST_TEMPLATE))
     written.append(path)
 
     return written
@@ -162,7 +178,7 @@ TARGET_RDS_ARN="<arn:aws:rds:region:acct:db:dbname>"
 DMS_INSTANCE_ARN="<arn:aws:dms:region:acct:rep:dms-instance>"
 DMS_ROLE_ARN="<arn:aws:iam::acct:role/dms-vpc-role>"
 
-REGION="ca-central-1"
+REGION="__AWS_REGION__"
 
 echo "Step 1: create source endpoint (Cloud SQL)"
 aws dms create-endpoint --region "${REGION}" \\
@@ -218,7 +234,7 @@ set -euo pipefail
 
 # EDIT BELOW
 SOURCE_PROJECT="<gcp-project-id>"
-TARGET_REGION="ca-central-1"
+TARGET_REGION="__AWS_REGION__"
 SECRETS=(
   # one secret name per line
   # "example-secret-1"
@@ -271,7 +287,7 @@ SOURCE_PROJECT="<gcp-project-id>"
 GCS_EXPORT_BUCKET="<your-export-bucket>"
 
 TARGET_S3_BUCKET="<target-s3-bucket>"
-TARGET_REGION="ca-central-1"
+TARGET_REGION="__AWS_REGION__"
 TARGET_ELASTICACHE_NAME="<target-elasticache-name>"
 
 echo "Step 1: export Memorystore snapshot to GCS"
@@ -304,7 +320,7 @@ SOURCE_REGION="northamerica-northeast1"
 SOURCE_REGISTRY="<artifact-registry-repo-name>"
 
 TARGET_ACCOUNT="<aws-account-id>"
-TARGET_REGION="ca-central-1"
+TARGET_REGION="__AWS_REGION__"
 TARGET_ECR_REPO="<ecr-repo-name>"
 
 # Authenticate Docker to both registries.

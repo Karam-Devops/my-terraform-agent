@@ -92,6 +92,9 @@ _TF_NORMALIZE: Dict[str, tuple] = {
     "google_compute_global_forwarding_rule":  ("forwarding_rules", "list"),
     "google_compute_forwarding_rule":         ("forwarding_rules", "list"),
     "google_compute_backend_service":         ("lb_config", "dict_single"),
+    # Kiro-review fix #8 (2026-05-12)
+    "google_bigquery_dataset":                ("datasets", "list"),
+    "google_bigquery_table":                  ("datasets", "list"),
 }
 
 
@@ -565,7 +568,52 @@ def emit_terraform_skeleton(
     if _format_with_terraform(target_root):
         logger.info("emitter_terraform_format_applied", extra={"target": target_root})
 
+    # ---- 6. Prune unused module bodies ----
+    # We emit ALL registered AWS module bodies under target/modules/
+    # at step 1 for simplicity. Now that every env's main.tf is on
+    # disk, we know exactly which modules are referenced. Delete the
+    # unreferenced module directories so the operator's output tree
+    # doesn't carry dead code (e.g., rds-postgres when everything
+    # routed to aurora-postgres under HIPAA).
+    used_services = _scan_referenced_modules(env_layout_root)
+    if used_services:
+        for spec_name in list(emitted_module_specs):
+            if spec_name in used_services:
+                continue
+            unused_dir = os.path.join(modules_dir, spec_name)
+            if os.path.isdir(unused_dir):
+                shutil.rmtree(unused_dir, ignore_errors=True)
+                # Also remove from the `written` list so the UI doesn't
+                # advertise files that no longer exist.
+                written = [p for p in written if not p.startswith(unused_dir)]
+                logger.info(
+                    "emitter_pruned_unused_module",
+                    extra={"service_name": spec_name},
+                )
+
     return written
+
+
+def _scan_referenced_modules(env_layout_root: str) -> Set[str]:
+    """Walk every emitted env's main.tf and return the set of module
+    service_names referenced via `source = "../../modules/<name>"`."""
+    refs: Set[str] = set()
+    if not os.path.isdir(env_layout_root):
+        return refs
+    pat = re.compile(r'source\s*=\s*"[\.\/]+modules/([a-zA-Z0-9_\-]+)"?')
+    for root, _dirs, files in os.walk(env_layout_root):
+        for fname in files:
+            if fname != "main.tf":
+                continue
+            full = os.path.join(root, fname)
+            try:
+                with open(full, "r", encoding="utf-8") as fh:
+                    content = fh.read()
+            except OSError:
+                continue
+            for m in pat.finditer(content):
+                refs.add(m.group(1))
+    return refs
 
 
 # -----------------------------------------------------------------

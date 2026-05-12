@@ -40,6 +40,7 @@ from . import (
     acm,
     alb,
     aurora_postgres,
+    bigquery,
     ec2,
     ecr,
     eip,
@@ -94,6 +95,9 @@ TRANSLATORS = {
     "google_compute_target_https_proxy":         alb,
     "google_compute_url_map":                    alb,
     "google_compute_backend_service":            alb,
+    # Kiro-review fix #8: BigQuery → Athena scaffold (added 2026-05-12)
+    "google_bigquery_dataset":                   bigquery,
+    "google_bigquery_table":                     bigquery,
 }
 
 
@@ -180,6 +184,8 @@ def all_aws_module_specs() -> List[AWSModuleSpec]:
         waf, log_sink, eventbridge_scheduler,
         # FCR v3 Week 2 expansion
         eks, aurora_postgres, alb,
+        # Kiro-review fix #8
+        bigquery,
     )
     for mod in all_modules:
         spec = mod.aws_module_spec()

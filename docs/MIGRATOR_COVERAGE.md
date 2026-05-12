@@ -1,6 +1,6 @@
 # Cloud Lifecycle Intelligence — Migrator Coverage
 
-_Generated: `2026-05-12T07:25+00:00` from `migrator/plan/coverage.py` + `migrator/translate/__init__.py`._
+_Generated: `2026-05-12T08:54+00:00` from `migrator/plan/coverage.py` + `migrator/translate/__init__.py`._
 
 This document is the **canonical answer** to *"What GCP resources can the Migrator engine translate to AWS today?"* It's machine-generated from the engine's mapping table, so changes here reflect actual engine behavior — not aspirations.
 
@@ -9,12 +9,12 @@ This document is the **canonical answer** to *"What GCP resources can the Migrat
 | Band | Count | Meaning |
 |---|---|---|
 | 🟢 **HIGH** (≥85%) | 19 | Translates with minimal review |
-| 🟡 **MEDIUM** (60–84%) | 20 | Engineer pass per resource (topology shifts: SG/IAM model, etc.) |
-| 🔴 **LOW** (<60%) | 7 | Paradigm shifts (IAM bindings, IRSA wiring) — careful design |
+| 🟡 **MEDIUM** (60–84%) | 22 | Engineer pass per resource (topology shifts: SG/IAM model, etc.) |
+| 🔴 **LOW** (<60%) | 9 | Paradigm shifts (IAM bindings, IRSA wiring) — careful design |
 | ⚠️ **MANUAL_REVIEW** | 0 | No direct AWS equivalent or customer-specific module |
-| **Total** | **46** | |
+| **Total** | **50** | |
 
-**Translators registered today: 23** of 46 mappable types (50%).
+**Translators registered today: 25** of 50 mappable types (50%).
 
 ✅ = translator registered, emits AWS module body. ⏳ = mapping known, translator pending. 🚫 = no AWS equivalent.
 
@@ -88,7 +88,7 @@ This document is the **canonical answer** to *"What GCP resources can the Migrat
 **`google_storage_bucket_iam_member`**:
   - Multiple GCP iam_members on same bucket collapse to single AWS policy doc.
 
-## 🟡 MEDIUM confidence — 20 resource types
+## 🟡 MEDIUM confidence — 22 resource types
 
 | Status | GCP type | AWS equivalent | Score | Reason |
 |---|---|---|---|---|
@@ -103,6 +103,8 @@ This document is the **canonical answer** to *"What GCP resources can the Migrat
 | ✅ | `google_compute_security_policy` | `aws_wafv2_web_acl` | 72% | Cloud Armor policy → AWS WAF v2 ACL. Rate limiting + geo-blocking translate. |
 | ⏳ | `google_compute_ssl_certificate` | `aws_acm_certificate` | 70% | Managed cert translates to ACM; manual upload also supported. |
 | ⏳ | `google_compute_ssl_policy` | `aws_lb_listener` | 68% | SSL policy folds into ALB listener `ssl_policy` attribute. |
+| ⏳ | `google_compute_vpn_gateway` | `aws_vpn_gateway` | 70% | HA VPN gateway → AWS VPN Gateway. Tunnel topology + BGP settings translate; on-prem peer IPs come from operator. |
+| ⏳ | `google_compute_vpn_tunnel` | `aws_vpn_connection` | 70% | Per-tunnel translation under a single aws_vpn_gateway. |
 | ✅ | `google_container_cluster` | `aws_eks_cluster` | 78% | Cluster networking + release channel translate; Workload Identity → IRSA needs SA email rewiring. |
 | ✅ | `google_container_node_pool` | `aws_eks_node_group` | 78% | Node config (machine type, autoscaling, disk) translates; taints map cleanly. |
 | ⏳ | `google_kms_crypto_key` | `aws_kms_key` | 80% | Symmetric encryption key + rotation period translate. |
@@ -135,6 +137,14 @@ This document is the **canonical answer** to *"What GCP resources can the Migrat
 **`google_compute_ssl_certificate`**:
   - Cert validation method differs (DNS validation strongly preferred in ACM).
 
+**`google_compute_vpn_gateway`**:
+  - Maps to aws_vpn_gateway + aws_customer_gateway (per peer) + aws_vpn_connection (per tunnel).
+  - BGP ASN, peer IPs, and pre-shared keys are operator-supplied per customer landing zone.
+
+**`google_compute_vpn_tunnel`**:
+  - Each GCP tunnel becomes one aws_vpn_connection with its tunnel-specific PSK + peer IP.
+  - GCP IPsec defaults map cleanly; only BGP routing config needs operator review.
+
 **`google_container_cluster`**:
   - master_ipv4_cidr_block has no direct EKS equivalent.
   - Private cluster + master_authorized_networks → EKS endpoint config + SG.
@@ -160,10 +170,12 @@ This document is the **canonical answer** to *"What GCP resources can the Migrat
 **`google_monitoring_uptime_check_config`**:
   - Or use CloudWatch Synthetics for richer behavioral checks.
 
-## 🔴 LOW confidence — 7 resource types
+## 🔴 LOW confidence — 9 resource types
 
 | Status | GCP type | AWS equivalent | Score | Reason |
 |---|---|---|---|---|
+| ✅ | `google_bigquery_dataset` | `aws_athena_workgroup` | 55% | BigQuery dataset → Athena workgroup + Glue catalog DB (default) or Redshift Serverless (commented alternative in module). |
+| ✅ | `google_bigquery_table` | `aws_glue_catalog_table` | 50% | BigQuery table → Glue catalog table pointing at S3-backed Parquet data. |
 | ⏳ | `google_compute_global_network_endpoint_group` | _(none)_ | 40% | NEG has no direct AWS equivalent — depends on workload type. |
 | ⏳ | `google_project_iam_binding` | `aws_iam_policy` | 45% | Project IAM binding → IAM policy with role assumption statement. |
 | ⏳ | `google_project_iam_custom_role` | `aws_iam_policy` | 45% | Custom role permissions → IAM policy document. |
@@ -173,6 +185,16 @@ This document is the **canonical answer** to *"What GCP resources can the Migrat
 | ⏳ | `google_service_networking_connection` | _(none)_ | 55% | GCP PSA peering has no AWS-native equivalent — RDS uses subnet groups directly. |
 
 ### Notes / caveats
+
+**`google_bigquery_dataset`**:
+  - Athena is the default target for ad-hoc analytics over S3-backed data.
+  - Redshift Serverless is the alternative when BI tooling / high concurrency / complex joins are required.
+  - Data migration (BQ → GCS → S3 → Athena) is a separate workstream — see migration_helpers/.
+  - BigQuery views and stored procedures need operator rewrite as Athena CREATE VIEW or Redshift materialized views.
+
+**`google_bigquery_table`**:
+  - Table schema translates via Glue crawler or explicit CREATE EXTERNAL TABLE in Athena.
+  - Partitioning preserved if data is exported with the partition columns as folder structure.
 
 **`google_compute_global_network_endpoint_group`**:
   - Serverless NEG → ALB → Lambda or container.
