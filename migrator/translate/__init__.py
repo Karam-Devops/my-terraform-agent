@@ -59,6 +59,7 @@ from . import (
     subnet,
     transit_gateway,
     vpc,
+    vpn,
     waf,
 )
 from .base import AWSModuleSpec, Translation
@@ -109,6 +110,9 @@ TRANSLATORS = {
     "google_network_connectivity_spoke":         transit_gateway,
     "google_compute_shared_vpc_host_project":    shared_vpc,
     "google_compute_shared_vpc_service_project_attachment": shared_vpc,
+    # P2 #10 — VPN translator (full depth, not scaffold-only)
+    "google_compute_vpn_gateway":                vpn,
+    "google_compute_vpn_tunnel":                 vpn,
 }
 
 
@@ -200,6 +204,8 @@ def all_aws_module_specs() -> List[AWSModuleSpec]:
         # Kiro v9 depth-of-mapping closure (NCC + Shared VPC both
         # emit aws_ec2_transit_gateway via transit_gateway module).
         transit_gateway,
+        # P2 #10 — Site-to-Site VPN translator (full resource emission)
+        vpn,
     )
     for mod in all_modules:
         spec = mod.aws_module_spec()
