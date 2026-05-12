@@ -167,9 +167,23 @@ def translate(
 def _render_vpcs(vpcs: list) -> str:
     if not vpcs:
         return "{}"
+    import re as _re
     lines = ["{"]
     for v in vpcs:
-        key = v["key"].replace("-", "_").replace(".", "_")
+        # VPC map key must be a STATIC identifier — no `${...}` chunks.
+        # Otherwise downstream consumers like
+        # `module.X.vpc_ids["vpc_${local_env}_shared"]` get a literal
+        # interpolation in the index, which terraform validate rejects.
+        # Strip interpolation chunks first, then HCL-sanitize. (Kiro v7
+        # tier-2 finding.)
+        raw_key = str(v["key"])
+        clean = _re.sub(r"\$\{[^}]*\}", "", raw_key)
+        clean = _re.sub(r"[^A-Za-z0-9_]+", "_", clean).strip("_")
+        if not clean:
+            clean = f"vpc_{len(lines)}"
+        if clean[0].isdigit():
+            clean = "_" + clean
+        key = clean
         lines.append(f'    "{key}" = {{')
         lines.append(f'      name = "{v["name"]}"')
         lines.append(f'      cidr = "{v["cidr"]}"')

@@ -178,12 +178,24 @@ def translate(
 def _render_buckets(buckets: list) -> str:
     if not buckets:
         return "{}"
+    import re as _re
     lines = ["{"]
     for b in buckets:
-        key = (b["name"]
-               .replace("${local._project.locals.project_id}-", "")
-               .replace("-", "_")
-               .replace(".", "_"))
+        # Bucket map key must be a STATIC identifier — strip any
+        # `${...}` interpolation chunks first (Kiro v7 tier-2 finding:
+        # `"dh_temp_bucket_${local_env}"` as a key broke downstream
+        # `module.X.bucket_ids["..."]` consumers).
+        raw_name = str(b["name"])
+        clean = _re.sub(r"\$\{[^}]*\}", "", raw_name)
+        # DH-specific aliasing: strip the `_project.locals.project_id-`
+        # prefix the customer uses when one was preserved in the name.
+        clean = clean.replace("local._project.locals.project_id-", "")
+        clean = _re.sub(r"[^A-Za-z0-9_]+", "_", clean).strip("_")
+        if not clean:
+            clean = f"bucket_{len(lines)}"
+        if clean[0].isdigit():
+            clean = "_" + clean
+        key = clean
         lines.append(f'    "{key}" = {{')
         lines.append(f'      name                = "{b["name"]}"')
         lines.append(f'      storage_class       = "{b["storage_class"]}"')

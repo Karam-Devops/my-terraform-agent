@@ -329,11 +329,17 @@ def _extract_input_value(spec: Any, source_args: Dict, key_name: str) -> Any:
     """Extract one input value from source_args per the rule's `inputs.X` spec.
 
     Returns None when the source is missing AND no default is set.
-    Handles three forms:
+    Handles four forms:
       1. shorthand string (copy source key verbatim)
       2. dict with from/enum_map/transform/default
       3. dict with `for_each` (iterate over a source map/list, building
          a nested output map per item_inputs)
+      4. dict with `literal` (emit a fixed value regardless of source).
+         Used for placeholders the wiring layer rewrites, e.g.
+         `vpc_id: { literal: "TODO-vpc-id" }` so subnet rule emits
+         `vpc_id = "TODO-vpc-id"` line that gets rewritten to a real
+         module ref by cross_module_wiring. Without this, YAML rules
+         had no way to declare wiring-target attributes.
     """
     if isinstance(spec, str):
         # Shorthand: copy source key verbatim
@@ -341,6 +347,10 @@ def _extract_input_value(spec: Any, source_args: Dict, key_name: str) -> Any:
 
     if not isinstance(spec, dict):
         return None
+
+    # Static literal value — always emit regardless of source.
+    if "literal" in spec:
+        return spec["literal"]
 
     # for_each iteration (NEW) — overrides the scalar extraction path.
     if "for_each" in spec:

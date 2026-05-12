@@ -115,6 +115,19 @@ def aws_module_spec() -> AWSModuleSpec:
 
 _MAIN_TF = '''# AWS ECR module — emitted by Cloud Lifecycle Intelligence Migrator.
 
+# Compliance-driven CMK for repository encryption. Created only when
+# var.kms_encryption is true (typically HIPAA/PCI profiles); otherwise
+# repositories fall back to AES256 with AWS-managed keys.
+resource "aws_kms_key" "ecr_cmk" {
+  count = var.kms_encryption ? 1 : 0
+
+  description             = "Customer-managed KMS key for ECR repositories"
+  deletion_window_in_days = 30
+  enable_key_rotation     = true
+
+  tags = var.tags
+}
+
 resource "aws_ecr_repository" "this" {
   for_each = var.repositories
 
@@ -126,7 +139,8 @@ resource "aws_ecr_repository" "this" {
   }
 
   encryption_configuration {
-    encryption_type = "AES256"
+    encryption_type = var.kms_encryption ? "KMS" : "AES256"
+    kms_key         = var.kms_encryption ? aws_kms_key.ecr_cmk[0].arn : null
   }
 
   tags = merge(
@@ -164,6 +178,18 @@ _VARIABLES_TF = '''variable "repositories" {
   }))
   description = "Map of repo key -> spec."
   default     = {}
+}
+
+variable "kms_encryption" {
+  type        = bool
+  description = "When true, create a customer-managed KMS key and use it for repository encryption (HIPAA/PCI baseline). Otherwise use AWS-managed AES256."
+  default     = false
+}
+
+variable "image_scan_required" {
+  type        = bool
+  description = "Operator-facing soft toggle reflecting whether the compliance profile mandated per-image scanning. Doesn't change ECR-side behaviour (scan_on_push is per-repo) but exists for downstream IAM / policy gates."
+  default     = false
 }
 
 variable "tags" {

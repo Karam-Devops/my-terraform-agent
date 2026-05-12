@@ -14,6 +14,13 @@ confidence:    MEDIUM
 description:   "GCP Compute subnetwork → AWS Subnet. Note: GCP subnets are region-scoped, AWS subnets are AZ-scoped — operator typically maps 1 source subnet → 2-3 AWS subnets across AZs for HA."
 
 inputs:
+  # Required by the AWS subnet module. The cross_module_wiring layer
+  # rewrites this TODO placeholder to a real `module.vpc.vpc_ids[...]`
+  # reference at emit time when a VPC module is in the same env, or to
+  # `var.vpc_id` when it isn't (cross-env scenarios).
+  vpc_id:
+    literal: "TODO-vpc-id"
+
   subnets:
     for_each:
       source: subnets
