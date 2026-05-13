@@ -708,15 +708,29 @@ def _render_triage(
             try:
                 saved_path = _persist.save_result(result, user_key=_user_key)
                 if saved_path:
+                    # Immediate visible feedback regardless of page scroll
+                    # position — st.toast pops a transient notification
+                    # in the bottom-right that survives the page rerun.
+                    # The Save button is at the bottom of the triage
+                    # area; the sre_status_message caption is rendered
+                    # at the TOP of the page, so without toast the
+                    # operator can't tell the save succeeded without
+                    # scrolling up. Felt like "the button needs 2 clicks".
+                    st.toast(
+                        f"Snapshot saved ({len(result.hypotheses)} hypotheses)",
+                        icon="💾",
+                    )
                     st.session_state["sre_status_message"] = (
                         f"Saved snapshot ({len(result.hypotheses)} hypotheses)"
                     )
                 else:
+                    st.toast("Persistence backend unavailable", icon="⚠️")
                     st.warning(
                         "Persistence backend unavailable; in-session view "
                         "is unaffected."
                     )
             except Exception as se:  # noqa: BLE001
+                st.toast(f"Save failed: {se}", icon="❌")
                 st.warning(f"Save failed: {se}")
 
 
@@ -918,10 +932,40 @@ with ac2:
         st.session_state["sre_status_message"] = "Loaded demo alert"
 with ac3:
     if st.button("🗑️ Clear queue", use_container_width=True):
+        # Nack any queued alerts that have a pubsub_ack_id BEFORE
+        # wiping the in-memory queue. Without this, the messages
+        # stay leased on the Pub/Sub side until their ack-deadline
+        # expires — meaning a subsequent Pull-now would return
+        # nothing (Pub/Sub thinks the operator is still working
+        # on the previous batch). nack = modify_ack_deadline(0),
+        # which immediately returns the message to the backlog.
+        ack_ids_to_nack = [
+            a.pubsub_ack_id
+            for a in st.session_state["sre_alerts"]
+            if a.pubsub_ack_id
+        ]
+        if ack_ids_to_nack:
+            try:
+                gcp_pubsub.nack(
+                    project_id=project_id,
+                    ack_ids=ack_ids_to_nack,
+                    subscription_id=st.session_state["sre_subscription_id"],
+                )
+            except Exception as e:  # noqa: BLE001
+                # Best-effort — if nack fails, we still clear the
+                # local queue; the leases just expire on the normal
+                # ack-deadline timeline.
+                st.warning(
+                    f"Pub/Sub nack failed (queue cleared locally; "
+                    f"messages will return on ack-deadline expiry): {e}"
+                )
         st.session_state["sre_alerts"] = []
         st.session_state["sre_selected_alert_id"] = None
         st.session_state["sre_triage_result"] = None
-        st.session_state["sre_status_message"] = "Queue cleared"
+        st.session_state["sre_status_message"] = (
+            f"Queue cleared ({len(ack_ids_to_nack)} message(s) "
+            f"returned to backlog)" if ack_ids_to_nack else "Queue cleared"
+        )
 
 if st.session_state["sre_status_message"]:
     # Render error-shaped messages as dismissable warnings (sticky

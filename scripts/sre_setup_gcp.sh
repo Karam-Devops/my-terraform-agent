@@ -52,7 +52,15 @@
 #   NOTIFICATION_CHANNEL_DISPLAY_NAME (optional) Cloud Monitoring channel
 #                                   display name (default: "SRE Agent
 #                                   Pub/Sub Channel")
-#   ACK_DEADLINE_SECONDS  (optional) Pub/Sub ack deadline (default: 300)
+#   ACK_DEADLINE_SECONDS  (optional) Pub/Sub ack deadline (default: 60).
+#                         Was 300s pre-Day-4c — the long lease meant
+#                         that after a browser refresh, unacked messages
+#                         from the previous session stayed leased for
+#                         a full 5 minutes, making the new session's
+#                         Pull return zero. 60s gives operators enough
+#                         time to triage (an LLM rewrite takes ~5-10s,
+#                         operator decision another 30s typically) while
+#                         keeping post-refresh recovery fast.
 #
 # Exit codes:
 #   0 — success (or already-set-up, no-op)
@@ -83,7 +91,7 @@ fi
 TOPIC_NAME="${TOPIC_NAME:-sre-incident-alerts}"
 SUBSCRIPTION_NAME="${SUBSCRIPTION_NAME:-sre-agent-pull-subscription}"
 NOTIFICATION_CHANNEL_DISPLAY_NAME="${NOTIFICATION_CHANNEL_DISPLAY_NAME:-SRE Agent Pub/Sub Channel}"
-ACK_DEADLINE_SECONDS="${ACK_DEADLINE_SECONDS:-300}"
+ACK_DEADLINE_SECONDS="${ACK_DEADLINE_SECONDS:-60}"
 
 # --- Colors ---
 RED='\033[0;31m'
