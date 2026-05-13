@@ -149,6 +149,73 @@ st.session_state.setdefault("sre_refine_notes", "")
 
 
 # ---------------------------------------------------------------------------
+# Alert pulling — defined HERE (above the Restore banner) because the
+# Restore + Past Triages handlers need to call _pull_alerts to top-up
+# the queue with any other unacked alerts that vanished from
+# session_state on a hard browser refresh. Streamlit re-executes the
+# script top-to-bottom, so a function call must appear AFTER its def
+# in script order.
+# ---------------------------------------------------------------------------
+
+def _pull_alerts(*, subscription_id: str, max_messages: int = 10) -> int:
+    """Pull alerts from Pub/Sub into session_state. Returns count added.
+
+    Pub/Sub's ``pull`` returns whatever's *immediately leasable* —
+    often a fraction of what's actually in the subscription. To make
+    the "Pull now" button feel like "drain everything", we loop
+    client-side until a pull returns zero new messages or we hit a
+    safety cap. This is the standard pattern for batch-style drain
+    semantics on top of Pub/Sub's per-call best-effort delivery.
+    """
+    # Safety cap: prevents a misbehaving subscription (e.g., constant
+    # redelivery) from looping forever. 10 iterations × 10 messages =
+    # up to 100 alerts per click, comfortably above realistic burst.
+    _MAX_PULL_ITERATIONS = 10
+
+    existing_ids = {a.alert_id for a in st.session_state["sre_alerts"]}
+    added = 0
+
+    for _ in range(_MAX_PULL_ITERATIONS):
+        try:
+            envelopes = gcp_pubsub.list_pending_alerts(
+                project_id=project_id,
+                subscription_id=subscription_id,
+                max_messages=max_messages,
+            )
+        except PubSubUnavailable as e:
+            st.session_state["sre_status_message"] = e.user_hint
+            return added
+        except PreflightError as e:
+            st.session_state["sre_status_message"] = e.user_hint
+            return added
+
+        if not envelopes:
+            # Empty pull = subscription is drained (or truly quiet). Stop.
+            break
+
+        added_this_round = 0
+        for env in envelopes:
+            if env.alert_id not in existing_ids:
+                st.session_state["sre_alerts"].append(env)
+                existing_ids.add(env.alert_id)
+                added += 1
+                added_this_round += 1
+
+        # If we got messages but they were all duplicates of what's
+        # already in the queue (Pub/Sub redelivery from a previous
+        # unacked lease), stop — looping would just keep getting the
+        # same duplicates.
+        if added_this_round == 0:
+            break
+
+    st.session_state["sre_last_pull_at"] = time.time()
+    st.session_state["sre_status_message"] = (
+        f"Pulled {added} new alert(s)" if added else "No new alerts"
+    )
+    return added
+
+
+# ---------------------------------------------------------------------------
 # Restore-from-persistence banner (Day 3).
 #
 # Streamlit's session_state evaporates on browser refresh / tab close
@@ -184,7 +251,7 @@ if not st.session_state["sre_restore_offered"] and st.session_state["sre_triage_
                 if restored is not None:
                     # Re-hydrate session_state: re-inject the alert into the
                     # queue (so the queue card is clickable), select it, and
-                    # parking the loaded result so Run-triage isn't required.
+                    # park the loaded result so Run-triage isn't required.
                     in_queue = any(
                         a.alert_id == restored.alert.alert_id
                         for a in st.session_state["sre_alerts"]
@@ -193,10 +260,28 @@ if not st.session_state["sre_restore_offered"] and st.session_state["sre_triage_
                         st.session_state["sre_alerts"].append(restored.alert)
                     st.session_state["sre_selected_alert_id"] = restored.alert.alert_id
                     st.session_state["sre_triage_result"] = restored
-                    st.session_state["sre_status_message"] = (
-                        f"Restored triage for {restored.alert.alert_id}"
-                    )
                     st.session_state["sre_restore_offered"] = True
+
+                    # Day-4 fix: a hard browser refresh wipes
+                    # session_state, so after Restore the queue contains
+                    # ONLY the snapshotted alert — any other unacked
+                    # alerts the operator had in the queue at save-time
+                    # are gone. Auto-pull the subscription so they
+                    # reappear. _pull_alerts' alert_id dedup prevents
+                    # double-adding the restored one if Pub/Sub also
+                    # still has it un-acked.
+                    pulled_back = _pull_alerts(
+                        subscription_id=st.session_state["sre_subscription_id"],
+                    )
+                    if pulled_back:
+                        st.session_state["sre_status_message"] = (
+                            f"Restored {restored.alert.alert_id} + "
+                            f"re-pulled {pulled_back} pending alert(s)"
+                        )
+                    else:
+                        st.session_state["sre_status_message"] = (
+                            f"Restored triage for {restored.alert.alert_id}"
+                        )
                     st.rerun()
                 else:
                     st.warning("Restore failed; the snapshot may be corrupt.")
@@ -272,8 +357,18 @@ if len(_recent_triages) >= 2:
                 # triage session.
                 st.session_state["sre_pre_refine_map"] = None
                 st.session_state["sre_refine_notes"] = ""
+                # Same Day-4 fix as the Restore banner: also pull
+                # from Pub/Sub so other unacked alerts come back
+                # into the queue. Without this, loading a past
+                # triage leaves the queue with only the loaded
+                # alert; the operator would have to click Pull now
+                # again separately.
+                extra = _pull_alerts(
+                    subscription_id=st.session_state["sre_subscription_id"],
+                )
                 st.session_state["sre_status_message"] = (
                     f"Loaded past triage for {restored_past.alert.alert_id}"
+                    + (f" + re-pulled {extra} pending alert(s)" if extra else "")
                 )
                 st.rerun()
             elif restored_past is None:
@@ -322,68 +417,6 @@ with st.container():
         )
     with c5:
         st.metric("Queue", len(st.session_state["sre_alerts"]))
-
-
-# ---------------------------------------------------------------------------
-# Alert pulling
-# ---------------------------------------------------------------------------
-
-def _pull_alerts(*, subscription_id: str, max_messages: int = 10) -> int:
-    """Pull alerts from Pub/Sub into session_state. Returns count added.
-
-    Pub/Sub's ``pull`` returns whatever's *immediately leasable* —
-    often a fraction of what's actually in the subscription. To make
-    the "Pull now" button feel like "drain everything", we loop
-    client-side until a pull returns zero new messages or we hit a
-    safety cap. This is the standard pattern for batch-style drain
-    semantics on top of Pub/Sub's per-call best-effort delivery.
-    """
-    # Safety cap: prevents a misbehaving subscription (e.g., constant
-    # redelivery) from looping forever. 10 iterations × 10 messages =
-    # up to 100 alerts per click, comfortably above realistic burst.
-    _MAX_PULL_ITERATIONS = 10
-
-    existing_ids = {a.alert_id for a in st.session_state["sre_alerts"]}
-    added = 0
-
-    for _ in range(_MAX_PULL_ITERATIONS):
-        try:
-            envelopes = gcp_pubsub.list_pending_alerts(
-                project_id=project_id,
-                subscription_id=subscription_id,
-                max_messages=max_messages,
-            )
-        except PubSubUnavailable as e:
-            st.session_state["sre_status_message"] = e.user_hint
-            return added
-        except PreflightError as e:
-            st.session_state["sre_status_message"] = e.user_hint
-            return added
-
-        if not envelopes:
-            # Empty pull = subscription is drained (or truly quiet). Stop.
-            break
-
-        added_this_round = 0
-        for env in envelopes:
-            if env.alert_id not in existing_ids:
-                st.session_state["sre_alerts"].append(env)
-                existing_ids.add(env.alert_id)
-                added += 1
-                added_this_round += 1
-
-        # If we got messages but they were all duplicates of what's
-        # already in the queue (Pub/Sub redelivery from a previous
-        # unacked lease), stop — looping would just keep getting the
-        # same duplicates.
-        if added_this_round == 0:
-            break
-
-    st.session_state["sre_last_pull_at"] = time.time()
-    st.session_state["sre_status_message"] = (
-        f"Pulled {added} new alert(s)" if added else "No new alerts"
-    )
-    return added
 
 
 # ---------------------------------------------------------------------------

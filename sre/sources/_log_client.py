@@ -37,6 +37,7 @@ from __future__ import annotations
 
 import datetime
 import json
+import os
 import subprocess
 import sys
 from typing import Any, Dict, List, Optional
@@ -52,6 +53,19 @@ from importer.shell_runner import run_command
 # automatically). We disambiguate at the Python layer once here and
 # reuse the constant in all subprocess calls.
 _GCLOUD_BIN = "gcloud.cmd" if sys.platform == "win32" else "gcloud"
+
+# Post-buffer for the evidence lookback window. The Day-1 default of 5
+# min was too tight for two real-world scenarios:
+#   (a) Cloud Monitoring's alert evaluation can lag 1-2 min behind the
+#       triggering metric anomaly — a 5-min buffer barely covers it.
+#   (b) Demo flows that seed an alert THEN generate evidence post-seed:
+#       the test event lands after fired_at + 5min and falls outside
+#       the window, even though it's clearly the operator's intent
+#       to investigate it.
+# 30 min is the sweet spot — still tight enough to avoid drowning the
+# correlator in unrelated activity, broad enough to cover both cases.
+# Operators tuning per-tenant can override via the env var.
+_DEFAULT_POST_BUFFER_MIN = int(os.environ.get("SRE_POST_BUFFER_MIN", "30"))
 
 
 _log = get_logger(__name__)
@@ -200,7 +214,8 @@ def query_audit_logs(
 
 
 def compute_window(
-    *, fired_at_iso: str, lookback_min: int, post_buffer_min: int = 5,
+    *, fired_at_iso: str, lookback_min: int,
+    post_buffer_min: int = _DEFAULT_POST_BUFFER_MIN,
 ) -> tuple[str, str]:
     """Derive (start_iso, end_iso) for an alert + lookback.
 
@@ -208,8 +223,10 @@ def compute_window(
     The post-buffer matters because alert fire times often lag the
     actual triggering event by 30-90s (Cloud Monitoring evaluation
     window) — and clock skew between log producers + the alert
-    pipeline can drift another minute. Five minutes covers both
-    without bloating the window enough to drown in unrelated noise.
+    pipeline can drift another minute or two. The default 30 min
+    accommodates both that lag AND the common demo flow where the
+    operator generates test evidence after seeding the alert; see
+    the SRE_POST_BUFFER_MIN env-var note at the top of this module.
 
     Args:
         fired_at_iso: alert.fired_at (ISO-8601 UTC).
