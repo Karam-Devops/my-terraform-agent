@@ -384,6 +384,7 @@ with st.form(key="migrator_form"):
         git_url_input = ""
         git_pat_input = ""
         git_branch_input = ""
+        git_subpath_input = ""
     else:
         repo_path_input = ""   # ignored in git mode
         git_url_input = st.text_input(
@@ -423,6 +424,20 @@ with st.form(key="migrator_form"):
                 ),
                 disabled=not combo_runnable,
             )
+        git_subpath_input = st.text_input(
+            "Subpath inside the repo (optional)",
+            value="",
+            placeholder="simple-gcp",
+            help=(
+                "Relative path inside the cloned repo to scan. Leave blank "
+                "to scan the entire repo. Example: for "
+                "`gcp-iac-fixtures/simple-gcp/environments/dev`, paste "
+                "`simple-gcp/environments/dev` here. Path traversal "
+                "(`..`) is rejected — the resolved path must stay "
+                "inside the clone."
+            ),
+            disabled=not combo_runnable,
+        )
 
     skip_tier2_choice = st.checkbox(
         "⚡ Fast preview — skip Tier 2 (provider-schema validation)",
@@ -498,6 +513,38 @@ if submitted:
         )
         repo_path = _clone_result.path
         _clone_cleanup = _clone_result.cleanup
+
+        # Subpath: scope the migration to one directory inside the
+        # clone (e.g., `simple-gcp/environments/dev` inside the larger
+        # gcp-iac-fixtures repo). Path-traversal safety: resolve to a
+        # real path and verify it stays inside the clone — operator
+        # typing `..` shouldn't be able to read /etc/passwd.
+        _sub_raw = git_subpath_input.strip()
+        if _sub_raw:
+            _sub_cleaned = _sub_raw.replace("\\", "/").lstrip("/")
+            _candidate = os.path.realpath(os.path.join(repo_path, _sub_cleaned))
+            _clone_root = os.path.realpath(repo_path)
+            if not _candidate.startswith(_clone_root + os.sep) and _candidate != _clone_root:
+                _clone_cleanup()
+                st.error(
+                    f"Subpath `{_sub_raw}` escapes the clone root. "
+                    "Use a relative path like `simple-gcp/environments/dev`.",
+                    icon="❌",
+                )
+                st.stop()
+            if not os.path.isdir(_candidate):
+                _clone_cleanup()
+                st.error(
+                    f"Subpath `{_sub_raw}` not found inside the clone. "
+                    f"Check the path is correct (case-sensitive on Linux).",
+                    icon="❌",
+                )
+                st.stop()
+            repo_path = _candidate
+            _clone_status.success(
+                f"Cloned + scoped to `{_sub_raw}`. Running migration...",
+                icon="✅",
+            )
     else:
         if not repo_path_input or not repo_path_input.strip():
             st.error("Please enter a repo path.", icon="❌")
