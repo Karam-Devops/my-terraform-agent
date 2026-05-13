@@ -98,15 +98,36 @@ def collect(
         fired_at_iso=alert.fired_at, lookback_min=lookback_min,
     )
 
-    # The big disjunction over method-name suffixes. We use the gcloud
-    # logging filter language's ``=~`` (regex match) form: cheaper than
-    # OR-ing N exact matches and matches all API versions.
-    method_regex = "|".join(_CHANGE_METHOD_SUFFIXES)
+    # Method-name disjunction over CRUD suffixes. We use the gcloud
+    # logging filter ``:`` (substring-contains) operator joined with
+    # ``OR``, rather than a regex with alternation pipes.
+    #
+    # WHY NOT REGEX: the natural form would be
+    #   protoPayload.methodName=~".*\.(insert|create|update|...)$"
+    # but the `|` character is the cmd.exe pipe operator on Windows.
+    # subprocess.Popen invoking gcloud.cmd (a Windows batch shim)
+    # routes through cmd.exe, which interprets `|` as a pipe even
+    # inside Python-quoted argv elements — gcloud receives a
+    # fragmented filter, parse-errors out, and our try/except
+    # silently returns []. The whole asset_changes source produced
+    # zero evidence on every Windows demo box. iam_changes was
+    # unaffected because its filter uses the OR keyword (no `|`
+    # character).
+    #
+    # `:` is substring-contains, so it matches anywhere in the
+    # method name (e.g., "v1.compute.firewalls.insert" contains
+    # "insert"). The risk of false positives is low because GCP
+    # audit-log method names are short and these verbs don't
+    # commonly appear inside non-mutation method names.
+    method_clauses = " OR ".join(
+        f'protoPayload.methodName:"{suffix}"'
+        for suffix in _CHANGE_METHOD_SUFFIXES
+    )
     # Exclude IAM events — those go to gcp_iam_changes. We exclude by
     # serviceName (iam.googleapis.com) + by the SetIamPolicy method
     # (which fires across many services, not just iam.googleapis.com).
     filter_extra = (
-        f'protoPayload.methodName=~".*\\.({method_regex})$" '
+        f'({method_clauses}) '
         f'AND NOT protoPayload.methodName="SetIamPolicy" '
         f'AND NOT protoPayload.serviceName="iam.googleapis.com"'
     )

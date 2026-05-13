@@ -46,6 +46,26 @@ from common.logging import get_logger
 from importer.shell_runner import run_command
 
 
+class AuditLogQueryError(Exception):
+    """Raised when the gcloud logging-read call exits non-zero.
+
+    Carries the stderr snippet so the orchestrator can surface it on
+    the source chip — operators see the actual error (filter parse
+    failure, missing IAM, API not enabled) instead of a misleading
+    "OK · 0 items" status.
+
+    Day-4d learning: silently returning [] on subprocess errors hid
+    a real filter-parse bug for an entire debug session. Make the
+    failure visible by default — callers can still catch + treat as
+    empty if they want lenient behavior.
+    """
+
+    def __init__(self, message: str, *, returncode: int, stderr: str) -> None:
+        super().__init__(message)
+        self.returncode = returncode
+        self.stderr = stderr
+
+
 # Windows gotcha: gcloud ships as gcloud.cmd (batch script), not
 # gcloud.exe. subprocess.Popen with a list argv looks for an .exe and
 # fails with [WinError 2] on Windows even though `gcloud ...` works
@@ -168,22 +188,24 @@ def query_audit_logs(
     try:
         stdout = run_command(cmd, timeout=timeout_s)
     except subprocess.CalledProcessError as e:
-        # Common non-fatal causes:
+        # Common causes that warrant an explicit FAILED chip:
         #   * Logging API not enabled — operator hasn't run setup yet
         #   * SA missing roles/logging.viewer
         #   * Project ID typo
-        # We log + return empty so the orchestrator records a
-        # source_timing(status="failed") with the error message, but
-        # the triage as a whole still completes with whatever other
-        # sources produced. This is the SaaS A+D pattern: partial
-        # results beat a hard failure.
+        #   * Filter parse error (Day-4e: this was hidden as "OK 0"
+        #     for a full debug session before we promoted it to FAILED)
+        stderr_snip = (e.stderr or "")[:500] if hasattr(e, "stderr") else ""
         _log.warning(
             "audit_log_query_failed",
             project_id=project_id,
             returncode=e.returncode,
-            stderr=(e.stderr or "")[:300] if hasattr(e, "stderr") else "",
+            stderr=stderr_snip,
         )
-        return []
+        raise AuditLogQueryError(
+            f"gcloud logging read exit {e.returncode}: {stderr_snip[:200]}",
+            returncode=e.returncode,
+            stderr=stderr_snip,
+        ) from e
 
     if not stdout or not stdout.strip():
         return []
