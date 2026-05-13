@@ -58,12 +58,22 @@ SCHEMA_VERSION = 1
 # bucket don't see them as noise.
 _STATE_FILENAME_PATTERN = ".sre_triage_{alert_id}.json.gz"
 
-# Per-user registry — tells the UI "the most recent triage for user_key
-# X was alert_id Y at destination Z". Survives across page refreshes;
-# pruned when the underlying file is gone.
+# Per-user registry. Two pieces of info per user_key:
+#   * latest:     last triage saved (drives the "Restore?" banner)
+#   * recent:     ring buffer of the last N triages saved (drives the
+#                 "Past triages" selector in the UI)
+# Survives across page refreshes; entries auto-prune when the underlying
+# file is gone.
 _REGISTRY_ENV      = "SRE_REGISTRY_DIR"
 _REGISTRY_FILENAME = "last_triages.json"
 _DEFAULT_REGISTRY_DIRNAME = ".mtagent-sre"
+
+# Max past-triage entries kept per user_key. Tuned to:
+#   * 10 covers a full incident shift (one operator triaging ~hourly
+#     for an 8-hour rotation maxes at ~8 — 10 leaves headroom).
+#   * Each entry is ~120 bytes of metadata; 10 × 120 = 1.2 KB per user.
+#     Negligible registry overhead even on a 100-operator deployment.
+_MAX_RECENT_TRIAGES = 10
 
 
 # ---------------------------------------------------------------------------
@@ -231,9 +241,11 @@ def get_last_triage_info(*, user_key: str = "default") -> Optional[Dict[str, Any
     Returns dict with ``destination``, ``alert_id``, ``saved_at`` when
     a snapshot exists AND the underlying file is still reachable.
     Returns None when the slot is empty OR self-heals a stale entry.
+
+    Handles both the new (``{latest, recent}``) and legacy flat
+    registry shapes.
     """
-    registry = _read_registry()
-    entry = registry.get(user_key)
+    entry = _lookup_last_triage(user_key=user_key)
     if not entry:
         return None
 
@@ -394,15 +406,41 @@ def _register_last_triage(
     alert_id: str,
     safe_alert_id: str,
 ) -> None:
+    """Update registry entry for ``user_key``.
+
+    Stores two pieces of info per user:
+      * ``latest``: the single most-recent triage (drives Restore banner).
+      * ``recent``: ring buffer of the last N triages (drives Past
+        Triages selector). Same alert re-saved deduplicates by
+        ``safe_alert_id`` — a refine re-save updates the entry's
+        ``saved_at`` rather than creating a duplicate.
+    """
     try:
         os.makedirs(_registry_dir(), exist_ok=True)
         registry = _read_registry()
-        registry[user_key] = {
+        entry = {
             "destination":   destination,
             "alert_id":      alert_id,
             "safe_alert_id": safe_alert_id,
             "saved_at":      time.time(),
         }
+
+        # Forward-compat: older registry files were flat
+        # (user_key -> single entry dict). Detect and migrate.
+        slot = registry.get(user_key)
+        if slot is None or "latest" not in slot:
+            slot = {"latest": entry, "recent": []}
+        else:
+            slot["latest"] = entry
+
+        # Push into recent ring buffer. Dedupe by safe_alert_id so a
+        # re-save of the same triage (e.g., after a refine) bumps the
+        # existing entry's saved_at instead of pushing a duplicate.
+        recent = [r for r in slot.get("recent", []) if r.get("safe_alert_id") != safe_alert_id]
+        recent.insert(0, entry)
+        slot["recent"] = recent[:_MAX_RECENT_TRIAGES]
+        registry[user_key] = slot
+
         path = os.path.join(_registry_dir(), _REGISTRY_FILENAME)
         tmp = path + ".tmp"
         with open(tmp, "w", encoding="utf-8") as f:
@@ -413,7 +451,40 @@ def _register_last_triage(
 
 
 def _lookup_last_triage(*, user_key: str) -> Optional[Dict[str, Any]]:
-    return _read_registry().get(user_key)
+    """Return the 'latest' slot for user_key, handling both old
+    (flat) and new (latest+recent) registry shapes for back-compat."""
+    slot = _read_registry().get(user_key)
+    if not slot:
+        return None
+    if "latest" in slot:
+        return slot["latest"]
+    # Legacy flat shape from pre-history registry — return as-is.
+    return slot
+
+
+def list_recent_triages(*, user_key: str = "default") -> List[Dict[str, Any]]:
+    """Return the ring buffer of recent triages for this user_key.
+
+    Empty list when:
+      * nothing has been saved yet
+      * the slot pre-dates the history feature (legacy flat shape;
+        future saves will populate the recent buffer)
+
+    Each entry is a dict with ``destination``, ``alert_id``,
+    ``safe_alert_id``, ``saved_at`` — same shape ``_register_last_triage``
+    writes.
+
+    No file-existence verification here (would mean N stat calls /
+    GCS HEADs per page load). Callers are expected to gracefully
+    handle a ``load_result`` that returns None for a stale entry.
+    """
+    slot = _read_registry().get(user_key)
+    if not slot:
+        return []
+    recent = slot.get("recent")
+    if not isinstance(recent, list):
+        return []
+    return list(recent)
 
 
 def _prune_registry_slot(user_key: str) -> None:

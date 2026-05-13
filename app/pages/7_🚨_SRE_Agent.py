@@ -209,6 +209,81 @@ if not st.session_state["sre_restore_offered"] and st.session_state["sre_triage_
 
 
 # ---------------------------------------------------------------------------
+# Past Triages selector (Day-4 polish).
+#
+# Registry keeps a ring buffer of the last 10 triages per user_key.
+# Surfacing them lets an operator review what they did earlier in
+# the shift, or pull up a prior triage of the same alert for
+# pattern-matching. Hidden behind an expander so the page doesn't
+# get cluttered for first-time operators.
+#
+# Only shown when there's actually more than one past triage —
+# during the very first session of a day, the registry has just
+# one entry which is already the "latest" the Restore banner above
+# offers. Showing a one-item dropdown would be noisy.
+# ---------------------------------------------------------------------------
+
+try:
+    _recent_triages = _persist.list_recent_triages(user_key=_user_key)
+except Exception:  # noqa: BLE001
+    _recent_triages = []
+if len(_recent_triages) >= 2:
+    with st.expander(f"📚 Past triages ({len(_recent_triages)} recent)", expanded=False):
+        st.caption(
+            "Pick any past triage to re-hydrate the page with it. The "
+            "underlying snapshot is loaded from gs:// or your local "
+            "registry — no engine re-run, no LLM call."
+        )
+        # Build option labels: "alert_id  ·  XX min ago"
+        option_labels = []
+        for entry in _recent_triages:
+            saved_ago = max(0, int((time.time() - entry.get("saved_at", 0)) / 60))
+            option_labels.append(
+                f"{entry.get('alert_id', '?')}  ·  {saved_ago} min ago"
+            )
+        choice_idx = st.selectbox(
+            "Past triage",
+            options=list(range(len(option_labels))),
+            format_func=lambda i: option_labels[i],
+            key="sre_past_triage_choice",
+        )
+        if st.button("Load selected", use_container_width=True,
+                     key="sre_load_past_triage"):
+            target = _recent_triages[choice_idx]
+            try:
+                restored_past = _persist.load_result(
+                    destination=target["destination"],
+                    alert_id=target["alert_id"],
+                    user_key=_user_key,
+                )
+            except Exception as e:  # noqa: BLE001
+                restored_past = None
+                st.warning(f"Load failed: {e}")
+            if restored_past is not None:
+                in_queue = any(
+                    a.alert_id == restored_past.alert.alert_id
+                    for a in st.session_state["sre_alerts"]
+                )
+                if not in_queue:
+                    st.session_state["sre_alerts"].append(restored_past.alert)
+                st.session_state["sre_selected_alert_id"] = restored_past.alert.alert_id
+                st.session_state["sre_triage_result"] = restored_past
+                # Clear any stale refine deltas from a different
+                # triage session.
+                st.session_state["sre_pre_refine_map"] = None
+                st.session_state["sre_refine_notes"] = ""
+                st.session_state["sre_status_message"] = (
+                    f"Loaded past triage for {restored_past.alert.alert_id}"
+                )
+                st.rerun()
+            elif restored_past is None:
+                st.warning(
+                    "Snapshot couldn't be loaded — it may have been "
+                    "pruned. The registry will self-heal on the next save."
+                )
+
+
+# ---------------------------------------------------------------------------
 # Sticky context bar.
 #
 # Single row at top of page with 5 cells: project pin, lookback selector,
@@ -361,6 +436,11 @@ def _render_triage(
                 render_error(e, context="running incident triage")
                 return
         st.session_state["sre_triage_result"] = result
+        # Fresh triage: any prior refine deltas don't apply to the new
+        # ranking. Clear the snapshot map + the operator notes text so
+        # the next refine cycle starts clean.
+        st.session_state["sre_pre_refine_map"] = None
+        st.session_state["sre_refine_notes"] = ""
 
     result: Optional[IncidentResult] = st.session_state["sre_triage_result"]
     if result is None:
@@ -488,11 +568,27 @@ def _render_triage(
         ):
             with st.spinner("Re-ranking hypotheses with your notes…"):
                 try:
+                    # Capture pre-refine confidence map keyed by the
+                    # first cited evidence_id. Used by the hypothesis
+                    # renderer to show ↑/↓ confidence deltas on the
+                    # refined view. We pick cited_evidence[0] because
+                    # it's the most stable join key — the LLM may
+                    # rewrite the headline + reasoning but rarely
+                    # swaps the primary cited evidence.
+                    pre_refine_map = {}
+                    for h in result.hypotheses:
+                        if h.cited_evidence:
+                            pre_refine_map[h.cited_evidence[0]] = {
+                                "rank":       h.rank,
+                                "confidence": h.confidence,
+                                "confidence_pct": h.confidence_pct,
+                            }
                     refined = refine_with_notes(
                         result=result, operator_notes=notes_val,
                     )
                     st.session_state["sre_triage_result"] = refined
                     st.session_state["sre_refine_notes"] = notes_val
+                    st.session_state["sre_pre_refine_map"] = pre_refine_map
                     # Persist the refined result too, so a refresh restores
                     # the post-refine view rather than the pre-refine.
                     try:
@@ -545,12 +641,44 @@ def _render_triage(
 
 
 def _render_hypothesis_card(hyp: Hypothesis) -> None:
-    """Render one hypothesis as a confidence-bar card with reasoning."""
+    """Render one hypothesis as a confidence-bar card with reasoning.
+
+    When a refine has run during this session, also shows a small ↑/↓
+    delta beside the current confidence — operators see at a glance
+    which hypotheses the LLM promoted vs demoted given their notes.
+    """
     color = _CONF_COLORS.get(hyp.confidence, "#6b7280")
-    # Filled-progress bar via inline HTML — Streamlit's st.progress only
-    # accepts 0..1 but we want a labelled, color-coded bar with the
-    # confidence band visible. The HTML version is dependency-free and
-    # renders identically on all browsers.
+
+    # Compute the refine-delta string + a rank-change indicator if a
+    # pre-refine snapshot exists for this hypothesis. Match by the
+    # first cited evidence_id — the most stable join key because the
+    # LLM may rewrite prose but rarely swaps primary citations.
+    pre_map = st.session_state.get("sre_pre_refine_map") or {}
+    delta_chip_html = ""
+    if pre_map and hyp.cited_evidence:
+        pre = pre_map.get(hyp.cited_evidence[0])
+        if pre:
+            pct_delta = hyp.confidence_pct - pre["confidence_pct"]
+            rank_delta = pre["rank"] - hyp.rank  # positive = promoted
+            if pct_delta != 0 or rank_delta != 0:
+                if pct_delta > 0:
+                    arrow_color, arrow = "#00C853", "▲"
+                elif pct_delta < 0:
+                    arrow_color, arrow = "#EF5350", "▼"
+                else:
+                    arrow_color, arrow = "#9aa0aa", "●"
+                rank_text = ""
+                if rank_delta > 0:
+                    rank_text = f' · was #{pre["rank"]}'
+                elif rank_delta < 0:
+                    rank_text = f' · was #{pre["rank"]}'
+                delta_chip_html = (
+                    f'<div style="font-size:0.72em; color:{arrow_color}; '
+                    f'font-weight:600; margin-top:2px;">'
+                    f'{arrow} {pct_delta:+d}%{rank_text}'
+                    f'</div>'
+                )
+
     bar_html = f"""
     <div style="background:#0E1117; border-radius:6px; height:8px; overflow:hidden; margin-top:6px;">
         <div style="background:{color}; width:{hyp.confidence_pct}%; height:100%;"></div>
@@ -569,8 +697,11 @@ def _render_hypothesis_card(hyp: Hypothesis) -> None:
                 <div style="font-weight:700; font-size:1.05em; color:#E5E9F2;">
                     #{hyp.rank} · {hyp.headline}
                 </div>
-                <div style="font-size:0.85em; color:{color}; font-weight:700;">
-                    {hyp.confidence} · {hyp.confidence_pct}%
+                <div style="text-align:right;">
+                    <div style="font-size:0.85em; color:{color}; font-weight:700;">
+                        {hyp.confidence} · {hyp.confidence_pct}%
+                    </div>
+                    {delta_chip_html}
                 </div>
             </div>
             {bar_html}
@@ -792,6 +923,8 @@ with queue_col:
             ):
                 st.session_state["sre_selected_alert_id"] = env.alert_id
                 st.session_state["sre_triage_result"] = None  # clear stale
+                st.session_state["sre_pre_refine_map"] = None
+                st.session_state["sre_refine_notes"] = ""
 
 
 # --- Triage area (right column) -------------------------------------------

@@ -196,6 +196,16 @@ def refine_with_notes(
             eid for eid in h.cited_evidence if eid in valid_evidence_ids
         ]
 
+    # Regenerate recommended_actions (Day-4 fix). The LLM doesn't write
+    # action buttons — those are derived from the dominant cluster shape
+    # of the cited evidence (DEPLOY → Revert PR + Open build logs, GRANT
+    # → Open IAM policy + Revoke recent grant, etc.). Without this step,
+    # refined hypotheses lost their action buttons entirely, leaving the
+    # operator with no clickable next-step UX.
+    from ..correlator import build_actions_for_hypothesis
+    for h in new_hyps:
+        h.recommended_actions = build_actions_for_hypothesis(h, result.evidence)
+
     refined.hypotheses = new_hyps
     refined.notes.append(f"refine: {summary_note}" if summary_note else
                          "refine: hypotheses re-ranked per operator notes")

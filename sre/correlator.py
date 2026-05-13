@@ -476,6 +476,68 @@ def _build_reasoning(
     return bullets
 
 
+def build_actions_for_hypothesis(
+    hypothesis: Hypothesis,
+    evidence: List[EvidenceItem],
+) -> List[Dict[str, str]]:
+    """Derive recommended actions for a hypothesis from its cited evidence.
+
+    Used by the refine loop to repopulate actions after the LLM has
+    potentially reordered / dropped / merged hypotheses. The first-pass
+    correlator builds actions per-cluster as it generates each
+    Hypothesis; refine throws away that context (it operates on already-
+    ranked hypotheses), so we have to reconstruct the cluster key from
+    the hypothesis's cited evidence list.
+
+    Strategy:
+      1. Look up the cited EvidenceItems in the full evidence list.
+      2. Group by (source, change_type).
+      3. Pick the largest group — that's the "dominant" cluster the
+         hypothesis is really about.
+      4. Pass it to the same _build_recommended_actions used by the
+         first-pass correlator so action wording stays consistent
+         pre- and post-refine.
+
+    Edge cases:
+      * Hypothesis has no cited_evidence (LLM stripped them) → returns
+        the universal "Post to #incidents" action only.
+      * Cited evidence_ids all reference items missing from the
+        evidence list (shouldn't happen after refine.py's phantom
+        filter, but defensive) → same fallback.
+    """
+    if not hypothesis.cited_evidence:
+        return [_universal_slack_action(hypothesis)]
+
+    by_id = {e.evidence_id: e for e in evidence}
+    cited_items = [by_id[eid] for eid in hypothesis.cited_evidence if eid in by_id]
+    if not cited_items:
+        return [_universal_slack_action(hypothesis)]
+
+    # Group cited items by (source, change_type). Largest group wins
+    # — that's the primary cluster shape this hypothesis represents.
+    groups: Dict[Tuple[str, str], List[EvidenceItem]] = defaultdict(list)
+    for it in cited_items:
+        groups[(it.source, it.change_type)].append(it)
+    (best_source, best_change), best_items = max(
+        groups.items(), key=lambda kv: len(kv[1]),
+    )
+
+    # Cluster key shape matches what the first-pass correlator builds.
+    # The third element is the resource bucket — we use the first
+    # cited item's bucket as a representative.
+    cluster_key = (best_source, best_change, _resource_bucket(best_items[0].resource_ref))
+    return _build_recommended_actions(cluster_key, best_items)
+
+
+def _universal_slack_action(hyp: Hypothesis) -> Dict[str, str]:
+    """Fallback action when cited_evidence is empty / unresolvable."""
+    return {
+        "label": "Post to #incidents",
+        "kind": "slack_post",
+        "payload": ",".join(hyp.cited_evidence[:3]) or "(no evidence)",
+    }
+
+
 def _build_recommended_actions(
     cluster_key: Tuple[str, str, str],
     items: List[EvidenceItem],
