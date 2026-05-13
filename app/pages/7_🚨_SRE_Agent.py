@@ -59,6 +59,13 @@ from sre.run import run_incident_triage
 from sre.triggers import gcp_pubsub
 from sre.triggers.gcp_pubsub import PubSubUnavailable
 
+# Day-3: persistence + refine. Both are imported lazily inside the page
+# render so a missing dependency (e.g., google-cloud-storage for the
+# gs:// backend in local-dev) doesn't break the page import. The
+# top-level imports here are pure-Python and always work.
+from sre.output import result_persistence as _persist
+from sre.llm.refine import refine_with_notes
+
 
 # ---------------------------------------------------------------------------
 # Severity + confidence color tokens.
@@ -137,6 +144,68 @@ st.session_state.setdefault("sre_auto_poll", False)
 st.session_state.setdefault("sre_lookback_min", 60)
 st.session_state.setdefault("sre_subscription_id", gcp_pubsub.DEFAULT_SUBSCRIPTION_ID)
 st.session_state.setdefault("sre_status_message", "")
+st.session_state.setdefault("sre_restore_offered", False)
+st.session_state.setdefault("sre_refine_notes", "")
+
+
+# ---------------------------------------------------------------------------
+# Restore-from-persistence banner (Day 3).
+#
+# Streamlit's session_state evaporates on browser refresh / tab close
+# / Cloud Run replica swap. The persistence module writes the last
+# triage to gs:// (prod) or ~/.mtagent-sre/snapshots/ (local) keyed by
+# <tenant>::<project>. On page load, peek the registry — if there's a
+# recent saved triage and the operator hasn't already declined to
+# restore it, show a single non-blocking banner above the queue.
+#
+# user_key matches the orchestrator's snapshot save (see sre/run.py's
+# _persist_best_effort). Same tenant_id ⊕ project_id slot.
+# ---------------------------------------------------------------------------
+
+_user_key = f"{tenant_id}::{project_id}" if tenant_id != "default" else f"default::{project_id}"
+if not st.session_state["sre_restore_offered"] and st.session_state["sre_triage_result"] is None:
+    try:
+        _info = _persist.get_last_triage_info(user_key=_user_key)
+    except Exception:  # noqa: BLE001
+        _info = None
+    if _info:
+        rb_cols = st.columns([5, 1, 1])
+        with rb_cols[0]:
+            saved_min_ago = max(0, int((time.time() - _info["saved_at"]) / 60))
+            st.info(
+                f"Found a saved triage for alert **{_info['alert_id']}** "
+                f"from {saved_min_ago} min ago. Restore?",
+                icon="🔁",
+            )
+        with rb_cols[1]:
+            if st.button("Restore", type="primary", use_container_width=True,
+                         key="sre_restore_yes"):
+                restored = _persist.load_result(user_key=_user_key)
+                if restored is not None:
+                    # Re-hydrate session_state: re-inject the alert into the
+                    # queue (so the queue card is clickable), select it, and
+                    # parking the loaded result so Run-triage isn't required.
+                    in_queue = any(
+                        a.alert_id == restored.alert.alert_id
+                        for a in st.session_state["sre_alerts"]
+                    )
+                    if not in_queue:
+                        st.session_state["sre_alerts"].append(restored.alert)
+                    st.session_state["sre_selected_alert_id"] = restored.alert.alert_id
+                    st.session_state["sre_triage_result"] = restored
+                    st.session_state["sre_status_message"] = (
+                        f"Restored triage for {restored.alert.alert_id}"
+                    )
+                    st.session_state["sre_restore_offered"] = True
+                    st.rerun()
+                else:
+                    st.warning("Restore failed; the snapshot may be corrupt.")
+                    st.session_state["sre_restore_offered"] = True
+        with rb_cols[2]:
+            if st.button("Dismiss", use_container_width=True,
+                         key="sre_restore_no"):
+                st.session_state["sre_restore_offered"] = True
+                st.rerun()
 
 
 # ---------------------------------------------------------------------------
@@ -340,13 +409,35 @@ def _render_triage(
             # Sort newest-first, render as a compact list. Day 2 will
             # add filtering by hypothesis (click a hypothesis card →
             # this list narrows to its cited_evidence).
+            # Sort by relevance_score (correlator-assigned) DESC so the
+            # most-implicated changes float to the top. Ties broken by
+            # timestamp (newer first). Score badge gives the operator
+            # a fast visual scan of "which evidence actually matters".
             for ev in sorted(
-                result.evidence, key=lambda e: e.timestamp, reverse=True,
+                result.evidence,
+                key=lambda e: (e.relevance_score, e.timestamp),
+                reverse=True,
             ):
+                # Color the score badge by tier (matches the confidence
+                # bar palette used on the hypothesis cards above).
+                if ev.relevance_score >= 0.70:
+                    score_color = _CONF_COLORS["HIGH"]
+                elif ev.relevance_score >= 0.40:
+                    score_color = _CONF_COLORS["MEDIUM"]
+                else:
+                    score_color = _CONF_COLORS["LOW"]
+                score_badge = (
+                    f'<span style="background:{score_color}26; '
+                    f'color:{score_color}; padding:1px 6px; '
+                    f'border-radius:8px; font-size:0.8em; '
+                    f'font-weight:600; margin-right:6px;">'
+                    f'{ev.relevance_score:.2f}</span>'
+                )
                 st.markdown(
-                    f"**{ev.timestamp}** · `{ev.source}` · "
+                    f"{score_badge} **{ev.timestamp}** · `{ev.source}` · "
                     f"{ev.change_type} on `{ev.resource_ref}` · "
-                    f"by **{ev.actor or 'system'}** — {ev.summary}"
+                    f"by **{ev.actor or 'system'}** — {ev.summary}",
+                    unsafe_allow_html=True,
                 )
 
     # ---- Source chips --------------------------------------------------
@@ -365,8 +456,54 @@ def _render_triage(
             for err in result.errors:
                 st.error(err)
 
-    # ---- Action bar ----------------------------------------------------
+    # ---- Refine with operator notes (Day 3) ----------------------------
+    #
+    # The operator types fresh context ("I rolled back the deploy, alert
+    # still firing" / "scheduled maintenance, ignore the SG change") and
+    # the LLM re-ranks + rewrites hypotheses. Original ranks stay in
+    # session_state until the operator confirms the refined result —
+    # they can always Re-run to start over.
     st.divider()
+    with st.expander("🤖 Refine with operator notes", expanded=False):
+        st.write(
+            "Type any context the agent couldn't see — rollbacks, "
+            "known maintenance, customer reports — and the agent will "
+            "re-rank the hypotheses against your notes."
+        )
+        notes_val = st.text_area(
+            "Operator notes",
+            value=st.session_state.get("sre_refine_notes", ""),
+            key="sre_refine_notes_input",
+            height=100,
+            placeholder="e.g., I rolled back the deploy at 10:02 UTC and "
+                        "the alert is still firing — please de-emphasize "
+                        "the deploy hypothesis.",
+        )
+        if st.button(
+            "Re-rank with these notes",
+            type="primary",
+            disabled=not notes_val.strip(),
+            help="Calls the LLM once. Falls back to the original "
+                 "ranking on any failure — your view doesn't lose state.",
+        ):
+            with st.spinner("Re-ranking hypotheses with your notes…"):
+                try:
+                    refined = refine_with_notes(
+                        result=result, operator_notes=notes_val,
+                    )
+                    st.session_state["sre_triage_result"] = refined
+                    st.session_state["sre_refine_notes"] = notes_val
+                    # Persist the refined result too, so a refresh restores
+                    # the post-refine view rather than the pre-refine.
+                    try:
+                        _persist.save_result(refined, user_key=_user_key)
+                    except Exception:  # noqa: BLE001
+                        pass
+                    st.rerun()
+                except Exception as ref_err:  # noqa: BLE001
+                    render_error(ref_err, context="refining with notes")
+
+    # ---- Action bar ----------------------------------------------------
     st.markdown("### Actions")
     a1, a2, a3 = st.columns(3)
     with a1:
@@ -386,13 +523,25 @@ def _render_triage(
         ):
             _do_nack(alert)
     with a3:
-        st.button(
-            "🤖 Refine with Claude",
+        if st.button(
+            "💾 Save snapshot",
             use_container_width=True,
-            disabled=True,
-            help="Coming Day 3 — re-ranks hypotheses with extra context "
-                 "(operator notes, related incidents).",
-        )
+            help="Persist the current view to gs:// or the local "
+                 "registry so a refresh re-hydrates it.",
+        ):
+            try:
+                saved_path = _persist.save_result(result, user_key=_user_key)
+                if saved_path:
+                    st.session_state["sre_status_message"] = (
+                        f"Saved snapshot ({len(result.hypotheses)} hypotheses)"
+                    )
+                else:
+                    st.warning(
+                        "Persistence backend unavailable; in-session view "
+                        "is unaffected."
+                    )
+            except Exception as se:  # noqa: BLE001
+                st.warning(f"Save failed: {se}")
 
 
 def _render_hypothesis_card(hyp: Hypothesis) -> None:

@@ -256,6 +256,41 @@ def run_incident_triage(
         result.errors.append(f"correlator: {rank_err}")
         log.warning("sre_ranking_failed", error=str(rank_err))
 
+    # ---- LLM narrative rewrite (Day 3) ----
+    #
+    # Heuristic ranks + scores + cited_evidence stay as the correlator
+    # produced them; only the human-facing headline + reasoning bullets
+    # get rewritten in operator-grade prose. One LLM call per triage,
+    # rank-keyed so a misordered LLM response still maps correctly.
+    # Falls back to the heuristic templates on any LLM failure — the
+    # triage always ships, just with less polished prose if the LLM
+    # plumbing isn't available.
+    if result.hypotheses:
+        try:
+            from .llm.hypothesis_writer import rewrite as _llm_rewrite
+            rewritten = _llm_rewrite(
+                alert=alert,
+                hypotheses=result.hypotheses,
+                evidence=result.evidence,
+            )
+            # Sanity: rewrite() always returns a same-length list (deep
+            # copies + selectively mutated headlines). If something
+            # weird happened, keep the original.
+            if len(rewritten) == len(result.hypotheses):
+                result.hypotheses = rewritten
+                log.info("sre_llm_rewrite_applied",
+                         hypothesis_count=len(result.hypotheses))
+            else:
+                log.warning("sre_llm_rewrite_length_mismatch",
+                            before=len(result.hypotheses),
+                            after=len(rewritten))
+        except Exception as llm_err:  # noqa: BLE001
+            # Belt-and-braces: rewrite() catches its own exceptions and
+            # returns the heuristic copies. This outer except is the
+            # safety net if a future code path raises pre-fallback.
+            result.notes.append(f"llm_rewrite: skipped ({llm_err})")
+            log.warning("sre_llm_rewrite_failed", error=str(llm_err))
+
     # ---- finalize ----
     result.completed_at = _utc_iso_now()
     result.duration_s = round(time.monotonic() - started, 2)
