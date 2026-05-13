@@ -99,7 +99,15 @@ def render_sidebar() -> str:
         # selection has been made this session yet. Lets operators
         # land on the page and immediately have the right project
         # selected without an extra click.
-        env_default = os.environ.get("TARGET_PROJECT_ID", "")
+        #
+        # DEV CONVENIENCE (Phase 8 demo): when neither session_state
+        # nor TARGET_PROJECT_ID is set, fall back to "dev-proj-470211"
+        # so the demo doesn't require a typed/selected project on
+        # every page load. Remove this fallback before shipping to
+        # multi-tenant customers — production should require explicit
+        # project selection.
+        _DEV_PROJECT_FALLBACK = "dev-proj-470211"
+        env_default = os.environ.get("TARGET_PROJECT_ID", _DEV_PROJECT_FALLBACK)
         current = st.session_state.get("project_id", env_default)
 
         if projects:

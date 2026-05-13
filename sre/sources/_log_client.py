@@ -38,10 +38,20 @@ from __future__ import annotations
 import datetime
 import json
 import subprocess
+import sys
 from typing import Any, Dict, List, Optional
 
 from common.logging import get_logger
 from importer.shell_runner import run_command
+
+
+# Windows gotcha: gcloud ships as gcloud.cmd (batch script), not
+# gcloud.exe. subprocess.Popen with a list argv looks for an .exe and
+# fails with [WinError 2] on Windows even though `gcloud ...` works
+# fine at the shell prompt (cmd.exe + PATHEXT resolve the .cmd
+# automatically). We disambiguate at the Python layer once here and
+# reuse the constant in all subprocess calls.
+_GCLOUD_BIN = "gcloud.cmd" if sys.platform == "win32" else "gcloud"
 
 
 _log = get_logger(__name__)
@@ -125,7 +135,7 @@ def query_audit_logs(
     filter_str = " AND ".join(filter_parts)
 
     cmd = [
-        "gcloud", "logging", "read", filter_str,
+        _GCLOUD_BIN, "logging", "read", filter_str,
         f"--project={project_id}",
         f"--limit={max_records}",
         "--order=desc",          # newest-first

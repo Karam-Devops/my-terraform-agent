@@ -161,10 +161,13 @@ def list_pending_alerts(
     log.debug("pubsub_pull_start", max_messages=max_messages)
 
     try:
-        # Pull is synchronous; the SDK handles retries internally.
-        # ``return_immediately=False`` lets the server hold the
-        # connection open up to ``timeout`` waiting for messages,
-        # avoiding tight-loop polling from the Streamlit page.
+        # ``return_immediately=False`` — the server holds the
+        # connection up to the gRPC deadline waiting for at least one
+        # message. Despite being officially-deprecated-sounding in
+        # docs, it's the only way to RELIABLY drain new messages
+        # from a subscription; ``return_immediately=True`` reads
+        # from an internal cache that often returns 0 even when the
+        # backlog has fresh messages.
         response = client.pull(
             request=PullRequest(
                 subscription=sub_path,
@@ -174,9 +177,24 @@ def list_pending_alerts(
             timeout=timeout_s,
         )
     except Exception as e:  # noqa: BLE001 — broad on purpose
-        # Common failures: subscription doesn't exist (NotFound), no
-        # IAM (PermissionDenied), network blip (ServiceUnavailable).
-        # All look the same to the UI: "Pub/Sub not reachable".
+        # Distinguish "empty subscription, client-side deadline fired
+        # before server returned" (benign — no messages was the right
+        # answer) from "Pub/Sub genuinely unreachable" (NotFound,
+        # PermissionDenied, network blip). String-match the exception
+        # text because the SDK's exception hierarchy varies across
+        # versions and we don't want to lock to a specific protobuf
+        # class.
+        err_text = str(e).lower()
+        benign_no_messages = any(
+            tok in err_text for tok in (
+                "deadlineexceeded", "deadline exceeded", "deadline_exceeded",
+                "504",
+            )
+        )
+        if benign_no_messages:
+            log.info("pubsub_pull_empty_window",
+                     reason="benign timeout / no messages available")
+            return []
         raise PubSubUnavailable(
             f"pull from {sub_path} failed: {e}",
             subscription=sub_path,

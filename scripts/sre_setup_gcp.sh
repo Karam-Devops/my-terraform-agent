@@ -68,7 +68,17 @@ set -euo pipefail
 
 # --- Inputs ---
 : "${PROJECT_ID:?PROJECT_ID env var required (GCP project hosting the agent)}"
-: "${AGENT_SA:?AGENT_SA env var required (runtime SA email)}"
+: "${AGENT_SA:?AGENT_SA env var required (runtime SA email OR your user email)}"
+
+# Detect principal type so the same script works for prod (service
+# account) and local-dev demos (user identity via ADC). Anything
+# ending in .gserviceaccount.com is an SA; anything else is treated
+# as a user email. Both bind identically once the prefix is right.
+if [[ "${AGENT_SA}" == *.gserviceaccount.com ]]; then
+    MEMBER_PREFIX="serviceAccount"
+else
+    MEMBER_PREFIX="user"
+fi
 
 TOPIC_NAME="${TOPIC_NAME:-sre-incident-alerts}"
 SUBSCRIPTION_NAME="${SUBSCRIPTION_NAME:-sre-agent-pull-subscription}"
@@ -156,7 +166,7 @@ echo
 # Operators attach this channel to whichever alerting policies they
 # want the SRE agent to triage.
 #
-# `gcloud alpha monitoring channels` is the official path today. The
+# `gcloud beta monitoring channels` is the official path today. The
 # describe-then-create idiom doesn't fit channels well (channels are
 # identified by an auto-generated name, not display_name), so instead
 # we list existing pubsub channels and check if any already points at
@@ -165,10 +175,24 @@ echo
 
 log "Step 3/4: Cloud Monitoring notification channel…"
 
+# Demo escape hatch: the notification channel only matters for production
+# (Cloud Monitoring alert policies → Pub/Sub). For local smokes that
+# seed alerts directly via scripts/sre_seed_demo_alerts.py, the channel
+# is irrelevant. Set SKIP_NOTIFICATION_CHANNEL=1 to skip — this also
+# avoids the gcloud `alpha` / `beta` component prompt that some installs
+# trigger interactively.
+if [[ "${SKIP_NOTIFICATION_CHANNEL:-0}" == "1" ]]; then
+    warn "SKIP_NOTIFICATION_CHANNEL=1 — skipping channel creation."
+    warn "Demo seeder (scripts/sre_seed_demo_alerts.py) publishes directly"
+    warn "to the topic, so this is fine for local smokes. Wire the channel"
+    warn "later via the Console or by re-running with SKIP_NOTIFICATION_CHANNEL=0."
+    echo
+else
+
 TOPIC_FQN="projects/${PROJECT_ID}/topics/${TOPIC_NAME}"
 
 # Find any existing pubsub channel pointing at our topic.
-EXISTING_CHANNEL=$(gcloud alpha monitoring channels list \
+EXISTING_CHANNEL=$(gcloud beta monitoring channels list \
     --project="${PROJECT_ID}" \
     --filter="type=pubsub AND labels.topic=${TOPIC_FQN}" \
     --format="value(name)" 2>/dev/null | head -n 1 || true)
@@ -190,12 +214,13 @@ else
   }
 }
 EOF
-    NEW_CHANNEL=$(gcloud alpha monitoring channels create \
+    NEW_CHANNEL=$(gcloud beta monitoring channels create \
         --project="${PROJECT_ID}" \
         --channel-content-from-file="${TMP_CHANNEL_JSON}" \
         --format="value(name)")
     ok "Created notification channel ${NEW_CHANNEL}"
 fi
+fi    # end SKIP_NOTIFICATION_CHANNEL guard
 echo
 
 # ---------------------------------------------------------------------------
@@ -217,7 +242,7 @@ ROLES=(
 
 for role in "${ROLES[@]}"; do
     gcloud projects add-iam-policy-binding "${PROJECT_ID}" \
-        --member="serviceAccount:${AGENT_SA}" \
+        --member="${MEMBER_PREFIX}:${AGENT_SA}" \
         --role="${role}" \
         --condition=None \
         --quiet >/dev/null

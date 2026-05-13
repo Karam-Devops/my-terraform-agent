@@ -41,6 +41,10 @@ from importer.shell_runner import run_command
 
 from ..results import AlertEnvelope, EvidenceItem
 from . import _log_client
+# Reuse _log_client's Windows-aware gcloud binary path. Defined once
+# there so we don't drift between modules on the gcloud.cmd vs gcloud
+# distinction.
+from ._log_client import _GCLOUD_BIN
 
 
 _log = get_logger(__name__)
@@ -97,7 +101,7 @@ def _collect_cloud_build(
     # quotes. Quoting the value triggers a parse error on some gcloud
     # versions — keep it bare.
     cmd = [
-        "gcloud", "builds", "list",
+        _GCLOUD_BIN, "builds", "list",
         f"--project={project_id}",
         f"--filter=createTime>={start_iso} AND createTime<={end_iso}",
         f"--limit={_MAX_BUILDS}",

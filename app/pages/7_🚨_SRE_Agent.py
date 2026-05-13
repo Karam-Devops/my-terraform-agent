@@ -329,32 +329,56 @@ with st.container():
 # ---------------------------------------------------------------------------
 
 def _pull_alerts(*, subscription_id: str, max_messages: int = 10) -> int:
-    """Pull alerts from Pub/Sub into session_state. Returns count added."""
-    try:
-        envelopes = gcp_pubsub.list_pending_alerts(
-            project_id=project_id,
-            subscription_id=subscription_id,
-            max_messages=max_messages,
-        )
-    except PubSubUnavailable as e:
-        # Surface as a soft banner; don't blow up the page. The empty
-        # state below will render the "Load demo alert" path so the
-        # operator can still see the engine working.
-        st.session_state["sre_status_message"] = e.user_hint
-        return 0
-    except PreflightError as e:
-        st.session_state["sre_status_message"] = e.user_hint
-        return 0
+    """Pull alerts from Pub/Sub into session_state. Returns count added.
 
-    # De-dup against what's already queued (Pub/Sub may redeliver if
-    # the previous pull's ack didn't land in time). Keyed on alert_id.
+    Pub/Sub's ``pull`` returns whatever's *immediately leasable* —
+    often a fraction of what's actually in the subscription. To make
+    the "Pull now" button feel like "drain everything", we loop
+    client-side until a pull returns zero new messages or we hit a
+    safety cap. This is the standard pattern for batch-style drain
+    semantics on top of Pub/Sub's per-call best-effort delivery.
+    """
+    # Safety cap: prevents a misbehaving subscription (e.g., constant
+    # redelivery) from looping forever. 10 iterations × 10 messages =
+    # up to 100 alerts per click, comfortably above realistic burst.
+    _MAX_PULL_ITERATIONS = 10
+
     existing_ids = {a.alert_id for a in st.session_state["sre_alerts"]}
     added = 0
-    for env in envelopes:
-        if env.alert_id not in existing_ids:
-            st.session_state["sre_alerts"].append(env)
-            existing_ids.add(env.alert_id)
-            added += 1
+
+    for _ in range(_MAX_PULL_ITERATIONS):
+        try:
+            envelopes = gcp_pubsub.list_pending_alerts(
+                project_id=project_id,
+                subscription_id=subscription_id,
+                max_messages=max_messages,
+            )
+        except PubSubUnavailable as e:
+            st.session_state["sre_status_message"] = e.user_hint
+            return added
+        except PreflightError as e:
+            st.session_state["sre_status_message"] = e.user_hint
+            return added
+
+        if not envelopes:
+            # Empty pull = subscription is drained (or truly quiet). Stop.
+            break
+
+        added_this_round = 0
+        for env in envelopes:
+            if env.alert_id not in existing_ids:
+                st.session_state["sre_alerts"].append(env)
+                existing_ids.add(env.alert_id)
+                added += 1
+                added_this_round += 1
+
+        # If we got messages but they were all duplicates of what's
+        # already in the queue (Pub/Sub redelivery from a previous
+        # unacked lease), stop — looping would just keep getting the
+        # same duplicates.
+        if added_this_round == 0:
+            break
+
     st.session_state["sre_last_pull_at"] = time.time()
     st.session_state["sre_status_message"] = (
         f"Pulled {added} new alert(s)" if added else "No new alerts"
@@ -379,27 +403,19 @@ def _render_triage(
 
     # Alert header card with severity-tinted left border, summary, and
     # a quick-access link to the GCP Console (if the alert carried one).
+    # Single-line HTML for the same markdown-parser reason — see
+    # _render_hypothesis_card.
     console_url = alert.labels.get("console_url", "")
     st.markdown(
-        f"""
-        <div style="
-            border-left: 6px solid {color};
-            background-color: #1A1F2C;
-            border-radius: 8px;
-            padding: 14px 18px;
-            margin-bottom: 12px;
-        ">
-            <div style="font-size: 0.75em; color: {color}; font-weight: 700; letter-spacing: 0.5px;">
-                {alert.severity} · {alert.source} · fired at {alert.fired_at}
-            </div>
-            <div style="font-size: 1.2em; font-weight: 700; color: #E5E9F2; margin-top: 4px;">
-                {alert.policy_name}
-            </div>
-            <div style="color: #9aa0aa; margin-top: 6px;">
-                {alert.summary or '(no summary)'}
-            </div>
-        </div>
-        """,
+        f'<div style="border-left:6px solid {color};background-color:#1A1F2C;'
+        f'border-radius:8px;padding:12px 16px;margin-bottom:10px;">'
+        f'<div style="font-size:0.75em;color:{color};font-weight:700;'
+        f'letter-spacing:0.5px;">'
+        f'{alert.severity} · {alert.source} · fired at {alert.fired_at}</div>'
+        f'<div style="font-size:1.15em;font-weight:700;color:#E5E9F2;'
+        f'margin-top:4px;">{alert.policy_name}</div>'
+        f'<div style="color:#9aa0aa;margin-top:6px;line-height:1.4;">'
+        f'{alert.summary or "(no summary)"}</div></div>',
         unsafe_allow_html=True,
     )
 
@@ -466,22 +482,53 @@ def _render_triage(
     # ---- Hypothesis cards ----------------------------------------------
     st.markdown("### Probable causes")
     if not result.hypotheses:
-        # Day-1 stub path: explain why nothing's here yet. Removes the
-        # "did it break?" anxiety during the early-day demo.
-        st.info(
-            "Hypotheses will appear here once the correlator and ranker "
-            "land (Day 2/3). The engine is wired end-to-end already — "
-            "evidence sources just need to be plugged in.",
-            icon="🔬",
+        # Empty-hypotheses branch is reached when correlator.rank() short-
+        # circuits on empty evidence. Differentiate the real reasons so
+        # the operator knows whether to act (widen lookback) or wait (a
+        # collector failed and needs retry).
+        any_source_failed = any(
+            t.status == "failed" for t in result.source_timings
         )
+        if result.evidence_count == 0 and any_source_failed:
+            st.warning(
+                "No evidence collected because one or more sources failed. "
+                "Check the **Sources scanned** chips below for details, then "
+                "fix the underlying issue and click **↻ Re-run**.",
+                icon="⚠️",
+            )
+        elif result.evidence_count == 0:
+            st.info(
+                f"No changes found in `{result.project_id}` during the last "
+                f"{result.lookback_min} min. Widen the **Lookback window** "
+                "in the top bar, or generate test activity:\n\n"
+                "```\ngcloud compute networks update default \\\n"
+                f"    --update-labels=sre-demo=$(date +%s) \\\n"
+                f"    --project={result.project_id}\n```",
+                icon="🔍",
+            )
+        else:
+            # Evidence exists but ranker produced nothing — unusual; means
+            # every cluster scored below the correlator's minimum signal
+            # threshold. The full timeline below shows what was found so
+            # the operator can investigate manually.
+            st.info(
+                f"Collected {result.evidence_count} evidence items, but the "
+                "correlator didn't produce a ranked hypothesis. The full "
+                "timeline is below — review it directly.",
+                icon="🤷",
+            )
     else:
         for hyp in result.hypotheses:
             _render_hypothesis_card(hyp)
 
     # ---- Evidence timeline ---------------------------------------------
+    # Expanded by default — operators want to see the raw "what changed"
+    # immediately alongside the ranked hypotheses. The collapsed
+    # variant from Day-1 hid the most valuable Day-2/3 output below
+    # the fold.
     with st.expander(
         f"📜 Evidence timeline ({result.evidence_count} items)",
-        expanded=False,
+        expanded=True,
     ):
         if not result.evidence:
             st.caption("No evidence collected yet.")
@@ -643,18 +690,26 @@ def _render_triage(
 def _render_hypothesis_card(hyp: Hypothesis) -> None:
     """Render one hypothesis as a confidence-bar card with reasoning.
 
+    The HTML is assembled as a single-line string (no embedded newlines)
+    because Streamlit's markdown processor treats blank lines inside an
+    unsafe_allow_html block as paragraph breaks, which closes the
+    wrapping <div> early and renders the inner </div> tags as visible
+    text. Single-line emission sidesteps the markdown paragraph parser
+    entirely — same fix Streamlit's own components docs recommend for
+    multi-element HTML blocks.
+
     When a refine has run during this session, also shows a small ↑/↓
     delta beside the current confidence — operators see at a glance
     which hypotheses the LLM promoted vs demoted given their notes.
     """
     color = _CONF_COLORS.get(hyp.confidence, "#6b7280")
 
-    # Compute the refine-delta string + a rank-change indicator if a
-    # pre-refine snapshot exists for this hypothesis. Match by the
-    # first cited evidence_id — the most stable join key because the
-    # LLM may rewrite prose but rarely swaps primary citations.
+    # Compute the refine-delta chip if a pre-refine snapshot exists.
+    # Match by the first cited evidence_id — the most stable join key
+    # because the LLM may rewrite prose but rarely swaps primary
+    # citations.
     pre_map = st.session_state.get("sre_pre_refine_map") or {}
-    delta_chip_html = ""
+    delta_chip = ""
     if pre_map and hyp.cited_evidence:
         pre = pre_map.get(hyp.cited_evidence[0])
         if pre:
@@ -667,48 +722,40 @@ def _render_hypothesis_card(hyp: Hypothesis) -> None:
                     arrow_color, arrow = "#EF5350", "▼"
                 else:
                     arrow_color, arrow = "#9aa0aa", "●"
-                rank_text = ""
-                if rank_delta > 0:
-                    rank_text = f' · was #{pre["rank"]}'
-                elif rank_delta < 0:
-                    rank_text = f' · was #{pre["rank"]}'
-                delta_chip_html = (
-                    f'<div style="font-size:0.72em; color:{arrow_color}; '
-                    f'font-weight:600; margin-top:2px;">'
-                    f'{arrow} {pct_delta:+d}%{rank_text}'
-                    f'</div>'
+                rank_text = (
+                    f' · was #{pre["rank"]}' if rank_delta != 0 else ''
+                )
+                delta_chip = (
+                    f'<div style="font-size:0.72em;color:{arrow_color};'
+                    f'font-weight:600;margin-top:2px;">'
+                    f'{arrow} {pct_delta:+d}%{rank_text}</div>'
                 )
 
-    bar_html = f"""
-    <div style="background:#0E1117; border-radius:6px; height:8px; overflow:hidden; margin-top:6px;">
-        <div style="background:{color}; width:{hyp.confidence_pct}%; height:100%;"></div>
-    </div>
-    """
-    st.markdown(
-        f"""
-        <div style="
-            background:#1A1F2C;
-            border:1px solid #2A3142;
-            border-radius:8px;
-            padding:14px 16px;
-            margin-bottom:10px;
-        ">
-            <div style="display:flex; justify-content:space-between; align-items:baseline;">
-                <div style="font-weight:700; font-size:1.05em; color:#E5E9F2;">
-                    #{hyp.rank} · {hyp.headline}
-                </div>
-                <div style="text-align:right;">
-                    <div style="font-size:0.85em; color:{color}; font-weight:700;">
-                        {hyp.confidence} · {hyp.confidence_pct}%
-                    </div>
-                    {delta_chip_html}
-                </div>
-            </div>
-            {bar_html}
-        </div>
-        """,
-        unsafe_allow_html=True,
+    # Build the whole card as one line. Whitespace inside style="" is
+    # safe; whitespace BETWEEN tags is what triggers markdown's
+    # paragraph-break heuristic, so we strip those.
+    bar_html = (
+        f'<div style="background:#0E1117;border-radius:6px;height:6px;'
+        f'overflow:hidden;margin-top:6px;">'
+        f'<div style="background:{color};width:{hyp.confidence_pct}%;'
+        f'height:100%;"></div></div>'
     )
+    card_html = (
+        f'<div style="background:#1A1F2C;border:1px solid #2A3142;'
+        f'border-radius:8px;padding:10px 14px;margin-bottom:8px;">'
+        f'<div style="display:flex;justify-content:space-between;'
+        f'align-items:baseline;gap:12px;">'
+        f'<div style="font-weight:600;font-size:0.98em;color:#E5E9F2;'
+        f'line-height:1.35;">'
+        f'<span style="color:{color};margin-right:6px;">#{hyp.rank}</span>'
+        f'{hyp.headline}</div>'
+        f'<div style="text-align:right;white-space:nowrap;">'
+        f'<div style="font-size:0.8em;color:{color};font-weight:700;">'
+        f'{hyp.confidence} · {hyp.confidence_pct}%</div>'
+        f'{delta_chip}</div>'
+        f'</div>{bar_html}</div>'
+    )
+    st.markdown(card_html, unsafe_allow_html=True)
     if hyp.reasoning:
         with st.expander("Why this?", expanded=False):
             for bullet in hyp.reasoning:
@@ -740,27 +787,23 @@ def _render_source_chips(timings: List[SourceTiming]) -> None:
     for i, t in enumerate(timings):
         color = _SOURCE_STATUS_COLORS.get(t.status, "#6b7280")
         with cols[i]:
+            # Single-line HTML — see _render_hypothesis_card docstring
+            # for why multi-line breaks Streamlit's markdown parser.
+            err_html = (
+                f'<div style="font-size:0.75em;color:#9aa0aa;margin-top:4px;'
+                f'word-break:break-word;">{t.error}</div>' if t.error else ''
+            )
             st.markdown(
-                f"""
-                <div style="
-                    background:#1A1F2C;
-                    border:1px solid {color}80;
-                    border-left:4px solid {color};
-                    border-radius:6px;
-                    padding:10px 12px;
-                ">
-                    <div style="font-size:0.75em; color:{color}; font-weight:700; letter-spacing:0.5px;">
-                        {t.status.upper()}
-                    </div>
-                    <div style="font-weight:600; color:#E5E9F2; margin-top:2px;">
-                        {t.source}
-                    </div>
-                    <div style="font-size:0.8em; color:#9aa0aa; margin-top:2px;">
-                        {t.item_count} items · {t.duration_ms} ms
-                    </div>
-                    {f'<div style="font-size:0.75em; color:#9aa0aa; margin-top:4px;">{t.error}</div>' if t.error else ''}
-                </div>
-                """,
+                f'<div style="background:#1A1F2C;border:1px solid {color}80;'
+                f'border-left:4px solid {color};border-radius:6px;'
+                f'padding:10px 12px;">'
+                f'<div style="font-size:0.75em;color:{color};font-weight:700;'
+                f'letter-spacing:0.5px;">{t.status.upper()}</div>'
+                f'<div style="font-weight:600;color:#E5E9F2;margin-top:2px;">'
+                f'{t.source}</div>'
+                f'<div style="font-size:0.8em;color:#9aa0aa;margin-top:2px;">'
+                f'{t.item_count} items · {t.duration_ms} ms</div>'
+                f'{err_html}</div>',
                 unsafe_allow_html=True,
             )
 
@@ -815,6 +858,11 @@ ac1, ac2, ac3, ac4 = st.columns([1, 1, 1, 3])
 with ac1:
     if st.button("🔄 Pull now", type="primary", use_container_width=True):
         _pull_alerts(subscription_id=st.session_state["sre_subscription_id"])
+        # Force a rerun so the top-bar Queue metric (rendered ABOVE this
+        # button in the page flow) reflects the post-pull state in the
+        # same paint cycle. Without this, the metric shows the stale
+        # pre-click count until the next interaction triggers a rerun.
+        st.rerun()
 with ac2:
     if st.button("🧪 Load demo alert", use_container_width=True,
                  help="Drops a hand-crafted SEV2 alert into the queue. "
@@ -843,7 +891,24 @@ with ac3:
         st.session_state["sre_status_message"] = "Queue cleared"
 
 if st.session_state["sre_status_message"]:
-    st.caption(st.session_state["sre_status_message"])
+    # Render error-shaped messages as dismissable warnings (sticky
+    # captions look like documentation, not transient state). Success
+    # messages stay as quiet captions.
+    _msg = st.session_state["sre_status_message"]
+    _looks_like_error = any(
+        kw in _msg.lower() for kw in
+        ("not reachable", "failed", "error", "couldn't", "could not")
+    )
+    if _looks_like_error:
+        c_warn, c_dismiss = st.columns([10, 1])
+        with c_warn:
+            st.warning(_msg, icon="⚠️")
+        with c_dismiss:
+            if st.button("✕", key="sre_dismiss_status", help="Dismiss"):
+                st.session_state["sre_status_message"] = ""
+                st.rerun()
+    else:
+        st.caption(_msg)
 
 st.divider()
 
@@ -890,29 +955,18 @@ with queue_col:
                 f"2px solid {color}" if is_selected
                 else f"1px solid {color}55"
             )
+            # Single-line HTML (markdown-parser fix; see _render_hypothesis_card).
             st.markdown(
-                f"""
-                <div style="
-                    border-left: 4px solid {color};
-                    background-color: #1A1F2C;
-                    border-top: {border};
-                    border-right: {border};
-                    border-bottom: {border};
-                    border-radius: 6px;
-                    padding: 8px 12px;
-                    margin-bottom: 6px;
-                ">
-                    <div style="font-size: 0.75em; color: {color}; font-weight: 700; letter-spacing: 0.5px;">
-                        {env.severity} · {env.source}
-                    </div>
-                    <div style="font-weight: 600; font-size: 0.95em; color: #E5E9F2; margin-top: 2px;">
-                        {env.policy_name}
-                    </div>
-                    <div style="font-size: 0.8em; color: #9aa0aa; margin-top: 4px;">
-                        {env.fired_at}
-                    </div>
-                </div>
-                """,
+                f'<div style="border-left:4px solid {color};'
+                f'background-color:#1A1F2C;border-top:{border};'
+                f'border-right:{border};border-bottom:{border};'
+                f'border-radius:6px;padding:8px 12px;margin-bottom:6px;">'
+                f'<div style="font-size:0.75em;color:{color};font-weight:700;'
+                f'letter-spacing:0.5px;">{env.severity} · {env.source}</div>'
+                f'<div style="font-weight:600;font-size:0.92em;color:#E5E9F2;'
+                f'margin-top:2px;line-height:1.3;">{env.policy_name}</div>'
+                f'<div style="font-size:0.78em;color:#9aa0aa;margin-top:4px;">'
+                f'{env.fired_at}</div></div>',
                 unsafe_allow_html=True,
             )
             if st.button(
@@ -925,6 +979,9 @@ with queue_col:
                 st.session_state["sre_triage_result"] = None  # clear stale
                 st.session_state["sre_pre_refine_map"] = None
                 st.session_state["sre_refine_notes"] = ""
+                # Selecting an alert means we're past the pull step;
+                # any "Pub/Sub unreachable" message is stale info now.
+                st.session_state["sre_status_message"] = ""
 
 
 # --- Triage area (right column) -------------------------------------------
