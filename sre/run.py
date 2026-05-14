@@ -10,7 +10,7 @@ migrator.run.run_migration, detector.rescan.rescan, policy.scan.scan):
     SourceTiming(status="failed") in the result, not a raised
     exception — operators still see the partial picture.
 
-Streamlit page (``app/pages/7_🚨_SRE_Agent.py``) calls
+Streamlit page (``app/pages/7_🩺_SRE_Agent.py``) calls
 ``run_incident_triage()`` directly with an ``AlertEnvelope`` pulled
 from Cloud Monitoring → Pub/Sub. A CLI/cron path can do the same.
 

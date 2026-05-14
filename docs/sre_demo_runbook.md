@@ -141,7 +141,7 @@ in its `Local URL:` line.
 
 ## 9. Demo flow in browser (~3 min)
 
-1. Left nav → **🚨 SRE Agent**
+1. Left nav → **🩺 SRE Agent**
 2. Click **🔄 Pull now** → 3 alerts appear in the queue
 3. Click **Triage →** on the **SEV2 ALB 5xx** card
 4. Click **▶ Run triage** → wait ~5-10 sec → LLM-written hypothesis
@@ -211,7 +211,7 @@ In the Console:
 | LLM writer | `sre/llm/hypothesis_writer.py` | Operator-grade prose for top-N hypotheses |
 | LLM refine | `sre/llm/refine.py` | Re-rank with operator notes |
 | Persistence | `sre/output/result_persistence.py` | gs:// / file:// snapshot + per-user registry |
-| Streamlit page | `app/pages/7_🚨_SRE_Agent.py` | Operator UI |
+| Streamlit page | `app/pages/7_🩺_SRE_Agent.py` | Operator UI |
 | GCP setup | `scripts/sre_setup_gcp.sh` | Idempotent topic + sub + IAM bootstrap |
 | Demo seeder | `scripts/sre_seed_demo_alerts.py` | Publishes 3 canned scenarios |
 

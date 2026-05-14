@@ -1,4 +1,4 @@
-# app/pages/7_🚨_SRE_Agent.py
+# app/pages/7_🩺_SRE_Agent.py
 """SRE / Incident Response Agent page — Phase 8 Day 1.
 
 Enterprise-grade triage console with a deliberate 3-zone layout:
@@ -103,7 +103,7 @@ _SOURCE_STATUS_COLORS = {
 
 st.set_page_config(
     page_title="mtagent · SRE Agent",
-    page_icon="🚨",
+    page_icon="🩺",
     layout="wide",
 )
 apply_theme_polish()
@@ -114,7 +114,7 @@ tenant_id = resolve_tenant_id()
 # Title row with a single-line status caption. The auth banner goes in
 # a small caption so multi-tenant deployments make the operator's
 # identity visible without dominating the page.
-st.title("🚨 SRE / Incident Response Agent")
+st.title("🩺 SRE / Incident Response Agent")
 st.caption(
     "Triage incoming alerts in seconds. The agent pulls evidence from "
     "Cloud Asset, IAM audit logs, and Cloud Build, correlates it to the "
